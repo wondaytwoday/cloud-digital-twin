@@ -1,4 +1,4 @@
-import { ResourceSchema, type Resource, type Link, type Provider } from '../shared/schema';
+import { ResourceSchema, type Resource, type Link, type Provider } from '../shared/schema.js';
 type Raw = Record<string, any>;
 export type Normalized={resources:Resource[];links:Link[];warnings:string[]};
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});

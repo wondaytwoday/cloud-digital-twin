@@ -1,7 +1,7 @@
 import express from 'express';
 import {readFile} from 'node:fs/promises';
-import {mockSnapshot} from './mock';
-import {validateSnapshot,type Snapshot} from '../shared/schema';
+import {mockSnapshot} from './mock.js';
+import {validateSnapshot,type Snapshot} from '../shared/schema.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');

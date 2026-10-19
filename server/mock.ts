@@ -1,6 +1,6 @@
-import { azureFixture,awsFixture,gcpFixture } from './fixtures';
-import { normalizeAzure,normalizeAws,normalizeGcp } from './normalize';
-import { ResourceSchema, validateSnapshot, type Link } from '../shared/schema';
+import { azureFixture,awsFixture,gcpFixture } from './fixtures.js';
+import { normalizeAzure,normalizeAws,normalizeGcp } from './normalize.js';
+import { ResourceSchema, validateSnapshot, type Link } from '../shared/schema.js';
 export function mockSnapshot(){
   const normalized=[normalizeAzure(azureFixture),normalizeAws(awsFixture,'111122223333','ap-northeast-2'),normalizeGcp(gcpFixture)];
   const resources=normalized.flatMap(n=>n.resources),links=normalized.flatMap(n=>n.links);

@@ -1,4 +1,4 @@
-import { normalizeAzure,normalizeAws,normalizeGcp,type Normalized } from './normalize';
+import { normalizeAzure,normalizeAws,normalizeGcp,type Normalized } from './normalize.js';
 export const AZURE_TYPES=['microsoft.compute/virtualmachines','microsoft.network/networkinterfaces','microsoft.network/virtualnetworks','microsoft.network/networksecuritygroups','microsoft.network/expressroutecircuits','microsoft.network/virtualnetworkgateways','microsoft.network/connections'];
 export const GCP_TYPES=['Instance','Network','Subnetwork','Firewall','Router'].map(t=>`compute.googleapis.com/${t}`);
 // Injectable HTTP boundary permits contract tests without credentials or live calls.

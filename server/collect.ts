@@ -1,7 +1,7 @@
 import {parseArgs} from 'node:util';
 import {mkdir,readFile,writeFile,rename} from 'node:fs/promises';
-import {collectAzure,collectAws,collectGcp} from './collectors';
-import {validateSnapshot} from '../shared/schema';
+import {collectAzure,collectAws,collectGcp} from './collectors.js';
+import {validateSnapshot} from '../shared/schema.js';
 const {values}=parseArgs({options:{provider:{type:'string'},subscriptions:{type:'string'},regions:{type:'string'},parent:{type:'string'},help:{type:'boolean'}}});
 if(values.help){console.log('npm run collect -- --provider azure --subscriptions <id,id>\nnpm run collect -- --provider aws --regions ap-northeast-2\nnpm run collect -- --provider gcp --parent projects/<id>');process.exit(0);}
 try{
