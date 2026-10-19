@@ -1,0 +1,35 @@
+{
+  "name": "cloud-atlas-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "collect": "tsx server/collect.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ec2": "latest",
+    "@aws-sdk/client-sts": "latest",
+    "@azure/identity": "latest",
+    "google-auth-library": "^10.0.0",
+    "@xyflow/react": "latest",
+    "express": "^5.1.0",
+    "lucide-react": "latest",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "latest",
+    "tsx": "latest",
+    "typescript": "^5.9.0",
+    "vite": "latest"
+  }
+}

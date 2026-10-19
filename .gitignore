@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env*
+!.env.example
+data/*.json
+test-results/
+*.log
