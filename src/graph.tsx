@@ -1,42 +1,84 @@
 import {memo} from 'react';
-import {Handle,Position,BaseEdge,getSmoothStepPath,EdgeLabelRenderer,type EdgeProps,type NodeProps,type Node,type Edge} from '@xyflow/react';
-import {Server,ShieldCheck,Network,Router,Building2,Box,Waypoints} from 'lucide-react';
-import type {Resource,Snapshot,Link} from '../shared/schema';
-export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'Amazon Web Services',gcp:'Google Cloud',onprem:'On-premises'};
-export const icons={compute:Server,firewall:ShieldCheck,network:Network,subnet:Box,gateway:Router,onprem:Building2};
-export type ResourceNode=Node<{resource?:Resource;label?:string;provider:string;variant?:string;subtitle?:string},'resource'|'boundary'>;
-export const CloudNode=memo(function CloudNode({data,selected}:NodeProps<ResourceNode>){const r=data.resource!,Icon=icons[r.kind];return <div className={`resource-card ${r.provider} ${selected?'is-selected':''}`}><Handle type="target" position={Position.Top}/><div className="node-top"><span className="node-icon"><Icon size={19}/></span><span className="node-kind">{r.kind==='compute'?'COMPUTE':r.kind==='firewall'?'SECURITY POLICY':r.kind==='onprem'?'CORPORATE NETWORK':'CONNECTIVITY'}</span><span className="node-dot"/></div><strong>{r.name}</strong><div className="node-bottom"><span>{r.ip??r.cidr??(r.provider==='azure'?'Azure':r.provider==='aws'?'AWS':r.provider==='gcp'?'GCP':'Seoul')}</span><span>{r.kind==='compute'?r.specs['인스턴스']:r.kind==='firewall'?`${r.rules.length} rules`:r.region}</span></div><Handle type="source" position={Position.Bottom}/></div>});
-export const BoundaryNode=memo(function BoundaryNode({data,selected}:NodeProps<ResourceNode>){return <div className={`boundary ${data.variant} ${data.provider} ${selected?'is-selected':''}`}><Handle type="target" position={Position.Top}/><div className="boundary-title">{data.variant==='provider'?<span className={`provider-letter ${data.provider}`}>{data.provider==='azure'?'Az':data.provider==='aws'?'aws':'G'}</span>:<Network size={14}/>}<strong>{data.label??data.resource?.name}</strong>{data.variant!=='provider'&&<span>{data.resource?.cidr}</span>}</div>{data.subtitle&&<div className="boundary-subtitle">{data.subtitle}</div>}<Handle type="source" position={Position.Bottom}/></div>});
-export function TrafficEdge(props:EdgeProps<Edge<{link:Link;playing:boolean},'traffic'>>){const [path,x,y]=getSmoothStepPath({...props,borderRadius:16,offset:24});const {link,playing}=props.data!;const policy=link.kind==='policy',sim=link.kind==='simulation';return <><BaseEdge path={path} interactionWidth={20} style={{stroke:props.selected?'#0e7164':policy?'#a6a9b5':sim?'#179786':'#8d9ca8',strokeWidth:props.selected?3:sim?2:1.5,strokeDasharray:policy?'5 5':undefined,opacity:policy?.7:1}}/>{sim&&playing&&<path d={path} className="flow-packets"/>}{(props.selected||!policy)&&<EdgeLabelRenderer><div className={`edge-label nodrag nopan ${sim?'simulation':''}`} style={{transform:`translate(-50%,-50%) translate(${x}px,${y}px)`}}>{link.label}{props.selected&&link.ports&&<span> · {link.ports}</span>}</div></EdgeLabelRenderer>}</>}
-export function layout(snapshot:Snapshot,provider:string,scope:string,showPolicy:boolean,showFlow:boolean,playing:boolean,selected:string|null){
-  let resources=snapshot.resources.filter(r=>(provider==='all'||r.provider===provider||r.provider==='onprem')&&(scope==='all'||r.scope===scope||r.provider==='onprem'));
-  const nodes:ResourceNode[]=[],edges:Edge<{link:Link;playing:boolean},'traffic'>[]=[];let lane=0;
-  for(const p of ['azure','aws','gcp']){
-    const list=resources.filter(r=>r.provider===p);if(!list.length)continue;
-    const width=420,groupId=`group:${p}`,networks=list.filter(r=>r.kind==='network');
-    const loose=list.filter(r=>r.kind!=='network'&&r.kind!=='subnet'&&!r.parent);
-    const looseRows=Math.ceil(loose.length/2),networkStart=84+looseRows*132;
-    let netY=networkStart;
-    const inner:ResourceNode[]=[];
-    loose.forEach((r,i)=>inner.push({id:r.id,type:'resource',parentId:groupId,position:{x:22+(i%2)*196,y:78+Math.floor(i/2)*132},data:{resource:r,provider:p},selected:r.id===selected,style:{width:180},draggable:false}));
-    for(const net of networks){
-      const subnets=list.filter(r=>r.kind==='subnet'&&r.parent===net.id),direct=list.filter(r=>r.parent===net.id&&r.kind!=='subnet');
-      const directRows=Math.ceil(direct.length/2);let subY=55+directRows*130;
-      const netChildren:ResourceNode[]=[];
-      direct.forEach((r,i)=>netChildren.push({id:r.id,type:'resource',parentId:net.id,position:{x:14+(i%2)*184,y:55+Math.floor(i/2)*130},data:{resource:r,provider:p},selected:r.id===selected,style:{width:170},draggable:false}));
-      for(const sub of subnets){
-        const children=list.filter(r=>r.parent===sub.id),h=58+Math.max(1,Math.ceil(children.length/2))*128;
-        netChildren.push({id:sub.id,type:'boundary',parentId:net.id,position:{x:14,y:subY},data:{resource:sub,provider:p,variant:'subnet'},selected:sub.id===selected,style:{width:352,height:h},draggable:false});
-        children.forEach((r,i)=>netChildren.push({id:r.id,type:'resource',parentId:sub.id,position:{x:12+(i%2)*168,y:48+Math.floor(i/2)*128},data:{resource:r,provider:p},selected:r.id===selected,style:{width:158},draggable:false}));subY+=h+14;
-      }
-      const h=Math.max(160,subY+10);inner.push({id:net.id,type:'boundary',parentId:groupId,position:{x:20,y:netY},data:{resource:net,provider:p,variant:'network'},selected:net.id===selected,style:{width:380,height:h},draggable:false},...netChildren);netY+=h+22;
-    }
-    nodes.push({id:groupId,type:'boundary',position:{x:lane*470,y:180},data:{provider:p,variant:'provider',label:providerNames[p],subtitle:p==='azure'?'구독 · platform-prod':p==='aws'?'계정 · commerce-prod':'프로젝트 · analytics-prod'},style:{width,height:Math.max(250,netY)},selectable:false,draggable:false},...inner);
-    if(snapshot.mode==='live')nodes[nodes.length-inner.length-1].data.subtitle=`${new Set(list.map(r=>r.scope)).size}개 범위 · ${list.length}개 자원`;
-    lane++;
+import {Handle,Position,EdgeLabelRenderer,type EdgeProps,type NodeProps,type Node,type Edge} from '@xyflow/react';
+import {Server,ShieldCheck,Network,Router,Building2,Rows3,Flame,Split,Database,Boxes,ArrowLeftRight,CircleHelp,HardDrive,Globe2,ChevronDown,ChevronRight,AlertTriangle,CircleOff} from 'lucide-react';
+import type {Resource,ResourceKind} from '../shared/schema';
+import {health} from '../shared/topology';
+import {groupIcon,iconKey,providerLogo} from '../shared/iconKeys';
+import {iconUrl} from './icons';
+import type {Bundle,Placed} from './layout';
+export const icons:Record<ResourceKind,typeof Server>={compute:Server,firewall:ShieldCheck,appliance:Flame,network:Network,subnet:Rows3,gateway:Router,loadbalancer:Split,nat:ArrowLeftRight,database:Database,storage:HardDrive,cluster:Boxes,onprem:Building2,external:CircleHelp};
+export const kindNames:Record<ResourceKind,string>={compute:'VM',firewall:'보안 정책',appliance:'방화벽',network:'네트워크',subnet:'서브넷',gateway:'게이트웨이',loadbalancer:'로드밸런서',nat:'NAT',database:'데이터베이스',storage:'스토리지',cluster:'클러스터',onprem:'사내망',external:'외부 참조'};
+export const ProviderMark=({provider}:{provider:string})=>{const logo=iconUrl(providerLogo[provider]);return logo?<img className={`provider-logo ${provider}`} src={logo} alt="" aria-hidden="true"/>:<span className={`provider-mark ${provider}`} aria-hidden="true">{provider==='gcp'?'G':'DC'}</span>;};
+export function ResourceIcon({resource,size=28}:{resource:Pick<Resource,'type'|'specs'|'kind'>;size?:number}){
+  const url=iconUrl(iconKey(resource));if(url)return <img className="csp-icon" src={url} width={size} height={size} alt="" aria-hidden="true" draggable={false}/>;
+  const Glyph=icons[resource.kind];return <span className="glyph-icon" style={{width:size,height:size}}><Glyph size={Math.round(size*.58)}/></span>;
+}
+export type Emphasis='normal'|'dim'|'focus'|'path'|'impact'|'removed';
+export type NodeData=Placed&{emphasis:Emphasis;scopeLabel?:string;onToggle:(id:string)=>void};
+export type FlowNode=Node<NodeData,'resource'|'frame'|'summary'>;
+export function cardSubtitle(r:Resource){
+  const size=r.specs['인스턴스']?.replace('Standard_','');
+  if(r.kind==='compute')return [r.ip,size].filter(Boolean).join(' · ');
+  if(r.kind==='external')return '조회 권한 없음';
+  return r.ip??r.cidr??r.specs['종류']??r.type;
+}
+const Handles=()=><><Handle type="target" position={Position.Left} isConnectable={false}/><Handle type="source" position={Position.Right} isConnectable={false}/></>;
+export const ResourceNode=memo(function ResourceNode({data}:NodeProps<FlowNode>){
+  const r=data.item.resource!;
+  return <div className={`rc ${r.provider} kind-${r.kind} h-${health(r.status)} e-${data.emphasis}`} title={`${r.name} · ${r.status}`}><Handles/>
+    <ResourceIcon resource={r}/>
+    <span className="rc-body"><strong>{r.name}</strong><small className={r.ip||r.cidr?'mono':''}>{cardSubtitle(r)}</small></span>
+    <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
+  </div>;
+});
+const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3};
+function Title({data,open}:{data:NodeData;open:boolean}){
+  const it=data.item,Icon=it.variant&&variantIcon[it.variant],official=it.variant&&iconUrl(groupIcon[it.provider]?.[it.variant]);
+  return <div className="frame-title">
+    {data.expandable&&<button className="chevron nodrag" aria-label={`${it.label} ${open?'접기':'펼치기'}`} aria-expanded={open} onClick={e=>{e.stopPropagation();data.onToggle(data.id)}}>{open?<ChevronDown size={14}/>:<ChevronRight size={14}/>}</button>}
+    {it.variant==='provider'?<ProviderMark provider={it.provider}/>:it.resource?<ResourceIcon resource={it.resource} size={18}/>:official?<img className="csp-icon" src={official} width={18} height={18} alt="" aria-hidden="true" draggable={false}/>:Icon&&<Icon size={14} className="frame-icon"/>}
+    <strong title={it.label}>{it.label}</strong>
+    {data.hub&&<span className="pill hub">HUB</span>}
+    {it.outOfScope&&<span className="pill outside">범위 밖</span>}
+    {open&&it.variant!=='provider'&&it.subtitle&&<span className={it.resource?'mono frame-sub':'frame-sub'}>{it.subtitle}</span>}
+    {open&&data.scopeLabel&&<span className="pill scope" title="소유 범위. 네트워크 경계와 다를 수 있습니다.">{data.scopeLabel}</span>}
+  </div>;
+}
+export const FrameNode=memo(function FrameNode({data}:NodeProps<FlowNode>){
+  return <div className={`frame v-${data.item.variant} ${data.item.provider} e-${data.emphasis}`}><Handles/><Title data={data} open/></div>;
+});
+const summaryKinds:ResourceKind[]=['network','compute','cluster','database','storage','loadbalancer','appliance','gateway','nat','firewall','external'];
+export const SummaryNode=memo(function SummaryNode({data}:NodeProps<FlowNode>){
+  const s=data.summary,present=summaryKinds.filter(k=>s.counts[k]);
+  return <div className={`summary v-${data.item.variant} ${data.item.provider} e-${data.emphasis} ${data.item.outOfScope?'is-outside':''}`}><Handles/><Title data={data} open={false}/>
+    {data.item.variant!=='subnet'&&(data.item.subtitle||data.scopeLabel)&&<div className="summary-meta">{data.item.subtitle&&<span className={data.item.resource?'mono':''}>{data.item.subtitle}</span>}{data.scopeLabel&&<span className="pill scope" title="소유 범위. 네트워크 경계와 다를 수 있습니다.">{data.scopeLabel}</span>}</div>}
+    {data.item.variant!=='subnet'&&<div className="summary-counts">{present.map(k=>{const Icon=icons[k];return <span key={k} title={kindNames[k]}><Icon size={12}/>{s.counts[k]}</span>})}{!present.length&&<em>{data.item.outOfScope?'소유 범위 밖 · 경로 유지':'수집된 자원 없음'}</em>}</div>}
+    {data.item.variant==='subnet'&&<div className="summary-counts compact"><span className="mono">{data.item.subtitle}</span><span>{s.total?`자원 ${s.total}`:'비어 있음'}</span></div>}
+    {(s.stopped>0||s.warn>0)&&<div className="summary-alerts">{s.warn>0&&<span className="warn"><AlertTriangle size={10}/>{s.warn}</span>}{s.stopped>0&&<span className="stopped"><CircleOff size={10}/>{s.stopped}</span>}</div>}
+  </div>;
+});
+export type EdgeData={bundle:Bundle;emphasis:Emphasis;animate:boolean;showLabel:boolean};
+export type FlowEdge=Edge<EdgeData,'routed'>;
+function roundedPath(points:{x:number;y:number}[],radius=9){
+  if(points.length<2)return '';
+  let d=`M${points[0].x},${points[0].y}`;
+  for(let i=1;i<points.length-1;i++){
+    const p=points[i],a=points[i-1],b=points[i+1],la=Math.hypot(p.x-a.x,p.y-a.y),lb=Math.hypot(b.x-p.x,b.y-p.y),r=Math.min(radius,la/2,lb/2);
+    d+=` L${p.x+(a.x-p.x)/la*r},${p.y+(a.y-p.y)/la*r} Q${p.x},${p.y} ${p.x+(b.x-p.x)/lb*r},${p.y+(b.y-p.y)/lb*r}`;
   }
-  const onprem=resources.find(r=>r.kind==='onprem');if(onprem&&lane)nodes.unshift({id:onprem.id,type:'resource',position:{x:((lane-1)*470+420)/2-120,y:0},data:{provider:'onprem',resource:onprem},selected:selected===onprem.id,style:{width:240},draggable:false});
-  const ids=new Set(nodes.map(n=>n.id));
-  for(const link of snapshot.links){if(!ids.has(link.source)||!ids.has(link.target)||(!showPolicy&&link.kind==='policy')||(!showFlow&&link.kind==='simulation'))continue;edges.push({id:link.id,source:link.source,target:link.target,type:'traffic',data:{link,playing},selected:selected===link.id,zIndex:link.kind==='simulation'?5:1,focusable:true,ariaLabel:`${link.label} 연결 상세`});}
-  return{nodes,edges};
+  const last=points[points.length-1];return `${d} L${last.x},${last.y}`;
+}
+// Prefers the run into the target so labels fanning out of a hub do not stack. Only hybrid trunks sit in a gap wide enough for a label on a vertical run.
+function labelPoint(points:{x:number;y:number}[],label:string,allowVertical:boolean){
+  const need=label.length*7+18,run=(i:number)=>points[i+1].x-points[i].x,usable=(i:number)=>Math.abs(run(i))>=need||(allowVertical&&Math.abs(points[i+1].y-points[i].y)>=need);
+  let best=points.length-2;
+  if(!usable(best))for(let i=0;i<points.length-1;i++)if(usable(i)){best=i;break;}
+  return{x:(points[best].x+points[best+1].x)/2,y:(points[best].y+points[best+1].y)/2,fits:usable(best)};
+}
+export function RoutedEdge({id,data,selected}:EdgeProps<FlowEdge>){
+  const {bundle,emphasis,animate,showLabel}=data!;if(!bundle.points.length)return null;
+  const d=roundedPath(bundle.points),at=labelPoint(bundle.points,bundle.label,bundle.kind==='hybrid'),cls=`edge k-${bundle.kind} e-${emphasis} ${selected?'is-selected':''}`;
+  return <g className={cls}><path d={d} className="edge-hit" fill="none"/><path id={id} d={d} className="edge-line" fill="none" markerEnd={bundle.kind==='policy'?undefined:'url(#atlas-arrow)'}/>{animate&&<path d={d} className="edge-flow" fill="none"/>}
+    {((showLabel&&at.fits)||selected)&&<EdgeLabelRenderer><div className={`edge-label k-${bundle.kind} e-${emphasis}`} style={{transform:`translate(-50%,-50%) translate(${at.x}px,${at.y}px)`}}>{bundle.label}</div></EdgeLabelRenderer>}
+  </g>;
 }

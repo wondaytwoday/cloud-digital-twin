@@ -1,10 +1,12 @@
 import { z } from 'zod';
 export const Provider = z.enum(['azure', 'aws', 'gcp', 'onprem']);
 export type Provider = z.infer<typeof Provider>;
+export const ResourceKind = z.enum(['network','subnet','compute','firewall','appliance','gateway','loadbalancer','nat','database','storage','cluster','onprem','external']);
+export type ResourceKind = z.infer<typeof ResourceKind>;
 export const ResourceSchema = z.object({
   id: z.string(), nativeId: z.string(), name: z.string(), provider: Provider,
-  kind: z.enum(['network','subnet','compute','firewall','gateway','onprem']),
-  type: z.string(), scope: z.string(), region: z.string(), parent: z.string().optional(),
+  kind: ResourceKind,
+  type: z.string(), scope: z.string(), group: z.string().optional(), region: z.string(), parent: z.string().optional(),
   status: z.string().default('구성 수집됨'), ip: z.string().optional(), cidr: z.string().optional(),
   specs: z.record(z.string(), z.string()).default({}),
   rules: z.array(z.object({direction:z.string(),action:z.string(),protocol:z.string(),ports:z.string(),source:z.string(),destination:z.string(),priority:z.string()})).default([]),
@@ -15,7 +17,11 @@ export const ResourceSchema = z.object({
 export type Resource = z.infer<typeof ResourceSchema>;
 export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.string(),kind:z.enum(['attachment','policy','peering','simulation']),label:z.string(), evidence:z.string(),protocol:z.string().optional(),ports:z.string().optional(),rate:z.string().optional()});
 export type Link = z.infer<typeof LinkSchema>;
-export const SnapshotSchema = z.object({version:z.literal(1),mode:z.enum(['mock','live']),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string())});
+export const ConnectionSchema = z.object({provider:Provider,status:z.enum(['demo','collected','missing']),api:z.string(),scopes:z.number(),collectedAt:z.string().optional()});
+export type Connection = z.infer<typeof ConnectionSchema>;
+export const HierarchyNodeSchema = z.object({id:z.string(),parent:z.string().optional(),name:z.string(),provider:Provider,kind:z.enum(['tenant','managementGroup','subscription','organization','ou','account','folder','project']),nativeId:z.string(),scope:z.string().optional()});
+export type HierarchyNode = z.infer<typeof HierarchyNodeSchema>;
+export const SnapshotSchema = z.object({version:z.literal(1),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([])});
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export function validateSnapshot(input: unknown): Snapshot {
   const s=SnapshotSchema.parse(input), ids=new Set(s.resources.map(r=>r.id));
@@ -23,6 +29,8 @@ export function validateSnapshot(input: unknown): Snapshot {
   for(const r of s.resources) if(r.parent&&!ids.has(r.parent)) throw new Error(`Missing parent: ${r.parent}`);
   const edgeIds=new Set<string>();
   for(const e of s.links){if(edgeIds.has(e.id))throw new Error('Duplicate link ID');edgeIds.add(e.id);if(!ids.has(e.source)||!ids.has(e.target))throw new Error(`Unresolved link: ${e.id}`);}
+  const nodes=new Set(s.hierarchy.map(n=>n.id));
+  for(const n of s.hierarchy)if(n.parent&&!nodes.has(n.parent))throw new Error(`Missing hierarchy parent: ${n.parent}`);
   if(s.mode==='live'&&(s.links.some(e=>e.kind==='simulation')||s.resources.some(r=>r.metrics||r.iam.length)))throw new Error('Live collector must not include synthetic telemetry or IAM');
   return s;
 }
