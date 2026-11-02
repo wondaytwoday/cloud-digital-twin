@@ -7,7 +7,8 @@ export const ResourceSchema = z.object({
   id: z.string(), nativeId: z.string(), name: z.string(), provider: Provider,
   kind: ResourceKind,
   type: z.string(), scope: z.string(), group: z.string().optional(), region: z.string(), parent: z.string().optional(),
-  status: z.string().default('구성 수집됨'), ip: z.string().optional(), cidr: z.string().optional(),
+  status: z.string().default('구성 수집됨'), ip: z.string().optional(), publicIp: z.string().optional(), cidr: z.string().optional(),
+  routes: z.array(z.object({destination:z.string(),nextHop:z.string(),via:z.string()})).default([]),
   specs: z.record(z.string(), z.string()).default({}),
   rules: z.array(z.object({direction:z.string(),action:z.string(),protocol:z.string(),ports:z.string(),source:z.string(),destination:z.string(),priority:z.string()})).default([]),
   iam: z.array(z.object({principal:z.string(),role:z.string(),scope:z.string()})).default([]),
@@ -15,13 +16,15 @@ export const ResourceSchema = z.object({
   metrics: z.object({cpu:z.number(),memory:z.number(),history:z.array(z.number())}).optional(),
 });
 export type Resource = z.infer<typeof ResourceSchema>;
-export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.string(),kind:z.enum(['attachment','policy','peering','simulation']),label:z.string(), evidence:z.string(),protocol:z.string().optional(),ports:z.string().optional(),rate:z.string().optional()});
+export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.string(),kind:z.enum(['attachment','policy','peering','route','simulation']),transit:z.boolean().optional(),label:z.string(), evidence:z.string(),protocol:z.string().optional(),ports:z.string().optional(),rate:z.string().optional()});
 export type Link = z.infer<typeof LinkSchema>;
 export const ConnectionSchema = z.object({provider:Provider,status:z.enum(['demo','collected','missing']),api:z.string(),scopes:z.number(),collectedAt:z.string().optional()});
 export type Connection = z.infer<typeof ConnectionSchema>;
 export const HierarchyNodeSchema = z.object({id:z.string(),parent:z.string().optional(),name:z.string(),provider:Provider,kind:z.enum(['tenant','managementGroup','subscription','organization','ou','account','folder','project']),nativeId:z.string(),scope:z.string().optional()});
 export type HierarchyNode = z.infer<typeof HierarchyNodeSchema>;
-export const SnapshotSchema = z.object({version:z.literal(1),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([])});
+export const ChangeSchema = z.object({kind:z.enum(['added','removed','changed']),id:z.string(),name:z.string(),provider:Provider,scope:z.string(),detail:z.string()});
+export type Change = z.infer<typeof ChangeSchema>;
+export const SnapshotSchema = z.object({version:z.literal(1),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([]),changes:z.object({since:z.string(),items:z.array(ChangeSchema)}).optional()});
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export function validateSnapshot(input: unknown): Snapshot {
   const s=SnapshotSchema.parse(input), ids=new Set(s.resources.map(r=>r.id));

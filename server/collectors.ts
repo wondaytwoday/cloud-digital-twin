@@ -1,7 +1,7 @@
 import { finish,normalizeAzure,normalizeAws,normalizeGcp,scopeNodeId,type Normalized } from './normalize.js';
 import type { HierarchyNode } from '../shared/schema.js';
-export const AZURE_TYPES=['microsoft.compute/virtualmachines','microsoft.network/networkinterfaces','microsoft.network/virtualnetworks','microsoft.network/networksecuritygroups','microsoft.network/expressroutecircuits','microsoft.network/virtualnetworkgateways','microsoft.network/connections','microsoft.network/azurefirewalls','microsoft.network/loadbalancers','microsoft.network/natgateways','microsoft.network/privateendpoints','microsoft.network/applicationgateways','microsoft.network/bastionhosts','microsoft.containerservice/managedclusters','microsoft.sql/servers','microsoft.cache/redis','microsoft.documentdb/databaseaccounts','microsoft.storage/storageaccounts'];
-export const GCP_TYPES=[...['Instance','Network','Subnetwork','Firewall','Router','InterconnectAttachment','VpnTunnel','ForwardingRule'].map(t=>`compute.googleapis.com/${t}`),'container.googleapis.com/Cluster','sqladmin.googleapis.com/Instance','redis.googleapis.com/Instance'];
+export const AZURE_TYPES=['microsoft.compute/virtualmachines','microsoft.network/networkinterfaces','microsoft.network/virtualnetworks','microsoft.network/networksecuritygroups','microsoft.network/expressroutecircuits','microsoft.network/virtualnetworkgateways','microsoft.network/connections','microsoft.network/azurefirewalls','microsoft.network/loadbalancers','microsoft.network/natgateways','microsoft.network/privateendpoints','microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/applicationgateways','microsoft.network/bastionhosts','microsoft.containerservice/managedclusters','microsoft.sql/servers','microsoft.cache/redis','microsoft.documentdb/databaseaccounts','microsoft.storage/storageaccounts'];
+export const GCP_TYPES=[...['Instance','Network','Subnetwork','Firewall','Router','InterconnectAttachment','VpnTunnel','ForwardingRule','Route'].map(t=>`compute.googleapis.com/${t}`),'container.googleapis.com/Cluster','sqladmin.googleapis.com/Instance','redis.googleapis.com/Instance'];
 // Injectable HTTP boundary permits contract tests and the demo mode without credentials or live calls.
 export async function azurePages(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch){
   const rows:Record<string,any>[]=[],seen=new Set<string>();let next:string|undefined;
@@ -21,9 +21,10 @@ export async function azurePages(subscriptions:string[],token:()=>Promise<string
   return rows;
 }
 // Requires Microsoft.Management/managementGroups/read at the tenant root; without it the tree degrades to flat subscriptions.
-async function azureHierarchy(token:()=>Promise<string>,request:typeof fetch){
+async function azureHierarchy(token:()=>Promise<string>,request:typeof fetch,tenantId?:string){
   const get=async(url:string)=>{const r=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();};
-  const tenant=(await get('https://management.azure.com/tenants?api-version=2022-12-01')).value?.[0];if(!tenant)throw new Error('tenant 없음');
+  // A credential can see many tenants; the root must be the one that owns the collected subscriptions.
+  const tenants:any[]=(await get('https://management.azure.com/tenants?api-version=2022-12-01')).value??[],tenant=tenants.find(t=>t.tenantId===tenantId)??(tenantId?undefined:tenants[0]);if(!tenant)throw new Error('구독의 테넌트를 찾지 못함');
   const root=await get(`https://management.azure.com/providers/Microsoft.Management/managementGroups/${tenant.tenantId}?api-version=2021-04-01&$expand=children&$recurse=true`);
   const rootId=`azure:mg:${tenant.tenantId}`,nodes:HierarchyNode[]=[{id:rootId,name:tenant.displayName??root.properties?.displayName??'Tenant Root Group',provider:'azure',kind:'tenant',nativeId:tenant.tenantId}];
   const walk=(children:any[]|undefined,parent:string)=>{for(const c of children??[]){
@@ -35,10 +36,11 @@ async function azureHierarchy(token:()=>Promise<string>,request:typeof fetch){
 }
 export async function collectAzureWith(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch):Promise<Normalized>{
   // Explicit scope checks prevent ARG silently succeeding with only some subscriptions.
-  const labels:Record<string,string>={};
-  for(const sub of subscriptions){const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok)throw new Error(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status})`);labels[sub]=(await r.json()).displayName??sub;}
+  const labels:Record<string,string>={},tenantIds=new Set<string>();
+  for(const sub of subscriptions){const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok)throw new Error(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status})`);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
   const part=normalizeAzure(await azurePages(subscriptions,token,request),labels);
-  try{part.hierarchy=await azureHierarchy(token,request);}catch(e){part.warnings.push(`Azure: 관리 그룹을 읽지 못해 구독을 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
+  if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);
+  try{part.hierarchy=await azureHierarchy(token,request,[...tenantIds][0]);}catch(e){part.warnings.push(`Azure: 관리 그룹을 읽지 못해 구독을 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
   const result=finish([part]);result.warnings.push('Azure: 보이는 지원 자원만 수집. 구독 내부 리소스별 접근 제한과 Resource Graph 반영 지연은 별도 확인 필요.');return result;
 }
 export async function collectAzure(subscriptions:string[]):Promise<Normalized>{
@@ -54,7 +56,7 @@ async function awsPages(call:AwsCaller,service:AwsService,operation:string,key:s
 }
 export async function collectAwsAccount(call:AwsCaller,account:string,region:string,label?:string):Promise<Normalized>{
   const data:Record<string,any[]>={},paged={MaxResults:100};
-  for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections']] as const)data[key]=await awsPages(call,'ec2',operation,key,paged);
+  for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables']] as const)data[key]=await awsPages(call,'ec2',operation,key,paged);
   // These two operations take no MaxResults and return everything at once.
   data.VpnGateways=(await call('ec2','DescribeVpnGateways')).VpnGateways??[];
   data.VpnConnections=(await call('ec2','DescribeVpnConnections')).VpnConnections??[];

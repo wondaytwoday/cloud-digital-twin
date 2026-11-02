@@ -5,7 +5,7 @@ export const singleVm:Scenario={aws:[{account:'123456789012',label:'my-account',
   DescribeVpcs:{Vpcs:[{VpcId:'vpc-main',CidrBlock:'10.0.0.0/16',Tags:tag('vpc-main')}]},
   DescribeSubnets:{Subnets:[awsSubnet('subnet-public','public-a','vpc-main','10.0.1.0/24','ap-northeast-2a',true)]},
   DescribeInternetGateways:{InternetGateways:[{InternetGatewayId:'igw-main',Attachments:[{VpcId:'vpc-main',State:'available'}],Tags:tag('igw-main')}]},
-  DescribeInstances:{Reservations:[{Instances:[ec2('i-web','web-server','t3.medium','subnet-public','10.0.1.10','sg-web')]}]},
+  DescribeInstances:{Reservations:[{Instances:[{...ec2('i-web','web-server','t3.medium','subnet-public','10.0.1.10','sg-web'),PublicIpAddress:'203.0.113.10'}]}]},
   DescribeSecurityGroups:{SecurityGroups:[securityGroup('sg-web','vpc-main',[sgRule(443,'0.0.0.0/0')])]},
   DescribeInstanceTypes:{InstanceTypes:instanceTypes},
 }}]};

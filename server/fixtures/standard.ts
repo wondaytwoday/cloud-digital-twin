@@ -1,11 +1,11 @@
-import {asset,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId} from './builders.js';
+import {asset,awsRouteTable,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,publicIp,routeTable,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
 import type {Scenario} from './types.js';
 const connectivity='00000000-0000-4000-8000-000000000001',platform='00000000-0000-4000-8000-000000000002',data='00000000-0000-4000-8000-000000000003',dev='00000000-0000-4000-8000-000000000004',partner='00000000-0000-4000-8000-000000000099';
 const hub=vnetId(connectivity,'rg-network-hub','vnet-hub'),spokes={platform:vnetId(platform,'rg-platform','vnet-platform-prod'),data:vnetId(data,'rg-data','vnet-data-prod'),dev:vnetId(dev,'rg-dev','vnet-dev')};
 const hostProject='atlas-net-host',appProject='atlas-analytics-prod',sandboxProject='atlas-sandbox',R='asia-northeast3';
 const sharedVpc=`${compute(hostProject)}/global/networks/vpc-shared`,sandboxVpc=`${compute(sandboxProject)}/global/networks/vpc-sandbox`,hostSubnet=(n:string)=>gcpSubnetName(hostProject,R,n);
 export const standard:Scenario={
-  azure:{subscriptions:{[connectivity]:'Connectivity Hub',[platform]:'Platform Prod',[data]:'Data Prod',[dev]:'Dev / Test'},tree:{id:'tenant-atlas',name:'Atlas Corp 테넌트',children:[{id:'mg-platform',name:'Platform',children:[{id:connectivity,name:'Connectivity Hub',scope:connectivity}]},{id:'mg-landingzones',name:'Landing Zones',children:[{id:platform,name:'Platform Prod',scope:platform},{id:data,name:'Data Prod',scope:data}]},{id:'mg-sandbox',name:'Sandbox',children:[{id:dev,name:'Dev / Test',scope:dev}]}]},rows:[
+  azure:{subscriptions:{[connectivity]:'Connectivity Hub',[platform]:'Platform Prod',[data]:'Data Prod',[dev]:'Dev / Test'},tree:{id:'tenant-atlas',name:'Atlas Corp 테넌트',children:[{id:'mg-platform',name:'Platform',children:[{id:connectivity,name:'Connectivity Hub',scope:connectivity}]},{id:'mg-landingzones',name:'Landing Zones',children:[{id:platform,name:'Platform Prod',scope:platform},{id:data,name:'Data Prod',scope:data}]},{id:'mg-sandbox',name:'Sandbox',children:[{id:dev,name:'Dev / Test',scope:dev}]}]},rows:withPublicIp([
     vnet(connectivity,'rg-network-hub','vnet-hub','10.0.0.0/16',[['GatewaySubnet','10.0.0.0/27'],['AzureFirewallSubnet','10.0.1.0/26'],['shared-services','10.0.2.0/24','nsg-shared']],[[spokes.platform,{allowGatewayTransit:true}],[spokes.data,{allowGatewayTransit:true}],[spokes.dev,{allowGatewayTransit:true}],[vnetId(partner,'rg-partner','vnet-partner-erp'),{}]]),
     nsg(connectivity,'rg-network-hub','nsg-shared',[['AllowBastionSSH','Inbound','Allow','Tcp','22','10.0.0.0/8',110],...standardRules]),
     azRow(connectivity,'rg-network-hub','Network/expressRouteCircuits','er-seoul-01',{provisioningState:'Succeeded',serviceProviderProperties:{bandwidthInMbps:1000,serviceProviderName:'Demo carrier',peeringLocation:'Seoul'}}),
@@ -28,7 +28,10 @@ export const standard:Scenario={
     vnet(dev,'rg-dev','vnet-dev','10.12.0.0/16',[['dev','10.12.1.0/24','nsg-dev']],[[hub,{useRemoteGateways:true}]]),
     nsg(dev,'rg-dev','nsg-dev',[['AllowAnySSH','Inbound','Allow','Tcp','22','0.0.0.0/0',100]]),
     ...vm(dev,'rg-dev','vnet-dev','dev','dev-sandbox-01','10.12.1.10','Standard_B2s','deallocated'),
-  ]},
+    publicIp(dev,'rg-dev','pip-dev-sandbox','203.0.113.20'),
+    routeTable(platform,'rg-platform','rt-platform',['web','app','data'].map(n=>subnetId(platform,'rg-platform','vnet-platform-prod',n)),[['0.0.0.0/0','VirtualAppliance','10.0.1.4']]),
+    routeTable(data,'rg-data','rt-data',['etl','warehouse'].map(n=>subnetId(data,'rg-data','vnet-data-prod',n)),[['0.0.0.0/0','VirtualAppliance','10.0.1.4']]),
+  ],'dev-sandbox-01',dev,'rg-dev','pip-dev-sandbox')},
   aws:[
     {account:'111122223333',label:'network-core',region:'ap-northeast-2',api:{
       DescribeVpcs:{Vpcs:[{VpcId:'vpc-transit',CidrBlock:'10.20.0.0/16',Tags:tag('vpc-transit')}]},
@@ -44,6 +47,7 @@ export const standard:Scenario={
       DescribeSecurityGroups:{SecurityGroups:[securityGroup('sg-alb','vpc-commerce',[sgRule(443,'0.0.0.0/0')]),securityGroup('sg-app','vpc-commerce',[sgRule(8443,'10.21.0.0/24'),sgRule(443,'10.0.0.0/8')]),securityGroup('sg-db','vpc-commerce',[sgRule(5432,'10.21.1.0/24')],[])]},
       DescribeInternetGateways:{InternetGateways:[{InternetGatewayId:'igw-commerce',Attachments:[{VpcId:'vpc-commerce',State:'available'}],Tags:tag('igw-commerce')}]},
       DescribeNatGateways:{NatGateways:[{NatGatewayId:'nat-commerce',SubnetId:'subnet-public-a',State:'available',ConnectivityType:'public',NatGatewayAddresses:[{PrivateIp:'10.21.0.9'}],Tags:tag('nat-commerce')}]},
+      DescribeRouteTables:{RouteTables:[awsRouteTable(['subnet-public-a'],[{DestinationCidrBlock:'0.0.0.0/0',GatewayId:'igw-commerce'}],'vpc-commerce'),awsRouteTable(['subnet-app-a','subnet-app-c','subnet-data-a'],[{DestinationCidrBlock:'0.0.0.0/0',NatGatewayId:'nat-commerce'},{DestinationCidrBlock:'10.0.0.0/8',TransitGatewayId:'tgw-core'}],'vpc-commerce')]},
       DescribeInstanceTypes:{InstanceTypes:instanceTypes},
       DescribeLoadBalancers:{LoadBalancers:[{LoadBalancerArn:'arn:aws:elasticloadbalancing:ap-northeast-2:444455556666:loadbalancer/app/alb-checkout/1',LoadBalancerName:'alb-checkout',Type:'application',Scheme:'internet-facing',State:{Code:'active'},AvailabilityZones:[{SubnetId:'subnet-public-a'}]}]},
       DescribeTargetGroups:{TargetGroups:[{TargetGroupArn:'arn:aws:elasticloadbalancing:ap-northeast-2:444455556666:targetgroup/tg-checkout/1',TargetType:'instance'}]},
@@ -60,8 +64,9 @@ export const standard:Scenario={
   ],
   awsOrg:{id:'o-atlas',name:'Atlas Org',children:[{id:'ou-infra',name:'Infrastructure',children:[{id:'111122223333',name:'network-core',scope:'111122223333'}]},{id:'ou-workloads',name:'Workloads',children:[{id:'444455556666',name:'commerce-prod',scope:'444455556666'},{id:'777788889999',name:'commerce-dev',scope:'777788889999'}]}]},
   gcp:{parent:'organizations/000000000000',tree:{id:'000000000000',name:'atlas.example',children:[{id:'100',name:'Shared Infra',children:[{id:hostProject,name:'atlas-net-host',scope:hostProject}]},{id:'200',name:'Production',children:[{id:appProject,name:'atlas-analytics-prod',scope:appProject}]},{id:'300',name:'Sandbox',children:[{id:sandboxProject,name:'atlas-sandbox',scope:sandboxProject}]}]},assets:[
-    asset('compute.googleapis.com/Network',sharedVpc,{name:'vpc-shared',routingConfig:{routingMode:'GLOBAL'},peerings:[{name:'to-sandbox',network:sandboxVpc,state:'ACTIVE'}]},'global'),
+    asset('compute.googleapis.com/Network',sharedVpc,{name:'vpc-shared',routingConfig:{routingMode:'GLOBAL'},peerings:[{name:'to-sandbox',network:sandboxVpc,state:'ACTIVE',exportCustomRoutes:true}]},'global'),
     ...(['gke-seoul','apps-seoul','data-seoul'] as const).map((n,i)=>asset('compute.googleapis.com/Subnetwork',hostSubnet(n),{name:n,network:sharedVpc,ipCidrRange:`10.30.${i+1}.0/24`})),
+    asset('compute.googleapis.com/Route',`${compute(hostProject)}/global/routes/default-internet`,{network:sharedVpc,destRange:'0.0.0.0/0',nextHopGateway:`${compute(hostProject)}/global/gateways/default-internet-gateway`},'global'),
     asset('compute.googleapis.com/Router',`${compute(hostProject)}/regions/${R}/routers/router-seoul`,{name:'router-seoul',network:sharedVpc,bgp:{asn:64514}}),
     asset('compute.googleapis.com/InterconnectAttachment',`${compute(hostProject)}/regions/${R}/interconnectAttachments/ic-seoul-1`,{name:'ic-seoul-1',state:'ACTIVE',type:'PARTNER',bandwidth:'BPS_500M',router:`${compute(hostProject)}/regions/${R}/routers/router-seoul`}),
     asset('compute.googleapis.com/Firewall',`${compute(hostProject)}/global/firewalls/fw-allow-internal`,{name:'fw-allow-internal',network:sharedVpc,direction:'INGRESS',priority:1000,allowed:[{IPProtocol:'tcp',ports:['443','5432']}],sourceRanges:['10.0.0.0/8'],targetTags:['analytics']}),
@@ -72,7 +77,7 @@ export const standard:Scenario={
     gce(appProject,sharedVpc,hostSubnet('data-seoul'),'inference-gpu-01','10.30.3.30','n1-standard-4','RUNNING',{guestAccelerators:[{acceleratorCount:1,acceleratorType:'zones/asia-northeast3-a/acceleratorTypes/nvidia-tesla-t4'}]}),
     asset('container.googleapis.com/Cluster',`//container.googleapis.com/projects/${appProject}/locations/${R}/clusters/gke-analytics`,{name:'gke-analytics',status:'RUNNING',currentMasterVersion:'1.33.1-gke.100',currentNodeCount:9,networkConfig:{subnetwork:`projects/${hostProject}/regions/${R}/subnetworks/gke-seoul`}}),
     asset('sqladmin.googleapis.com/Instance',`//sqladmin.googleapis.com/projects/${appProject}/instances/sql-analytics`,{name:'sql-analytics',state:'RUNNABLE',databaseVersion:'POSTGRES_16',ipAddresses:[{ipAddress:'10.30.9.3'}],settings:{tier:'db-custom-4-16384',ipConfiguration:{privateNetwork:`/projects/${hostProject}/global/networks/vpc-shared`}}}),
-    asset('compute.googleapis.com/Network',sandboxVpc,{name:'vpc-sandbox',routingConfig:{routingMode:'REGIONAL'},peerings:[{name:'to-shared',network:sharedVpc,state:'ACTIVE'}]},'global'),
+    asset('compute.googleapis.com/Network',sandboxVpc,{name:'vpc-sandbox',routingConfig:{routingMode:'REGIONAL'},peerings:[{name:'to-shared',network:sharedVpc,state:'ACTIVE',importCustomRoutes:true}]},'global'),
     asset('compute.googleapis.com/Subnetwork',gcpSubnetName(sandboxProject,R,'sandbox'),{name:'sandbox',network:sandboxVpc,ipCidrRange:'10.31.1.0/24'}),
     gce(sandboxProject,sandboxVpc,gcpSubnetName(sandboxProject,R,'sandbox'),'sandbox-01','10.31.1.10','e2-medium','TERMINATED'),
   ]},

@@ -2,6 +2,8 @@ import { fixtures } from './fixtures/index.js';
 import type { OrgTree, Scenario } from './fixtures/types.js';
 import { awsHierarchy,collectAzureWith,collectAwsAccount,collectGcpWith,type AwsCaller } from './collectors.js';
 import { finish,type Normalized } from './normalize.js';
+import { applySites } from './onprem.js';
+import { diffResources } from '../shared/diff.js';
 import { ResourceSchema, validateSnapshot, type Connection, type Link, type Resource } from '../shared/schema.js';
 import type { ScenarioId } from '../shared/scenarios.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
@@ -15,7 +17,7 @@ const azureTransport=(rows:any[],names:Record<string,string>,tree?:OrgTree):type
     return json({name:tree!.id,properties:{displayName:tree!.name,children:tree!.children?.map(child)}});
   }
   if(target.includes('Microsoft.ResourceGraph')){const offset=Number(JSON.parse(String(init?.body)).options.$skipToken??0),end=offset+PAGE;return json({data:rows.slice(offset,end),...(end<rows.length?{$skipToken:String(end)}:{})});}
-  const sub=target.match(/subscriptions\/([^?]+)/)?.[1]??'';return json({subscriptionId:sub,displayName:names[sub]});
+  const sub=target.match(/subscriptions\/([^?]+)/)?.[1]??'';return json({subscriptionId:sub,displayName:names[sub],tenantId:tree?.id});
 };
 const awsTransport=(api:Record<string,any>):AwsCaller=>async(_service,operation,input={})=>{
   const response=api[operation]??{},key=Object.keys(response)[0];if(!key||!input.MaxResults)return response;
@@ -50,11 +52,7 @@ async function collectScenario(s:Scenario){
 export async function mockSnapshot(id:ScenarioId='standard'){
   const scenario=fixtures[id],{resources,links,warnings,scopeLabels,hierarchy}=await collectScenario(scenario);
   const named=(name:string)=>{const r=resources.find(x=>x.name===name);if(!r)throw new Error(`Fixture ${id}: unknown resource ${name}`);return r;};
-  for(const site of scenario.onprem??[]){
-    const dc=ResourceSchema.parse({id:`onprem:${site.id}`,nativeId:`manual/onprem/${site.id}`,name:site.name,provider:'onprem',kind:'onprem',type:'Corporate network',scope:'corporate',region:site.region,cidr:site.cidr,status:'수동 등록',specs:{'네트워크':'사내망 · 수동 등록'},source:'수동 등록 경계'});
-    resources.unshift(dc);scopeLabels.corporate='사내망';
-    for(const c of site.connects)links.push({id:`attachment:${dc.id}:${named(c.name).id}`,source:dc.id,target:named(c.name).id,kind:'attachment',label:c.label,evidence:'수동 등록 — CSP API만으로 사내망 쪽을 복원할 수 없습니다.'});
-  }
+  applySites(scenario.onprem??[],resources,links,warnings,scopeLabels);
   addSyntheticTelemetry(resources);
   for(const flow of scenario.flows??[])links.push(...syntheticFlow(flow,named));
   const scopeCount=(p:string)=>new Set(resources.filter(r=>r.provider===p&&r.scope!=='external').map(r=>r.scope)).size;
@@ -62,7 +60,18 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.azure)connections.push({provider:'azure',status:'demo',api:'Azure Resource Graph',scopes:scopeCount('azure')});
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
-  return validateSnapshot({version:1,mode:'mock',scenario:id,collectedAt:new Date().toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy});
+  const now=Date.now();
+  return validateSnapshot({version:1,mode:'mock',scenario:id,changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy});
+}
+// A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
+function demoChanges(resources:Resource[],now:number){
+  if(resources.length<30)return undefined;
+  const before:Resource[]=resources.map(r=>({...r}));
+  const stopped=before.find(r=>r.kind==='compute'&&/stopped|deallocated/.test(r.status)),warn=before.find(r=>r.kind==='gateway'&&r.status==='degraded'),newest=resources.filter(r=>r.kind==='compute').at(-1);
+  if(stopped)stopped.status='running';if(warn)warn.status='available';
+  const open=before.find(r=>r.kind==='firewall'&&r.rules.some(x=>x.source==='0.0.0.0/0'));if(open)open.rules=open.rules.map(x=>x.source==='0.0.0.0/0'?{...x,source:'10.0.0.0/8'}:x);
+  const gone={...newest!,id:`${newest!.id}-retired`,name:'batch-legacy-01',nativeId:'retired'};
+  return{since:new Date(now-86_400_000).toISOString(),items:diffResources([...before.filter(r=>r.id!==newest?.id),gone],resources)};
 }
 function addSyntheticTelemetry(resources:Resource[]){
   for(const [i,r] of resources.filter(r=>r.kind==='compute').entries()){

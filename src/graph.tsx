@@ -28,7 +28,7 @@ export const ResourceNode=memo(function ResourceNode({data}:NodeProps<FlowNode>)
   return <div className={`rc ${r.provider} kind-${r.kind} h-${health(r.status)} e-${data.emphasis}`} title={`${r.name} · ${r.status}`}><Handles/>
     <ResourceIcon resource={r}/>
     <span className="rc-body"><strong>{r.name}</strong><small className={r.ip||r.cidr?'mono':''}>{cardSubtitle(r)}</small></span>
-    <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
+    <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{r.publicIp&&<span className="rc-public" title={`공인 IP ${r.publicIp}`}><Globe2 size={11}/></span>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
   </div>;
 });
 const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3};

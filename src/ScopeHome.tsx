@@ -28,6 +28,6 @@ export function ScopeHome({snapshot,index,onOpen,onConnect,onSelectResource}:{sn
         </section>;
       })}
       <aside className="attention-rail" aria-label="확인 필요"><Attention snapshot={snapshot} onSelect={onSelectResource}/>
-        <p className="rail-note">{snapshot.mode==='live'?'수집 시점의 구성입니다. 사용률과 IAM은 미수집입니다.':'자원·사용률·트래픽은 모두 예제입니다.'} 불러온 시각 {new Date(snapshot.collectedAt).toLocaleTimeString('ko-KR',{hour12:false})}</p></aside>
+        <p className="rail-note">{snapshot.mode==='live'?'수집 시점의 구성입니다. 사용률과 IAM은 미수집입니다.':'자원·사용률·트래픽은 모두 예제입니다.'} 수집 시각 {new Date(snapshot.collectedAt).toLocaleTimeString('ko-KR',{hour12:false})}</p></aside>
     </div></div>;
 }

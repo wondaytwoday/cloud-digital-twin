@@ -1,7 +1,7 @@
 import {parseArgs} from 'node:util';
-import {mkdir,readFile,writeFile,rename} from 'node:fs/promises';
 import {collectAzure,collectAws,collectGcp} from './collectors.js';
 import {validateSnapshot} from '../shared/schema.js';
+import {FileSnapshotStore} from './store.js';
 const {values}=parseArgs({options:{provider:{type:'string'},subscriptions:{type:'string'},regions:{type:'string'},parent:{type:'string'},roles:{type:'string'},help:{type:'boolean'}}});
 if(values.help){console.log('npm run collect -- --provider azure --subscriptions <id,id>\nnpm run collect -- --provider aws --regions ap-northeast-2 [--roles 이름=arn,이름=arn]\nnpm run collect -- --provider gcp --parent projects/<id>');process.exit(0);}
 try{
@@ -15,8 +15,7 @@ try{
   const roles=values.roles?.split(',').map(x=>{const [label,roleArn]=x.split('=');if(!label||!roleArn?.startsWith('arn:aws:iam::'))throw new Error('--roles는 이름=역할ARN 형식이어야 합니다.');return{label,roleArn};})??[];
   const result=p==='azure'?await collectAzure(subs):p==='aws'?await collectAws(regions,roles):await collectGcp(values.parent!);
   const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,scopes:p==='azure'?subs:p==='aws'?regions:[values.parent!]});
-  await mkdir('data',{recursive:true,mode:0o700});
-  await writeFile(`data/${p}.tmp`,JSON.stringify(snapshot,null,2),{mode:0o600});await rename(`data/${p}.tmp`,`data/${p}.json`);
+  await new FileSnapshotStore().save(p!,snapshot);
   console.log(`저장: data/${p}.json · ${snapshot.resources.length}개 자원 / ${snapshot.links.length}개 구성 관계`);
   console.log('DATA_MODE=live npm run dev 로 실행한 뒤 데이터 다시 불러오기를 누르세요.');
 }catch(e){console.error(e instanceof Error?e.message:'수집 실패');process.exitCode=1;}

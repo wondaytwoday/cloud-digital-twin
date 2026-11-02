@@ -1,13 +1,16 @@
 import type { Link, Resource } from './schema.js';
 export type Graph = Map<string, Set<string>>;
 export type Health = 'ok'|'stopped'|'warn'|'unknown'|'neutral';
+const STOPPED=new Set(['stopped','stopping','deallocated','deallocating','terminated','suspended','paused']);
+const WARN=new Set(['degraded','failed','failure','error','down','unhealthy','inactive','unavailable','impaired']);
+const OK=new Set(['running','succeeded','available','enabled','runnable','active','provisioned','up','ready','established','attached']);
+// Whole words only: "inactive" and "unavailable" must not read as healthy because they contain a healthy word.
 export function health(status:string):Health{
-  const s=status.toLowerCase();
-  if(/stopped|deallocated|terminated|stopping|suspended/.test(s))return 'stopped';
-  if(/degraded|failed|error|down|unhealthy/.test(s))return 'warn';
-  if(s.includes('권한'))return 'unknown';
-  if(/running|succeeded|available|enabled|runnable|active|provisioned|up/.test(s))return 'ok';
-  return 'neutral';
+  if(status.includes('권한'))return 'unknown';
+  const words=status.toLowerCase().split(/[^a-z0-9]+/);
+  if(words.some(w=>STOPPED.has(w)))return 'stopped';
+  if(words.some(w=>WARN.has(w)))return 'warn';
+  return words.some(w=>OK.has(w))?'ok':'neutral';
 }
 // Connectivity graph: containment plus configured links. Policies and simulated flows are not hops.
 export function adjacency(resources:Resource[],links:Link[]):Graph{
@@ -27,19 +30,61 @@ export function distances(graph:Graph,sources:string[]){
   while(frontier.length){const next:string[]=[];for(const id of frontier)for(const n of graph.get(id)??[])if(!dist.has(n)){dist.set(n,dist.get(id)!+1);next.push(n);}frontier=next;}
   return dist;
 }
-// Shortest configured path from one node to the nearest of the targets, inclusive of both ends.
-export function findPath(graph:Graph,from:string,targets:string[]):string[]{
-  const goal=new Set(targets);if(!graph.has(from))return [];
-  const prev=new Map<string,string|null>([[from,null]]);let frontier=[from];
-  while(frontier.length){
-    const next:string[]=[];
-    for(const id of frontier){
-      if(goal.has(id)){const path:string[]=[];for(let c:string|null=id;c;c=prev.get(c)??null)path.unshift(c);return path;}
-      for(const n of graph.get(id)??[])if(!prev.has(n)){prev.set(n,id);next.push(n);}
+/* Routing model. VPC/VNet peering is not transitive, so a walk carries how it got here:
+   L started inside this network; P crossed a peering that may use the remote gateway; Q crossed a plain peering;
+   X arrived from outside any network, through a gateway. Only L and transit X may cross a peering, and Q may never leave. */
+type State='L'|'P'|'Q'|'X';
+export type RoutingModel={resources:Resource[];links:Link[]};
+function buildRouting({resources,links}:RoutingModel){
+  const byId=new Map(resources.filter(r=>r.kind!=='firewall').map(r=>[r.id,r]));
+  const networkOf=(id:string)=>{for(let c=byId.get(id);c;c=c.parent?byId.get(c.parent):undefined)if(c.kind==='network')return c.id;return undefined;};
+  const edges=new Map<string,{to:string;kind:'contain'|'attachment'|'peering'|'route';transit?:boolean}[]>();
+  const add=(a:string,b:string,kind:'contain'|'attachment'|'peering'|'route',transit?:boolean)=>{if(!byId.has(a)||!byId.has(b))return;(edges.get(a)??edges.set(a,[]).get(a)!).push({to:b,kind,transit});if(kind!=='route')(edges.get(b)??edges.set(b,[]).get(b)!).push({to:a,kind,transit});};
+  for(const r of byId.values())if(r.parent)add(r.id,r.parent,'contain');
+  for(const l of links)if(l.kind==='attachment'||l.kind==='peering'||l.kind==='route')add(l.source,l.target,l.kind,l.transit);
+  const step=(state:State,from:string,e:{to:string;kind:string;transit?:boolean}):State|null=>{
+    if(e.kind==='contain')return state;
+    // A UDR hands traffic that starts in this network to a router, which decides afresh inside the hub. One way, and never for transit traffic.
+    if(e.kind==='route')return state==='L'?'L':null;
+    if(e.kind==='peering'){
+      // Gateway peering (TGW to TGW) routes transitively; everything else, including unreadable peers, follows network rules.
+      if(byId.get(from)?.kind==='gateway'&&byId.get(e.to)?.kind==='gateway')return state;
+      if(state==='L')return e.transit?'P':'Q';
+      if(state==='X')return e.transit?'Q':null;
+      return null;
     }
-    frontier=next;
+    const a=networkOf(from),b=networkOf(e.to);
+    if(a&&a===b)return state;
+    if(state==='Q')return null;
+    return 'X';
+  };
+  const start=(id:string):State=>networkOf(id)?'L':'X';
+  return{byId,edges,step,start};
+}
+type Routing=ReturnType<typeof buildRouting>;
+function walk(r:Routing,sources:string[],visit:(id:string,prev:Map<string,string|null>,key:string)=>boolean){
+  const prev=new Map<string,string|null>(),queue:string[]=[];
+  for(const s of sources)if(r.byId.has(s)){const key=`${s}|${r.start(s)}`;prev.set(key,null);queue.push(key);}
+  for(let i=0;i<queue.length;i++){
+    const key=queue[i],bar=key.lastIndexOf('|'),id=key.slice(0,bar),state=key.slice(bar+1) as State;
+    if(visit(id,prev,key))return;
+    // No U-turns: reaching a circuit and coming straight back is not a route between two spokes.
+    const parentKey=prev.get(key),cameFrom=parentKey?parentKey.slice(0,parentKey.lastIndexOf('|')):undefined;
+    for(const e of r.edges.get(id)??[]){if(e.to===cameFrom)continue;const next=r.step(state,id,e);if(!next)continue;const k=`${e.to}|${next}`;if(!prev.has(k)){prev.set(k,key);queue.push(k);}}
   }
-  return [];
+}
+export function reachable(model:RoutingModel,sources:string[]){
+  const seen=new Set<string>();walk(buildRouting(model),sources,id=>{seen.add(id);return false;});return seen;
+}
+// Shortest candidate route to the nearest target, inclusive of both ends. Respects non-transitive peering.
+export function findPath(model:RoutingModel,from:string,targets:string[]):string[]{
+  const goal=new Set(targets);let path:string[]=[];
+  walk(buildRouting(model),[from],(id,prev,key)=>{
+    if(!goal.has(id))return false;
+    const out:string[]=[];for(let c:string|null=key;c;c=prev.get(c)??null)out.unshift(c.slice(0,c.lastIndexOf('|')));
+    path=out.filter((x,i)=>x!==out[i-1]);return true;
+  });
+  return path;
 }
 export function descendants(resources:Resource[],id:string){
   const out=new Set([id]);let grew=true;
@@ -53,8 +98,21 @@ export function ancestors(byId:Map<string,Resource>,id:string){
 // What loses every configured route to on-prem if this node disappears. Redundant paths keep a resource out of the list.
 export function impactOf(resources:Resource[],links:Link[],id:string){
   const removed=descendants(resources,id),ingress=ingressIds(resources);
-  const before=distances(adjacency(resources,links),ingress);
-  const remaining=resources.filter(r=>!removed.has(r.id)),after=distances(adjacency(remaining,links),ingress.filter(i=>!removed.has(i)));
+  const before=reachable({resources,links},ingress);
+  const remaining=resources.filter(r=>!removed.has(r.id)),after=reachable({resources:remaining,links},ingress.filter(i=>!removed.has(i)));
   const lost=remaining.filter(r=>before.has(r.id)&&!after.has(r.id)).map(r=>r.id);
   return {removed:[...removed],lost};
+}
+const WIDE=/^(0\.0\.0\.0\/0|\*|internet|::\/0)$/i;
+export const isWideInbound=(rule:Resource['rules'][number])=>rule.action==='Allow'&&/inbound|ingress/i.test(rule.direction)&&rule.source.split(/,\s*/).some(s=>WIDE.test(s.trim()));
+export const isPublic=(r:Resource)=>!!r.publicIp||r.specs['공개 범위']==='internet-facing';
+// Candidates only: a public address plus a wide rule says nothing about routing, listeners, or the app behind them.
+export function exposures(resources:Resource[],links:Link[]){
+  const byId=new Map(resources.map(r=>[r.id,r])),on=new Map<string,string[]>();
+  for(const l of links)if(l.kind==='policy')(on.get(l.target)??on.set(l.target,[]).get(l.target)!).push(l.source);
+  return resources.filter(isPublic).flatMap(r=>{
+    const chain=[r.id,...ancestors(byId,r.id)],policies=[...new Set(chain.flatMap(id=>on.get(id)??[]))].map(id=>byId.get(id)).filter((p):p is Resource=>!!p);
+    const rules=policies.flatMap(p=>p.rules.filter(isWideInbound).map(rule=>({policy:p.name,rule})));
+    return rules.length?[{resource:r,rules}]:[];
+  });
 }
