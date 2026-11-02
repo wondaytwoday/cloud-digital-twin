@@ -5,3 +5,4 @@ dist/
 data/*.json
 test-results/
 *.log
+.vercel
