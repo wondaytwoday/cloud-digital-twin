@@ -2,27 +2,27 @@ import {useMemo,useState} from 'react';
 import {Info,KeyRound,Search,Shield,User,Users,X,Bot,Globe2} from 'lucide-react';
 import type {IamAssignment,Snapshot} from '../../shared/schema';
 import type {Finding} from '../../shared/findings';
+import {iamInScope,type Focus} from '../../shared/hierarchy';
 import {ProviderMark} from '../graph';
-import {Kpi,ProviderFilter} from '../charts';
+import {Kpi} from '../charts';
 import {FindingList} from './Findings';
 const TYPES:Record<IamAssignment['principalType'],{label:string;icon:typeof User}>={user:{label:'사용자',icon:User},group:{label:'그룹',icon:Users},serviceAccount:{label:'서비스 계정',icon:Bot},role:{label:'역할',icon:Shield},public:{label:'공개',icon:Globe2},unknown:{label:'미확인',icon:Shield}};
 const LEVELS:Record<IamAssignment['level'],string>={org:'조직',group:'그룹',scope:'범위',resource:'자원'};
 type Principal={key:string;provider:string;name:string;type:IamAssignment['principalType'];items:IamAssignment[];privileged:boolean;external:boolean;noMfa:boolean;oldKey:number|null};
-export function IamPage({snapshot,list,openFinding}:{snapshot:Snapshot;list:Finding[];openFinding:(f:Finding)=>void}){
-  const [provider,setProvider]=useState('all'),[type,setType]=useState('all'),[query,setQuery]=useState(''),[only,setOnly]=useState<'all'|'privileged'|'external'>('all'),[open,setOpen]=useState<string|null>(null);
+export function IamPage({snapshot,focus,list,openFinding}:{snapshot:Snapshot;focus:Focus;list:Finding[];openFinding:(f:Finding)=>void}){
+  const [type,setType]=useState('all'),[query,setQuery]=useState(''),[only,setOnly]=useState<'all'|'privileged'|'external'>('all'),[open,setOpen]=useState<string|null>(null);
   const label=(s:string)=>snapshot.scopeLabels[s]??s;
-  const principals=useMemo(()=>{const m=new Map<string,Principal>();for(const a of snapshot.iam){const key=`${a.provider}|${a.principalType}|${a.principal}`,p=m.get(key)??{key,provider:a.provider,name:a.principal,type:a.principalType,items:[],privileged:false,external:false,noMfa:false,oldKey:null};p.items.push(a);p.privileged||=a.privileged;p.external||=a.external;p.noMfa||=a.privileged&&a.mfa===false;if(a.keyAgeDays!==undefined)p.oldKey=Math.max(p.oldKey??0,a.keyAgeDays);m.set(key,p);}return [...m.values()].sort((a,b)=>Number(b.external)-Number(a.external)||Number(b.noMfa)-Number(a.noMfa)||Number(b.privileged)-Number(a.privileged)||b.items.length-a.items.length);},[snapshot]);
-  const present=['azure','aws','gcp'].filter(p=>snapshot.iam.some(a=>a.provider===p)),q=query.trim().toLowerCase();
-  const inProvider=principals.filter(p=>provider==='all'||p.provider===provider);
-  const shown=inProvider.filter(p=>(type==='all'||p.type===type)&&(only==='all'||(only==='privileged'?p.privileged:p.external))&&(!q||`${p.name} ${p.items.map(i=>i.role).join(' ')}`.toLowerCase().includes(q)));
-  const iamFindings=list.filter(f=>f.category==='iam'&&(provider==='all'||f.provider===provider)),selected=principals.find(p=>p.key===open);
-  return <div className={`page ${selected?'with-drawer':''}`}><header className="page-head"><div><h1>IAM</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. ':''}역할 할당을 CSP별로 모아 봅니다.</p></div><div className="page-actions"><ProviderFilter value={provider} present={present} onChange={setProvider}/></div></header>
+  const principals=useMemo(()=>{const m=new Map<string,Principal>();for(const a of snapshot.iam.filter(x=>iamInScope(focus,x))){const key=`${a.provider}|${a.principalType}|${a.principal}`,p=m.get(key)??{key,provider:a.provider,name:a.principal,type:a.principalType,items:[],privileged:false,external:false,noMfa:false,oldKey:null};p.items.push(a);p.privileged||=a.privileged;p.external||=a.external;p.noMfa||=a.privileged&&a.mfa===false;if(a.keyAgeDays!==undefined)p.oldKey=Math.max(p.oldKey??0,a.keyAgeDays);m.set(key,p);}return [...m.values()].sort((a,b)=>Number(b.external)-Number(a.external)||Number(b.noMfa)-Number(a.noMfa)||Number(b.privileged)-Number(a.privileged)||b.items.length-a.items.length);},[snapshot,focus]);
+  const q=query.trim().toLowerCase();
+  const shown=principals.filter(p=>(type==='all'||p.type===type)&&(only==='all'||(only==='privileged'?p.privileged:p.external))&&(!q||`${p.name} ${p.items.map(i=>i.role).join(' ')}`.toLowerCase().includes(q)));
+  const iamFindings=list.filter(f=>f.category==='iam'),selected=principals.find(p=>p.key===open);
+  return <div className={`page ${selected?'with-drawer':''}`}><header className="page-head"><div><h1>IAM</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. ':''}역할 할당을 CSP별로 모아 봅니다.{focus.scopes?' 상위 조직과 관리 그룹에서 내려오는 할당도 포함합니다.':''}</p></div></header>
     <section className="kpi-row" aria-label="IAM 지표">
-      <Kpi label="주체" value={String(inProvider.length)} hint={`할당 ${inProvider.reduce((n,p)=>n+p.items.length,0)}건`}/>
-      <Kpi label="특권 주체" value={String(inProvider.filter(p=>p.privileged).length)} hint="Owner, 관리자 등" onClick={()=>setOnly('privileged')}/>
-      <Kpi label="외부 주체" value={String(inProvider.filter(p=>p.external).length)} hint="외부 계정, 도메인" tone={inProvider.some(p=>p.external)?'bad':undefined} onClick={()=>setOnly('external')}/>
-      <Kpi label="MFA 없는 특권 사용자" value={String(inProvider.filter(p=>p.noMfa).length)} hint="AWS IAM 사용자 기준" tone={inProvider.some(p=>p.noMfa)?'bad':undefined}/>
-      <Kpi label="90일 넘은 키" value={String(inProvider.filter(p=>(p.oldKey??0)>90).length)} hint="활성 액세스 키" tone={inProvider.some(p=>(p.oldKey??0)>90)?'warn':undefined}/>
+      <Kpi label="주체" value={String(principals.length)} hint={`할당 ${principals.reduce((n,p)=>n+p.items.length,0)}건`}/>
+      <Kpi label="특권 주체" value={String(principals.filter(p=>p.privileged).length)} hint="Owner, 관리자 등" onClick={()=>setOnly('privileged')}/>
+      <Kpi label="외부 주체" value={String(principals.filter(p=>p.external).length)} hint="외부 계정, 도메인" tone={principals.some(p=>p.external)?'bad':undefined} onClick={()=>setOnly('external')}/>
+      <Kpi label="MFA 없는 특권 사용자" value={String(principals.filter(p=>p.noMfa).length)} hint="AWS IAM 사용자 기준" tone={principals.some(p=>p.noMfa)?'bad':undefined}/>
+      <Kpi label="90일 넘은 키" value={String(principals.filter(p=>(p.oldKey??0)>90).length)} hint="활성 액세스 키" tone={principals.some(p=>(p.oldKey??0)>90)?'warn':undefined}/>
     </section>
     <div className="dash-grid">
       <section className="panel span-2"><header className="panel-head wrap"><h2>주체 <span className="count">{shown.length}</span></h2><div className="table-tools"><label className="mini-search"><Search size={14}/><input aria-label="주체와 역할 검색" placeholder="주체, 역할 찾기" value={query} onChange={e=>setQuery(e.target.value)}/></label><label className="inline-field">유형<select value={type} onChange={e=>setType(e.target.value)}><option value="all">전체</option>{Object.entries(TYPES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}</select></label><label className="inline-field">조건<select value={only} onChange={e=>setOnly(e.target.value as typeof only)}><option value="all">전체</option><option value="privileged">특권만</option><option value="external">외부만</option></select></label></div></header>

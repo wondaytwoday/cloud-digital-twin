@@ -21,7 +21,7 @@ import app,{liveSnapshot} from '../server/app.ts';
 import {diffResources} from '../shared/diff.ts';
 import {iconKey,groupIcon,providerLogo} from '../shared/iconKeys.ts';
 import {scenarios} from '../shared/scenarios.ts';
-import {buildScopeIndex} from '../shared/hierarchy.ts';
+import {buildScopeIndex,focusFor,iamInScope,inScope} from '../shared/hierarchy.ts';
 const load=async()=>{const s=await mockSnapshot('standard'),named=(n:string)=>s.resources.find(r=>r.name===n)!;return{s,named,graph:{resources:s.resources,links:s.links}};};
 test('fixtures survive pagination and normalization across every provider',async()=>{
   const {s,named}=await load();
@@ -367,4 +367,26 @@ test('findings: admin ports outrank a public load balancer, and repeats across a
   assert.equal(by('dev-kr-web-01')[0]?.severity,'critical','SSH open to the internet on a public VM');
   assert.equal(by('alb-checkout-prod')[0]?.severity,'info','HTTPS on a public LB is usually the design');
   assert.equal(by('legacy-admin 특권 사용자 MFA 없음').length,1);assert.match(by('legacy-admin 특권 사용자 MFA 없음')[0].detail,/범위 \d+개/);
+});
+test('focus: a group covers its leaves, and a leaf inherits assignments from above but not from siblings',async()=>{
+  const s=await mockSnapshot('enterprise'),index=buildScopeIndex(s.hierarchy,s.resources);
+  const group=s.hierarchy.find(n=>n.kind==='managementGroup'&&index.scopesUnder(n.id).length>1)!,leaf=index.scopesUnder(group.id)[0],focus=focusFor(index,group.id),one=focusFor(index,`azure:scope:${leaf}`);
+  assert.equal(focus.provider,'azure');assert.ok(inScope(focus,'azure',leaf));assert.ok(!inScope(focus,'aws',leaf));assert.ok(!inScope(focus,'azure','elsewhere'));
+  const row={provider:'azure'} as const;
+  assert.ok(iamInScope(one,{...row,scope:group.nativeId,level:'group'}),'parent group reaches the leaf');
+  assert.ok(iamInScope(one,{...row,scope:'tenant',level:'org'}),'org level reaches everything in that cloud');
+  assert.ok(!iamInScope(one,{provider:'gcp',scope:'x',level:'org'}),'another cloud does not');
+  const sibling=s.hierarchy.find(n=>n.kind==='managementGroup'&&n.parent===group.parent&&n.id!==group.id);
+  if(sibling)assert.ok(!iamInScope(focusFor(index,group.id),{...row,scope:sibling.nativeId,level:'group'}),'a sibling group does not');
+  assert.ok(iamInScope(one,{...row,scope:'not-in-the-tree',level:'group'}),'an unplaceable group stays visible');
+  const providerOnly=focusFor(index,'provider:aws');assert.equal(providerOnly.scopes,null);assert.equal(focusFor(index,'all').provider,'all');
+});
+test('findings narrow with the focus, and an overlap stays visible from either side',async()=>{
+  const s=await mockSnapshot('enterprise'),index=buildScopeIndex(s.hierarchy,s.resources),all=findings(s);
+  const aws=findings(s,undefined,focusFor(index,'provider:aws'));
+  assert.ok(aws.length>0&&aws.length<all.length);assert.ok(aws.every(f=>!f.provider||f.provider==='aws'));
+  const o=cidrOverlaps(s.resources)[0];assert.ok(o,'fixture has an overlap');
+  for(const side of [o.a,o.b]){const list=findings(s,undefined,focusFor(index,`${side.provider}:scope:${side.scope}`));assert.ok(list.some(f=>f.id===`overlap:${o.a.id}:${o.b.id}`));}
+  const leaf=s.hierarchy.find(n=>n.scope&&s.iam.some(a=>a.scope===n.scope&&a.privileged))!,scoped=findings(s,undefined,focusFor(index,leaf.id));
+  assert.ok(scoped.length<all.length);assert.ok(scoped.filter(f=>f.scope).every(f=>f.scope===leaf.scope||s.iam.some(a=>a.level!=='scope'&&a.scope===f.scope)));
 });

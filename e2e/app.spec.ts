@@ -107,8 +107,8 @@ test.describe('first visit',()=>{
     await context.close();
   });
 });
-test('dashboard findings jump to the evidence',async({page})=>{
-  await page.goto('/?scenario=standard');await page.waitForSelector('.finding-list');
+test('findings page filters by area and jumps to the evidence',async({page})=>{
+  await page.goto('/?scenario=standard&view=findings');await page.waitForSelector('.finding-list');
   await page.getByRole('group',{name:'영역 필터'}).getByRole('button',{name:'네트워크'}).click();
   await page.locator('.finding-list button',{hasText:'dev-sandbox-01'}).click();await settled(page);
   await expect(page.locator('.inspector')).toContainText('dev-sandbox-01');
@@ -125,13 +125,37 @@ test('IAM page lists principals across clouds and opens assignments',async({page
   await page.getByLabel('조건').selectOption('all');await page.getByLabel('주체와 역할 검색').fill('legacy-admin');
   await page.locator('tbody tr button').first().click();await expect(page.locator('.drawer')).toContainText('AdministratorAccess');
 });
-test('network page finds rules by port and jumps to the map',async({page})=>{
-  await page.goto('/?scenario=standard&view=network');await page.waitForSelector('.data-table');
+test('security page finds rules by port',async({page})=>{
+  await page.goto('/?scenario=standard&view=security');await page.waitForSelector('.data-table');
   await page.getByLabel('포트로 찾기').fill('22');await expect(page.locator('.table-link',{hasText:'nsg-dev'}).first()).toBeVisible();
-  await expect(page.locator('.overlap-rows li').first()).toBeVisible();
+});
+test('network page lists peerings and jumps to the map',async({page})=>{
+  await page.goto('/?scenario=standard&view=network');await page.waitForSelector('.data-table');
+  await expect(page.locator('.overlap-rows li').first()).toBeVisible();await expect(page.getByRole('heading',{name:/^피어링/})).toBeVisible();
   await page.locator('.table-link',{hasText:'er-seoul-01'}).first().click();await settled(page);await expect(page.locator('.inspector')).toContainText('er-seoul-01');
 });
 test('non-network services open in the inventory, not an empty map',async({page})=>{
   await page.goto('/?scenario=standard');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-assets');await page.keyboard.press('Enter');
   await expect(page.locator('tbody tr',{hasText:'commerce-prod-assets'})).toBeVisible();
+});
+test('a scope chosen on one page applies everywhere and survives back',async({page})=>{
+  await page.goto('/?scenario=enterprise');await page.waitForSelector('.kpi-row');
+  const total=Number(await page.locator('.kpi',{hasText:'수집 자원'}).locator('strong').textContent());
+  await page.locator('.scope-picker summary').click();await page.locator('.scope-pop .scope-open',{hasText:'Corp KR'}).click();
+  await expect(page.locator('.scope-pop')).toBeHidden();await expect(page.locator('.scope-picker summary')).toContainText('Corp KR');expect(page.url()).toContain('scope=');
+  await expect.poll(async()=>Number(await page.locator('.kpi',{hasText:'수집 자원'}).locator('strong').textContent())).toBeLessThan(total);
+  for(const name of ['조치 항목','변경 이력','네트워크','노출·방화벽','IAM','비용']){await page.getByRole('button',{name,exact:true}).click();await expect(page.locator('.scope-picker summary')).toContainText('Corp KR');}
+  await page.getByRole('button',{name:'토폴로지',exact:true}).click();await settled(page);await expect(page.locator('.map-tab.active')).toContainText('Corp KR');
+  await page.getByRole('button',{name:'대시보드',exact:true}).click();await page.getByRole('button',{name:'필터 해제'}).click();
+  await expect(page.locator('.scope-picker summary')).toContainText('전체 범위');await page.goBack();await expect(page.locator('.scope-picker summary')).toContainText('Corp KR');
+});
+test('switching clouds in the bar does not pile up map tabs',async({page})=>{
+  await page.goto('/?scenario=standard');const bar=page.getByRole('group',{name:'클라우드 필터'});await bar.waitFor();
+  await bar.getByRole('button',{name:'Azure'}).click();await bar.getByRole('button',{name:'AWS'}).click();await bar.getByRole('button',{name:'Google Cloud'}).click();
+  await page.getByRole('button',{name:'토폴로지',exact:true}).click();await settled(page);await expect(page.locator('.map-tab')).toHaveCount(2);await expect(page.locator('.map-tab.active')).toContainText('Google Cloud');
+});
+test('changes page says what it compares and filters by kind',async({page})=>{
+  await page.goto('/?scenario=standard&view=changes');await expect(page.locator('.page-head p')).toContainText('그 이전 회차는');
+  const all=await page.locator('tbody tr').count();expect(all).toBeGreaterThan(0);
+  await page.getByRole('group',{name:'변경 유형 필터'}).getByRole('button',{name:'삭제'}).click();expect(await page.locator('tbody tr').count()).toBeLessThan(all);
 });

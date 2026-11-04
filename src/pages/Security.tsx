@@ -1,0 +1,24 @@
+import {useState} from 'react';
+import {ArrowUpRight,Info} from 'lucide-react';
+import type {Snapshot} from '../../shared/schema';
+import {inScope,type Focus} from '../../shared/hierarchy';
+import {allRules,portMatches} from '../../shared/network';
+import {exposures,isWideInbound} from '../../shared/topology';
+import {ProviderMark} from '../graph';
+import {Kpi} from '../charts';
+export function SecurityPage({snapshot,focus,openResource}:{snapshot:Snapshot;focus:Focus;openResource:(id:string)=>void}){
+  const [port,setPort]=useState(''),[wideOnly,setWideOnly]=useState(false),[action,setAction]=useState('all');
+  const label=(s:string)=>snapshot.scopeLabels[s]??s;
+  const exposed=exposures(snapshot.resources,snapshot.links).filter(e=>inScope(focus,e.resource.provider,e.resource.scope));
+  const scoped=allRules(snapshot.resources).filter(({policy})=>inScope(focus,policy.provider,policy.scope)),wide=scoped.filter(({rule})=>isWideInbound(rule)).length;
+  const portNumber=/^\d{1,5}$/.test(port.trim())?Number(port):null,rules=scoped.filter(({rule})=>(!wideOnly||isWideInbound(rule))&&(action==='all'||rule.action===action)&&(portNumber===null||portMatches(rule.ports,portNumber)));
+  const Link=({id,name}:{id:string;name:string})=><button className="table-link" onClick={()=>openResource(id)}>{name}<ArrowUpRight size={12}/></button>;
+  return <div className="page"><header className="page-head"><div><h1>노출·방화벽</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. ':''}공인 노출 후보와 방화벽 규칙을 봅니다.</p></div></header>
+    <section className="kpi-row" aria-label="보안 지표"><Kpi label="공인 노출 후보" value={String(exposed.length)} hint="공인 IP + 넓은 허용" tone={exposed.length?'bad':undefined}/><Kpi label="넓은 인바운드 규칙" value={String(wide)} tone={wide?'warn':undefined} onClick={()=>setWideOnly(true)}/><Kpi label="방화벽 정책" value={String(new Set(scoped.map(x=>x.policy.id)).size)} hint={`규칙 ${scoped.length}개`}/></section>
+    <div className="dash-grid">
+      <section className="panel span-3"><header className="panel-head"><h2>공인 노출 후보 <span className="count">{exposed.length}</span></h2></header>{exposed.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>자원</th><th>클라우드</th><th>공인 주소</th><th>정책</th><th>규칙</th></tr></thead><tbody>{exposed.flatMap(e=>e.rules.map((x,i)=><tr key={`${e.resource.id}${i}`}><td><Link id={e.resource.id} name={e.resource.name}/></td><td><ProviderMark provider={e.resource.provider}/></td><td className="mono">{e.resource.publicIp??'인터넷 연결 LB'}</td><td>{x.policy}</td><td className="mono">{x.rule.protocol}/{x.rule.ports} ← {x.rule.source}</td></tr>))}</tbody></table></div>:<p className="muted small empty-note">공인 주소와 넓은 허용 규칙이 함께 있는 자원이 없습니다.</p>}</section>
+      <section className="panel span-3"><header className="panel-head wrap"><h2>방화벽 규칙 <span className="count">{rules.length}</span></h2><div className="table-tools"><label className="inline-field">포트<input inputMode="numeric" placeholder="예: 22" value={port} onChange={e=>setPort(e.target.value)} aria-label="포트로 찾기"/></label><label className="inline-field">동작<select value={action} onChange={e=>setAction(e.target.value)}><option value="all">전체</option><option value="Allow">허용</option><option value="Deny">차단</option></select></label><label className="check-field"><input type="checkbox" checked={wideOnly} onChange={e=>setWideOnly(e.target.checked)}/>넓은 인바운드만</label></div></header>
+        <div className="table-wrap scroll-y"><table className="data-table"><thead><tr><th>정책</th><th>클라우드</th><th>범위</th><th>방향</th><th>동작</th><th>프로토콜/포트</th><th>출발지</th></tr></thead><tbody>{rules.slice(0,200).map(({policy,rule},i)=><tr key={policy.id+i} className={isWideInbound(rule)?'row-warn':''}><td><Link id={policy.id} name={policy.name}/></td><td><ProviderMark provider={policy.provider}/></td><td>{label(policy.scope)}</td><td>{rule.direction}</td><td><span className={`badge ${rule.action==='Deny'?'red':''}`}>{rule.action}</span></td><td className="mono">{rule.protocol}/{rule.ports}</td><td className="mono">{rule.source}</td></tr>)}</tbody></table>{rules.length>200&&<p className="more-note">처음 200개만 표시합니다. 포트로 좁혀 보세요.</p>}</div></section>
+      <p className="source-note span-3"><Info size={13}/>구성 기반 후보입니다. 라우팅, 리스너, 애플리케이션 상태를 확인하지 않았으므로 실제 노출이나 도달 가능 여부로 단정할 수 없습니다.</p>
+    </div></div>;
+}
