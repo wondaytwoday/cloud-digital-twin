@@ -6,8 +6,8 @@ import {health} from '../shared/topology';
 import {groupIcon,iconKey,providerLogo} from '../shared/iconKeys';
 import {iconUrl} from './icons';
 import type {Bundle,Placed} from './layout';
-export const icons:Record<ResourceKind,typeof Server>={compute:Server,firewall:ShieldCheck,appliance:Flame,network:Network,subnet:Rows3,gateway:Router,loadbalancer:Split,nat:ArrowLeftRight,database:Database,storage:HardDrive,cluster:Boxes,onprem:Building2,external:CircleHelp};
-export const kindNames:Record<ResourceKind,string>={compute:'VM',firewall:'보안 정책',appliance:'방화벽',network:'네트워크',subnet:'서브넷',gateway:'게이트웨이',loadbalancer:'로드밸런서',nat:'NAT',database:'데이터베이스',storage:'스토리지',cluster:'클러스터',onprem:'사내망',external:'외부 참조'};
+export const icons:Record<ResourceKind,typeof Server>={compute:Server,firewall:ShieldCheck,appliance:Flame,network:Network,subnet:Rows3,gateway:Router,loadbalancer:Split,nat:ArrowLeftRight,database:Database,storage:HardDrive,cluster:Boxes,onprem:Building2,external:CircleHelp,service:Boxes};
+export const kindNames:Record<ResourceKind,string>={compute:'VM',firewall:'보안 정책',appliance:'방화벽',network:'네트워크',subnet:'서브넷',gateway:'게이트웨이',loadbalancer:'로드밸런서',nat:'NAT',database:'데이터베이스',storage:'스토리지',cluster:'클러스터',onprem:'사내망',external:'외부 참조',service:'기타 서비스'};
 export const ProviderMark=({provider}:{provider:string})=>{const logo=iconUrl(providerLogo[provider]);return logo?<img className={`provider-logo ${provider}`} src={logo} alt="" aria-hidden="true"/>:<span className={`provider-mark ${provider}`} aria-hidden="true">{provider==='gcp'?'G':'DC'}</span>;};
 export function ResourceIcon({resource,size=28}:{resource:Pick<Resource,'type'|'specs'|'kind'>;size?:number}){
   const url=iconUrl(iconKey(resource));if(url)return <img className="csp-icon" src={url} width={size} height={size} alt="" aria-hidden="true" draggable={false}/>;

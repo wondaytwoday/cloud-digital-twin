@@ -21,9 +21,11 @@ const isLive=()=>process.env.DATA_MODE==='live';
 export const requireAccess:RequestHandler=(req:Request,res:Response,next:NextFunction)=>{
   if(!isLive())return next();
   if(accessEntries().length){const entry=findEntry(requestToken(req));if(!entry){res.status(401).json({error:'로그인이 필요합니다.'});return;}res.locals.access=entry;return next();}
-  if(process.env.ATLAS_LOOPBACK_ONLY==='1')return next();
+  // Without a token, a page on any website could reach this through DNS rebinding unless the Host is checked too.
+  if(process.env.ATLAS_LOOPBACK_ONLY==='1'){if(['127.0.0.1','localhost','[::1]'].includes(req.hostname))return next();res.status(403).json({error:'localhost로만 접근할 수 있습니다.'});return;}
   res.status(503).json({error:'접근 제어가 설정되지 않아 실제 데이터를 제공하지 않습니다. ACCESS_TOKENS를 설정하세요.'});
 };
+export const requireAdmin:RequestHandler=(_req,res,next)=>{const access=res.locals.access as AccessEntry|undefined;if(access&&!access.scopes.includes('*')){res.status(403).json({error:'전체 범위 권한이 필요합니다.'});return;}next();};
 export function sessionRoutes(app:import('express').Express){
   app.get('/api/session',(req,res)=>{const required=isLive()&&accessEntries().length>0,entry=required?findEntry(requestToken(req)):undefined;res.json({required,authenticated:!required||!!entry,name:entry?.name});});
   app.post('/api/session',(req,res)=>{
@@ -41,5 +43,5 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   for(const r of resources)if(r.parent&&!ids.has(r.parent))delete r.parent;
   const keep=new Set<string>();const nodes=new Map(snapshot.hierarchy.map(n=>[n.id,n]));
   for(const n of snapshot.hierarchy)if(n.scope&&allowed.has(n.scope))for(let c:typeof n|undefined=n;c;c=c.parent?nodes.get(c.parent):undefined)keep.add(c.id);
-  return{...snapshot,resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),scopes:snapshot.scopes.filter(s=>allowed.has(s)),connections:[],warnings:[],changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>allowed.has(c.scope))}:undefined,scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>allowed.has(k)))};
+  return{...snapshot,resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),cost:snapshot.cost.filter(c=>allowed.has(c.scope)),iam:snapshot.iam.filter(a=>allowed.has(a.scope)),scopes:snapshot.scopes.filter(s=>allowed.has(s)),connections:[],warnings:[],changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>allowed.has(c.scope))}:undefined,scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>allowed.has(k)))};
 }

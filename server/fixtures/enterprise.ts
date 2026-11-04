@@ -1,4 +1,4 @@
-import {asset,awsSubnet,azId,azRow,compute,ec2,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,privateService,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId} from './builders.js';
+import {asset,awsSubnet,azId,azRow,compute,ec2,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,privateService,publicIp,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
 import type {AwsAccount,OrgTree,Raw,Scenario,Site} from './types.js';
 // Generated, but deterministic: the same fixture on every request, so tests and screenshots stay comparable.
 const uuid=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`,pad=(n:number)=>String(n).padStart(2,'0');
@@ -40,6 +40,7 @@ function azureFixture(){
     const webVms=Array.from({length:Math.max(2,size-2)},(_,n)=>`${slug}-web-${pad(n+1)}`),appVms=Array.from({length:size},(_,n)=>`${slug}-app-${pad(n+1)}`);
     rows.push(azRow(sub,rg,'Network/applicationGateways',`agw-${slug}`,{operationalState:'Running',sku:{tier:'WAF_v2'},gatewayIPConfigurations:[{properties:{subnet:{id:subnetId(sub,rg,net,'web')}}}],frontendIPConfigurations:[{properties:{privateIPAddress:`${cidr}.1.4`}}],backendAddressPools:[{properties:{backendIPConfigurations:webVms.map(v=>nicConfig(sub,rg,v))}}]},{},location));
     webVms.forEach((v,n)=>rows.push(...vm(sub,rg,net,'web',v,`${cidr}.1.${10+n}`,'Standard_D2s_v5','running',location)));
+    if(opt.dev){rows.push(publicIp(sub,rg,`pip-${slug}`,`203.0.113.${50+i}`,location));withPublicIp(rows,webVms[0],sub,rg,`pip-${slug}`);}
     appVms.forEach((v,n)=>rows.push(...vm(sub,rg,net,'app',v,`${cidr}.2.${10+n}`,n%5===4?'Standard_E4s_v5':'Standard_D4s_v5',opt.dev&&n>0?'deallocated':(i===2&&n===1?'failed':'running'),location)));
     if(opt.aks)rows.push(azRow(sub,rg,'ContainerService/managedClusters',`aks-${slug}`,{provisioningState:'Succeeded',powerState:{code:'Running'},kubernetesVersion:'1.33.2',agentPoolProfiles:[{count:6+i,vnetSubnetID:subnetId(sub,rg,net,'aks')}]},{},location));
     const dataSubnet=subnetId(sub,rg,net,'data');
@@ -101,7 +102,7 @@ function awsFixture():AwsAccount[]{
       DescribeInternetGateways:{InternetGateways:[{InternetGatewayId:`igw-${slug}`,Attachments:[{VpcId:vpc,State:'available'}],Tags:tag(`igw-${slug}`)}]},
       DescribeNatGateways:{NatGateways:['a','c'].map(az=>({NatGatewayId:`nat-${slug}-${az}`,SubnetId:sub(`public-${az}`),State:'available',ConnectivityType:'public',NatGatewayAddresses:[{PrivateIp:`${cidr}.${az==='a'?0:4}.9`}],Tags:tag(`nat-${slug}-${az}`)}))},
       DescribeInstanceTypes:{InstanceTypes:instanceTypes},
-      DescribeLoadBalancers:{LoadBalancers:[{LoadBalancerArn:`arn:aws:elasticloadbalancing:${region}:${account}:loadbalancer/${lbName}`,LoadBalancerName:lbName,Type:lbType,Scheme:'internet-facing',State:{Code:'active'},AvailabilityZones:[{SubnetId:sub('public-a')},{SubnetId:sub('public-c')}]}]},
+      DescribeLoadBalancers:{LoadBalancers:[{LoadBalancerArn:`arn:aws:elasticloadbalancing:${region}:${account}:loadbalancer/${lbName}`,LoadBalancerName:lbName,Type:lbType,Scheme:'internet-facing',State:{Code:'active'},AvailabilityZones:[{SubnetId:sub('public-a')},{SubnetId:sub('public-c')}],SecurityGroups:[`sg-${slug}-lb`]}]},
       DescribeTargetGroups:{TargetGroups:[{TargetGroupArn:`arn:aws:elasticloadbalancing:${region}:${account}:targetgroup/tg-${slug}`,TargetType:'instance'}]},
       DescribeTargetHealth:{TargetHealthDescriptions:instances.slice(0,Math.min(4,size)).map(x=>({Target:{Id:x.InstanceId}}))},
       DescribeDBInstances:{DBInstances:[{DBInstanceIdentifier:`${opt.aurora?'aurora':'rds'}-${slug}`,Engine:opt.aurora?'aurora-postgresql':'postgres',DBInstanceClass:'db.r6g.xlarge',DBInstanceStatus:'available',MultiAZ:true,DBSubnetGroup:{Subnets:[{SubnetIdentifier:sub('data-a')}]},VpcSecurityGroups:[{VpcSecurityGroupId:`sg-${slug}-db`}]}]},
@@ -129,7 +130,7 @@ const gcpServices:GcpService[]=[
 ];
 function gcpFixture(){
   const type=(t:string)=>`compute.googleapis.com/${t}`,assets:Raw[]=[];
-  const sandbox=(n:string,i:number,net:string)=>{const project=`atlas-sandbox-${n}`,vpc=`${compute(project)}/global/networks/vpc-sandbox-${n}`,subnet=gcpSubnetName(project,SEOUL,`sandbox-${n}`);assets.push(asset(type('Network'),vpc,{name:`vpc-sandbox-${n}`,routingConfig:{routingMode:'REGIONAL'},peerings:[{name:'to-shared',network:net,state:'ACTIVE',importCustomRoutes:true}]},'global'),asset(type('Subnetwork'),subnet,{name:`sandbox-${n}`,network:vpc,ipCidrRange:`10.${240+i}.1.0/24`}));assets.push(gce(project,vpc,subnet,`sandbox-${n}-01`,`10.${240+i}.1.10`,'e2-medium',i?'TERMINATED':'RUNNING'));return vpc;};
+  const sandbox=(n:string,i:number,net:string)=>{const project=`atlas-sandbox-${n}`,vpc=`${compute(project)}/global/networks/vpc-sandbox-${n}`,subnet=gcpSubnetName(project,SEOUL,`sandbox-${n}`);assets.push(asset(type('Network'),vpc,{name:`vpc-sandbox-${n}`,routingConfig:{routingMode:'REGIONAL'},peerings:[{name:'to-shared',network:net,state:'ACTIVE',importCustomRoutes:true}]},'global'),asset(type('Subnetwork'),subnet,{name:`sandbox-${n}`,network:vpc,ipCidrRange:`10.${122+i}.1.0/24`}));assets.push(gce(project,vpc,subnet,`sandbox-${n}-01`,`10.${122+i}.1.10`,'e2-medium',i?'TERMINATED':'RUNNING'));return vpc;};
   const sandboxVpcs=[sandbox('team-a',0,nonprodVpc),sandbox('team-b',1,nonprodVpc)];
   const router=(project:string,region:string,n:string)=>`${compute(project)}/regions/${region}/routers/${n}`;
   assets.push(asset(type('Network'),prodVpc,{name:'vpc-prod-shared',routingConfig:{routingMode:'GLOBAL'},peerings:[{name:'to-partner',network:`${compute('partner-data-exchange')}/global/networks/vpc-partner-exchange`,state:'ACTIVE'}]},'global'));

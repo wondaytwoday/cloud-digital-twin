@@ -67,3 +67,11 @@
 | azure | tenant | 02679-icon-service-Tenant-Properties.svg | 2ed1a99b5c3025bf |
 | aws | organizations | Arch_AWS-Organizations_48.svg | f049a5f29536f8fc |
 | aws | ou | Res_AWS-Organizations_Organizational-Unit_48.svg | b72e74b0564a93fb |
+| azure | keyvault | 10245-icon-service-Key-Vaults.svg | 712b426f54f0fc50 |
+| azure | appservice | 10035-icon-service-App-Services.svg | 529d83fc80637a96 |
+| aws | s3 | Arch_Amazon-Simple-Storage-Service_48.svg | bb0df5b7ca52da73 |
+| aws | lambda | Arch_AWS-Lambda_48.svg | 4a376abd2d67f891 |
+| aws | dynamodb | Arch_Amazon-DynamoDB_48.svg | c336f941abcb2501 |
+| gcp | storage | cloud_storage.svg | 2528d1bf4dce824c |
+| gcp | run | cloud_run.svg | 97e1db08021eecae |
+| gcp | bigquery | bigquery.svg | e1791cc5897c2e3b |

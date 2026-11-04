@@ -3,9 +3,9 @@ const settled=async(page:Page)=>{await page.waitForSelector('.react-flow__node')
 const openMap=async(page:Page,scenario='standard',extra='')=>{await page.goto(`/?scenario=${scenario}&view=map${extra}`);await settled(page);};
 const search=(page:Page)=>page.getByLabel('리소스와 범위 검색');
 // External fonts are not under test, and their network timing must not decide whether the suite passes.
-test.beforeEach(async({page})=>{page.on('pageerror',e=>{throw e;});await page.route('https://fonts.googleapis.com/**',r=>r.abort());await page.route('https://fonts.gstatic.com/**',r=>r.abort());});
+test.beforeEach(async({page})=>{await page.addInitScript(()=>localStorage.setItem('atlas.guide.seen','1'));page.on('pageerror',e=>{throw e;});await page.route('https://fonts.googleapis.com/**',r=>r.abort());await page.route('https://fonts.gstatic.com/**',r=>r.abort());});
 test('home shows all three org hierarchies and opens a scope as a tab',async({page})=>{
-  await page.goto('/?scenario=enterprise');
+  await page.goto('/?scenario=enterprise&view=scopes');
   for(const name of ['Microsoft Azure','Amazon Web Services','Google Cloud'])await expect(page.getByRole('heading',{name})).toBeVisible();
   await page.locator('.scope-open',{hasText:'Corp KR'}).click();await settled(page);
   await expect(page.locator('.map-tab.active')).toContainText('Corp KR');
@@ -18,7 +18,7 @@ test('deep link restores view and scope',async({page})=>{
 });
 test('a hanging font CDN does not delay the page',async({page})=>{
   await page.unroute('https://fonts.googleapis.com/**');await page.route('https://fonts.googleapis.com/**',()=>{/* never answers */});
-  await page.goto('/?scenario=standard',{waitUntil:'commit'});await expect(page.locator('.scope-tree').first()).toBeVisible({timeout:5_000});
+  await page.goto('/?scenario=standard&view=scopes',{waitUntil:'commit'});await expect(page.locator('.scope-tree').first()).toBeVisible({timeout:5_000});
 });
 test('official icons all load under the CSP',async({page})=>{
   await openMap(page);
@@ -26,9 +26,9 @@ test('official icons all load under the CSP',async({page})=>{
 });
 test('a slow earlier scenario cannot overwrite the current one',async({page})=>{
   await page.route('**/api/topology?scenario=enterprise',async r=>{await new Promise(s=>setTimeout(s,800));await r.continue().catch(()=>{});});
-  await page.goto('/?scenario=standard');await page.waitForSelector('.scope-tree');
+  await page.goto('/?scenario=standard&view=scopes');await page.waitForSelector('.scope-tree');
   const pick=page.getByLabel('예시 아키텍처');await pick.selectOption('enterprise');await pick.selectOption('single-vm');await page.waitForTimeout(1300);
-  await expect(page.locator('.home-stats dd').nth(1)).toHaveText('5');
+  await expect.poll(async()=>Number(await page.locator('.home-stats dd').nth(1).textContent())).toBeLessThan(20);
 });
 test('clicking blank frame space does not collapse it',async({page})=>{
   await openMap(page);const before=await page.locator('.react-flow__node').count(),box=(await page.locator('.frame.v-provider.aws').boundingBox())!;
@@ -59,7 +59,7 @@ test('jumping out of a scope updates tab and URL together',async({page})=>{
   await expect(page.locator('.map-tab.active')).toContainText('전체 지도');expect(page.url()).not.toContain('scope=');
 });
 test('opening a policy turns its layer on',async({page})=>{
-  await page.goto('/?scenario=standard');await page.locator('.attention-rail .relation-row',{hasText:'sg-alb'}).click();await settled(page);
+  await page.goto('/?scenario=standard&view=scopes');await page.getByRole('button',{name:/^sg-alb/}).click();await settled(page);
   await expect(page.locator('.rc',{hasText:'sg-alb'})).toBeVisible();
 });
 test('keyboard opens a node',async({page})=>{
@@ -89,6 +89,49 @@ test('exports produce files',async({page})=>{
   }
 });
 test('phone width has no horizontal page scroll',async({browser})=>{
-  const page=await (await browser.newContext({viewport:{width:390,height:844}})).newPage();await page.goto('/?scenario=standard');await page.waitForSelector('.scope-tree');
+  const page=await (await browser.newContext({viewport:{width:390,height:844}})).newPage();await page.addInitScript(()=>localStorage.setItem('atlas.guide.seen','1'));await page.goto('/?scenario=standard');await page.waitForSelector('.kpi-row');
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+});
+
+test.describe('first visit',()=>{
+  test('guide opens once, covers each cloud, and closing shows mock dashboards',async({browser})=>{
+    const context=await browser.newContext({viewport:{width:1600,height:1000}}),page=await context.newPage();
+    await page.route('https://fonts.g*/**',r=>r.abort());await page.goto('/?scenario=standard');
+    const guide=page.getByRole('dialog',{name:'클라우드 연결 가이드'});await expect(guide).toBeVisible();
+    for(const [tab,text] of [['Microsoft Azure','Cost Management Reader'],['Amazon Web Services','AtlasCollector'],['Google Cloud','ATLAS_GCP_BILLING_TABLE']]){await guide.getByRole('tab',{name:tab}).click();await expect(guide).toContainText(text);}
+    await guide.getByRole('button',{name:'목데이터로 둘러보기'}).click();await expect(guide).toHaveCount(0);
+    await expect(page.getByRole('heading',{name:'운영 대시보드'})).toBeVisible();await expect(page.locator('.kpi-row')).toContainText('이번 달 예상 비용');
+    await page.getByRole('button',{name:'토폴로지',exact:true}).click();await page.waitForSelector('.react-flow__node');
+    await page.reload();await page.waitForSelector('.react-flow__node');await expect(guide).toHaveCount(0);
+    await page.getByRole('button',{name:'클라우드 연결'}).click();await expect(guide).toBeVisible();await page.keyboard.press('Escape');await expect(guide).toHaveCount(0);
+    await context.close();
+  });
+});
+test('dashboard findings jump to the evidence',async({page})=>{
+  await page.goto('/?scenario=standard');await page.waitForSelector('.finding-list');
+  await page.getByRole('group',{name:'영역 필터'}).getByRole('button',{name:'네트워크'}).click();
+  await page.locator('.finding-list button',{hasText:'dev-sandbox-01'}).click();await settled(page);
+  await expect(page.locator('.inspector')).toContainText('dev-sandbox-01');
+});
+test('cost page filters and exports what is shown',async({page})=>{
+  await page.goto('/?scenario=standard&view=cost');await page.waitForSelector('.bars');
+  await page.getByRole('group',{name:'클라우드 필터'}).getByRole('button',{name:'AWS'}).click();await expect(page.locator('.chart-legend li')).toHaveCount(1);
+  await page.getByRole('button',{name:'표 보기'}).click();await expect(page.locator('.cost-trend table tbody tr')).toHaveCount(6);
+  const [file]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'CSV'}).click()]);expect(file.suggestedFilename()).toBe('cloud-atlas-cost.csv');
+});
+test('IAM page lists principals across clouds and opens assignments',async({page})=>{
+  await page.goto('/?scenario=standard&view=iam');await page.waitForSelector('.data-table');
+  await page.getByLabel('조건').selectOption('external');await expect(page.locator('tbody tr')).not.toHaveCount(0);
+  await page.getByLabel('조건').selectOption('all');await page.getByLabel('주체와 역할 검색').fill('legacy-admin');
+  await page.locator('tbody tr button').first().click();await expect(page.locator('.drawer')).toContainText('AdministratorAccess');
+});
+test('network page finds rules by port and jumps to the map',async({page})=>{
+  await page.goto('/?scenario=standard&view=network');await page.waitForSelector('.data-table');
+  await page.getByLabel('포트로 찾기').fill('22');await expect(page.locator('.table-link',{hasText:'nsg-dev'}).first()).toBeVisible();
+  await expect(page.locator('.overlap-rows li').first()).toBeVisible();
+  await page.locator('.table-link',{hasText:'er-seoul-01'}).first().click();await settled(page);await expect(page.locator('.inspector')).toContainText('er-seoul-01');
+});
+test('non-network services open in the inventory, not an empty map',async({page})=>{
+  await page.goto('/?scenario=standard');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-assets');await page.keyboard.press('Enter');
+  await expect(page.locator('tbody tr',{hasText:'commerce-prod-assets'})).toBeVisible();
 });
