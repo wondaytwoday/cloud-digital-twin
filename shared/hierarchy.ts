@@ -1,4 +1,4 @@
-import type {HierarchyNode,Resource} from './schema.js';
+import type {HierarchyNode,IamAssignment,Resource} from './schema.js';
 import {health} from './topology.js';
 export type ScopeStats={resources:number;networks:number;warn:number;stopped:number};
 export type ScopeIndex={nodes:Map<string,HierarchyNode>;children:Map<string,HierarchyNode[]>;roots:Record<string,HierarchyNode[]>;stats:Map<string,ScopeStats>;scopesUnder:(id:string)=>string[];pathTo:(id:string)=>HierarchyNode[]};
@@ -26,4 +26,18 @@ export function buildScopeIndex(hierarchy:HierarchyNode[],resources:Resource[]):
   const pathTo=(id:string)=>{const out:HierarchyNode[]=[];for(let c=nodes.get(id);c;c=c.parent?nodes.get(c.parent):undefined)out.unshift(c);return out;};
   return{nodes,children,roots,stats,scopesUnder,pathTo};
 }
+// What every page filters by. Null scopes means the whole provider, or everything when the provider is 'all'.
+export type Focus={provider:string;scopes:Set<string>|null;inherits:(nativeId:string)=>boolean};
+export const ALL_FOCUS:Focus={provider:'all',scopes:null,inherits:()=>true};
+export function focusFor(index:ScopeIndex|null,tab:string):Focus{
+  if(tab.startsWith('provider:'))return{...ALL_FOCUS,provider:tab.slice(9)};
+  const node=index?.nodes.get(tab);if(!index||!node)return ALL_FOCUS;
+  const under=(id:string):HierarchyNode[]=>(index.children.get(id)??[]).flatMap(c=>[c,...under(c.id)]);
+  const related=new Set([...index.pathTo(tab),...under(tab)].map(n=>n.nativeId)),known=new Set([...index.nodes.values()].map(n=>n.nativeId));
+  // A group we cannot place in the tree stays visible: hiding a privileged assignment is the worse mistake.
+  return{provider:node.provider,scopes:new Set(index.scopesUnder(tab)),inherits:id=>related.has(id)||!known.has(id)};
+}
+export const inScope=(f:Focus,provider:string,scope?:string)=>(f.provider==='all'||provider===f.provider)&&(!f.scopes||(scope!==undefined&&f.scopes.has(scope)));
+// Org and group assignments carry a group's id rather than a leaf scope, and they apply to everything beneath that group.
+export const iamInScope=(f:Focus,a:Pick<IamAssignment,'provider'|'scope'|'level'>)=>a.level==='org'||a.level==='group'?(f.provider==='all'||a.provider===f.provider)&&(a.level==='org'||f.inherits(a.scope)):inScope(f,a.provider,a.scope);
 export const hierarchyNouns:Record<HierarchyNode['kind'],string>={tenant:'테넌트',managementGroup:'관리 그룹',subscription:'구독',organization:'조직',ou:'OU',account:'계정',folder:'폴더',project:'프로젝트'};
