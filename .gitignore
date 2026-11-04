@@ -2,7 +2,7 @@ node_modules/
 dist/
 .env*
 !.env.example
-data/*.json
+data/
 test-results/
 *.log
 .vercel

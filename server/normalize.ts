@@ -1,17 +1,21 @@
-import { ResourceSchema, type HierarchyNode, type Resource, type Link, type Provider } from '../shared/schema.js';
+import { ResourceSchema, type CostRow, type HierarchyNode, type IamAssignment, type Resource, type Link, type Provider } from '../shared/schema.js';
 import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[]};
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];awsInventory?:{account:string;rows:Raw[]}};
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
 const name=(r:Raw)=>r.Tags?.find((t:Raw)=>t.Key==='Name')?.Value;
 const relation=(source:string,target:string,kind:Link['kind'],label:string,evidence:string,transit?:boolean):Link=>({id:`${kind}:${source}:${target}`,source,target,kind,label,evidence,...(transit?{transit}:{})});
 const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['storage','Storage account']};
+// Rows folded into other resources, so they never appear as items of their own.
+const AZURE_CONSUMED=new Set(['microsoft.network/networkinterfaces','microsoft.network/privateendpoints','microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
-export function finish(parts:Normalized[]):Normalized {
+const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
+export function finish(input:Normalized[]):Normalized {
+  const parts=input.map(p=>p.awsInventory?{...p,resources:[...p.resources,...awsListed(p.awsInventory)]}:p);
   const resources=[...new Map(parts.flatMap(p=>p.resources).map(r=>[r.id,r])).values()];
   const warnings=parts.flatMap(p=>p.warnings),ids=new Set(resources.map(r=>r.id));
   // A TGW shared through RAM appears in member accounts without its owner, so attachments resolve by region and ID.
@@ -34,7 +38,7 @@ export function finish(parts:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()]};
+  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
 }
 export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
   const resources:Resource[]=[], links:Link[]=[];
@@ -82,7 +86,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
     } else if(t==='microsoft.sql/servers'){
       const pe=privateEndpoints.get(native);
       add('database',{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.state??'미확인',specs:{'종류':'Azure SQL','버전':p.version??'미확인','연결':pe?'Private Endpoint':'공용 엔드포인트'}});
-    }
+    }else if(!AZURE_CONSUMED.has(t))add('service',{status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
   }
   // Routes attach after the pass above so a UDR can reference a firewall from any row order.
   const routeTables=rows.filter(r=>r.type.toLowerCase()==='microsoft.network/routetables'),byAddress=new Map(resources.filter(r=>r.kind==='appliance'&&r.ip).map(r=>[r.ip!,r]));
@@ -131,6 +135,7 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   for(const r of data.VpcPeeringConnections??[])if(r.Status?.Code==='active')links.push(relation(id(r.RequesterVpcInfo.VpcId,r.RequesterVpcInfo.OwnerId??scope),id(r.AccepterVpcInfo.VpcId,r.AccepterVpcInfo.OwnerId??scope),'peering','Peering','vpcPeeringConnection'));
   for(const r of data.LoadBalancers??[]){
     add(r,'LoadBalancerName','loadbalancer','AWS::ElasticLoadBalancingV2::LoadBalancer',{parent:r.AvailabilityZones?.[0]?.SubnetId?id(r.AvailabilityZones[0].SubnetId):undefined,status:r.State?.Code??'미확인',specs:{'종류':`${r.Type??'application'} LB`,'공개 범위':r.Scheme??'미확인'}});
+    for(const sg of r.SecurityGroups??[])links.push(relation(id(sg),id(r.LoadBalancerName),'policy','Security Group 적용','loadBalancer.SecurityGroups'));
     for(const target of r.Targets??[])links.push(relation(id(r.LoadBalancerName),id(target),'attachment','대상 그룹','describeTargetHealth.Target.Id'));
   }
   for(const r of data.DBInstances??[]){
@@ -172,6 +177,7 @@ export function normalizeGcp(assets:Raw[]):Normalized {
       if(p.router)links.push(relation(id(a.name),id(p.router),'attachment','VPN BGP','vpnTunnel.router'));
     } else if(t==='redis.googleapis.com/Instance')add('database',{parent:p.authorizedNetwork?id(p.authorizedNetwork):undefined,ip:p.host,status:p.state==='READY'?'available':p.state??'미확인',specs:{'종류':'Memorystore','티어':p.tier??'미확인'}});
     else if(t==='sqladmin.googleapis.com/Instance')add('database',{parent:p.settings?.ipConfiguration?.privateNetwork?id(p.settings.ipConfiguration.privateNetwork):undefined,ip:p.ipAddresses?.[0]?.ipAddress,status:p.state??'미확인',specs:{'종류':'Cloud SQL','버전':p.databaseVersion??'미확인','티어':p.settings?.tier??'미확인'}});
+    else if(t!=='compute.googleapis.com/Route'&&!t.startsWith('cloudresourcemanager.'))add('service',{status:p.state??p.status??'구성 수집됨',specs:{'서비스':t}});
   }
   for(const a of assets)if(a.assetType==='compute.googleapis.com/Route'){
     const p=a.resource?.data??{},network=resources.find(r=>r.id===id(p.network??''));if(!network)continue;
@@ -179,4 +185,43 @@ export function normalizeGcp(assets:Raw[]):Normalized {
     network.routes.push({destination:p.destRange??'미확인',nextHop:String(hop).split('/').pop()??'미확인',via:p.nextHopPeering?'Peering':p.nextHopIlb?'Load Balancer':p.nextHopGateway?'Gateway':p.nextHopVpnTunnel?'VPN':'IP'});
   }
   return {resources,links,warnings:[],scopeLabels:{}};
+}
+
+const PRIVILEGED=new Set(['owner','contributor','user access administrator','administratoraccess','iamfullaccess','poweruseraccess','roles/owner','roles/editor','roles/iam.securityadmin','roles/resourcemanager.organizationadmin']);
+export const isPrivileged=(role:string)=>PRIVILEGED.has(role.toLowerCase());
+const guidOf=(id:string)=>id.split('/').pop()?.toLowerCase()??id;
+const azurePrincipalType=(t?:string)=>t==='User'?'user' as const:t==='Group'?'group' as const:t==='ServicePrincipal'?'serviceAccount' as const:'unknown' as const;
+export function normalizeAzureIam(rows:Raw[],names:Map<string,string>=new Map()):IamAssignment[]{
+  const roleNames=new Map(rows.filter(r=>r.type.toLowerCase().endsWith('roledefinitions')).map(r=>[guidOf(r.id),r.properties?.roleName]));
+  return rows.filter(r=>r.type.toLowerCase().endsWith('roleassignments')).map(r=>{
+    const p=r.properties??{},scope=String(p.scope??''),sub=scope.match(/\/subscriptions\/([^/]+)/i)?.[1],mg=scope.match(/managementGroups\/([^/]+)/i)?.[1],role=roleNames.get(guidOf(p.roleDefinitionId??''))??guidOf(p.roleDefinitionId??'미확인');
+    return{id:`azure:${r.id}`,provider:'azure',principal:names.get(String(p.principalId).toLowerCase())??p.principalId,principalType:azurePrincipalType(p.principalType),role,scope:sub??mg??'tenant',level:sub?(scope.toLowerCase().includes('/resourcegroups/')?'resource':'scope'):mg?'group':'org',privileged:isPrivileged(role),external:false,source:'Azure Resource Graph · authorizationresources'};
+  });
+}
+const DAY=86_400_000;
+export function normalizeAwsIam(data:Raw,account:string,now=Date.now()):IamAssignment[]{
+  const out:IamAssignment[]=[],source='AWS IAM';
+  for(const u of data.users??[]){
+    const oldest=(u.keys??[]).filter((k:Raw)=>k.Status==='Active').map((k:Raw)=>Date.parse(k.CreateDate)).sort()[0];
+    for(const [role,via] of [...(u.policies??[]).map((x:Raw)=>[x.PolicyName,'직접']),...(u.groupPolicies??[]).map((x:Raw)=>[x.PolicyName,x.group])] as [string,string][])
+      out.push({id:`aws:${account}:user:${u.UserName}:${role}`,provider:'aws',principal:u.UserName,principalType:'user',role,scope:account,level:'scope',privileged:isPrivileged(role),external:false,mfa:u.mfa,keyAgeDays:oldest?Math.floor((now-oldest)/DAY):undefined,source:via==='직접'?source:`${source} · 그룹 ${via}`});
+  }
+  for(const r of data.roles??[]){
+    let trust:Raw={};try{trust=typeof r.AssumeRolePolicyDocument==='string'?JSON.parse(decodeURIComponent(r.AssumeRolePolicyDocument)):r.AssumeRolePolicyDocument??{};}catch{/* an unreadable trust policy simply is not flagged */}
+    const principals=(Array.isArray(trust.Statement)?trust.Statement:[trust.Statement]).filter(Boolean).flatMap((x:Raw)=>x.Principal?.AWS?[x.Principal.AWS].flat():[]) as string[];
+    // Trust from outside the known accounts is what deserves a second look; which accounts are "known" is settled when snapshots merge.
+    const external=principals.filter(a=>{const owner=a.match(/::(\d{12}):/)?.[1];return owner&&owner!==account;});
+    for(const x of r.policies??[])out.push({id:`aws:${account}:role:${r.RoleName}:${x.PolicyName}`,provider:'aws',principal:r.RoleName,principalType:'role',role:x.PolicyName,scope:account,level:'scope',privileged:isPrivileged(x.PolicyName),external:external.length>0,source:external.length?`${source} · 신뢰: ${external.join(', ')}`:source});
+  }
+  return out;
+}
+export function normalizeGcpIam(assets:Raw[],projectNumbers:Map<string,string>=new Map(),fallbackProject?:string,orgDomain?:string):IamAssignment[]{
+  const out:IamAssignment[]=[];
+  for(const a of assets)for(const b of a.iamPolicy?.bindings??[])for(const member of b.members??[]){
+    const [kind,value=kind]=String(member).split(/:(.*)/s),type=kind==='user'?'user' as const:kind==='group'?'group' as const:kind==='serviceAccount'?'serviceAccount' as const:kind==='allUsers'||kind==='allAuthenticatedUsers'?'public' as const:'unknown' as const;
+    const tail=String(a.name).split('/').pop()!,level=a.assetType.endsWith('/Organization')?'org' as const:a.assetType.endsWith('/Folder')?'group' as const:'scope' as const,scope=level==='scope'?projectNumbers.get(tail)??fallbackProject??tail:tail,domain=value.split('@')[1];
+    const external=type==='public'||(type==='user'&&!!orgDomain&&!!domain&&domain!==orgDomain);
+    out.push({id:`gcp:${a.name}:${b.role}:${member}`,provider:'gcp',principal:value,principalType:type,role:b.role,scope,level,privileged:isPrivileged(b.role),external,source:'Cloud Asset Inventory · IAM_POLICY'});
+  }
+  return out;
 }

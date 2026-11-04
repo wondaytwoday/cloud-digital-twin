@@ -12,7 +12,7 @@ export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'A
 export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
 const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
-const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','firewall','external','subnet','network','onprem'];
+const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','firewall','external','subnet','network','onprem'];
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
@@ -42,7 +42,7 @@ function buildItems(snapshot:Snapshot,f:Filter){
   for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(r.provider)??regionsOf.set(r.provider,new Set()).get(r.provider)!).add(r.region);
   const topLevel=(r:Resource)=>(regionsOf.get(r.provider)?.size??0)>=2&&regionsOf.get(r.provider)!.has(r.region)?ensure({id:regionId(r),parent:provider(r.provider),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):provider(r.provider);
   for(const r of keep.values()){
-    if(r.kind==='firewall'&&!f.policy)continue;
+    if(r.kind==='service'||(r.kind==='firewall'&&!f.policy))continue;
     if(r.provider==='onprem'){ensure({id:r.id,resource:r,label:r.name,provider:r.provider});continue;}
     const container=r.kind==='network'||r.kind==='subnet';
     ensure({id:r.id,parent:r.parent&&keep.has(r.parent)?r.parent:topLevel(r),resource:r,variant:container?r.kind as Variant:undefined,label:r.name,subtitle:r.cidr,provider:r.provider,outOfScope:outside.has(r.id)});

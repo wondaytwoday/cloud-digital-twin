@@ -24,6 +24,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
   const ancestry=new Set([r.id]);for(let p=r.parent;p;p=snapshot.resources.find(x=>x.id===p)?.parent)ancestry.add(p);
   const appliedPolicies=snapshot.links.filter(e=>e.kind==='policy'&&ancestry.has(e.target)).map(e=>snapshot.resources.find(x=>x.id===e.source)!);
   const policies=[...new Map(appliedPolicies.map(p=>[p.id,p])).values()];
+  const access=snapshot.iam.filter(a=>a.scope===r.scope);
   const change=snapshot.changes?.items.find(c=>c.id===r.id);
   const routes=[r,...[...ancestry].map(id=>snapshot.resources.find(x=>x.id===id)).filter((x):x is Resource=>!!x)].find(x=>x.routes.length)?.routes??[];
   const copy=async()=>{try{await navigator.clipboard.writeText(r.nativeId);setCopied(true)}catch{setCopied(false)}};
@@ -42,7 +43,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
       {!!routes.length&&<><h3>라우팅 <span className="count">{routes.length}</span></h3><table className="routes"><thead><tr><th>목적지</th><th>다음 홉</th></tr></thead><tbody>{routes.map((x,i)=><tr key={i}><td className="mono">{x.destination}</td><td>{x.nextHop}<small>{x.via}</small></td></tr>)}</tbody></table></>}
       <h3>연결 관계 <span className="count">{related.length}</span></h3>{related.map(e=>{const other=snapshot.resources.find(x=>x.id===(e.source===r.id?e.target:e.source));return <button className="relation-row" key={e.id} onClick={()=>other&&onSelect(other.id)}><Link2 size={14}/><span>{other?.name}<small>{e.label}{e.kind==='simulation'?' · 시뮬레이션':''}</small></span><ArrowUpRight size={13}/></button>})}
       <div className="notice"><Info size={15}/><p>정책 허용은 실제 도달 가능 여부와 다릅니다. 라우팅·NAT·반환 경로는 별도 검증이 필요합니다.</p></div></>}
-    {tab==='access'&&<><h3><ShieldCheck size={14}/>역할 할당</h3>{r.iam.length?r.iam.map((a,i)=><div key={i} className="rule-card"><span className="demo-label">예제 할당</span><h4>{a.principal}</h4><p className="small">{a.role}</p><small className="muted">{scopeName(snapshot,a.scope)}</small></div>):<p className="muted small">IAM 데이터는 이번 수집 범위에 포함되지 않습니다.</p>}<div className="notice"><Info size={15}/><p>실제 IAM API 연동 전입니다. 상속·조건·거부 정책을 반영한 실효 권한이 아닙니다.</p></div></>}
+    {tab==='access'&&<><h3><ShieldCheck size={14}/>이 범위의 역할 할당 <span className="count">{access.length}</span></h3>{access.length?access.slice(0,20).map(a=><div key={a.id} className="rule-card"><div className="rule-top"><b>{a.role}</b>{a.privileged&&<span className="badge amber">특권</span>}{snapshot.mode==='mock'&&<span className="demo-label">예제</span>}</div><h4>{a.principal}</h4><small className="muted">{scopeName(snapshot,a.scope)}</small></div>):<p className="muted small">수집된 역할 할당이 없습니다.</p>}<div className="notice"><Info size={15}/><p>역할 할당 목록이며 상속, 조건, 거부 정책을 반영한 실효 권한이 아닙니다.</p></div></>}
     </div></aside>;
 }
 function RuleCard({rule}:{rule:Resource['rules'][number]}){

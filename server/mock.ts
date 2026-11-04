@@ -1,6 +1,8 @@
 import { fixtures } from './fixtures/index.js';
+import { seed } from './fixtures/opsdata.js';
 import type { OrgTree, Scenario } from './fixtures/types.js';
-import { awsHierarchy,collectAzureWith,collectAwsAccount,collectGcpWith,type AwsCaller } from './collectors.js';
+import { awsHierarchy,collectAwsCost,collectAwsIam,collectAwsInventory,collectAzureWith,collectAwsAccount,collectGcpCost,collectGcpWith,type AwsCaller,type GcpRequest } from './collectors.js';
+import { awsIamApi,awsResources,azureIam,azureServices,costPoints,gcpPolicies,gcpServices } from './fixtures/opsdata.js';
 import { finish,type Normalized } from './normalize.js';
 import { applySites } from './onprem.js';
 import { diffResources } from '../shared/diff.js';
@@ -9,22 +11,28 @@ import type { ScenarioId } from '../shared/scenarios.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
-const azureTransport=(rows:any[],names:Record<string,string>,tree?:OrgTree):typeof fetch=>async(url,init)=>{
+const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date):typeof fetch=>async(url,init)=>{
   const target=String(url);
+  if(target.includes('directoryObjects/getByIds'))return json({value:JSON.parse(String(init?.body)).ids.map((id:string)=>({id,displayName:iam.directory[id]??id}))});
+  if(target.includes('Microsoft.CostManagement/query')){const sub=target.match(/subscriptions\/([^/]+)/)![1];return json({properties:{columns:[{name:'Cost'},{name:'BillingMonth'},{name:'ServiceName'},{name:'Currency'}],rows:costPoints('azure',[sub],now).map(p=>[p.amount,`${p.month}-01T00:00:00`,p.service,'USD'])}});}
   if(target.includes('/tenants?'))return tree?json({value:[{tenantId:tree.id,displayName:tree.name}]}):new Response('{}',{status:403});
   if(target.includes('Microsoft.Management/managementGroups')){
     const child=(t:OrgTree):any=>t.scope?{type:'/subscriptions',name:t.scope,displayName:t.name}:{type:'Microsoft.Management/managementGroups',name:t.id,displayName:t.name,children:t.children?.map(child)};
     return json({name:tree!.id,properties:{displayName:tree!.name,children:tree!.children?.map(child)}});
   }
-  if(target.includes('Microsoft.ResourceGraph')){const offset=Number(JSON.parse(String(init?.body)).options.$skipToken??0),end=offset+PAGE;return json({data:rows.slice(offset,end),...(end<rows.length?{$skipToken:String(end)}:{})});}
+  if(target.includes('Microsoft.ResourceGraph')){const body=JSON.parse(String(init?.body)),source=String(body.query).startsWith('authorizationresources')?iam.rows:rows,offset=Number(body.options.$skipToken??0),end=offset+PAGE;return json({data:source.slice(offset,end),...(end<source.length?{$skipToken:String(end)}:{})});}
   const sub=target.match(/subscriptions\/([^?]+)/)?.[1]??'';return json({subscriptionId:sub,displayName:names[sub],tenantId:tree?.id});
 };
 const awsTransport=(api:Record<string,any>):AwsCaller=>async(_service,operation,input={})=>{
-  const response=api[operation]??{},key=Object.keys(response)[0];if(!key||!input.MaxResults)return response;
+  const entry=api[operation]??{},response=typeof entry==='function'?entry(input):entry,key=Object.keys(response)[0];if(!key||!input.MaxResults)return response;
   const offset=Number(input.NextToken??0),end=offset+2,rows=response[key];
   return {[key]:rows.slice(offset,end),...(end<rows.length?{NextToken:String(end)}:{})};
 };
-const gcpTransport=(all:any[])=>async(url:string)=>{const params=new URL(url).searchParams,types=new Set(params.getAll('assetTypes')),assets=all.filter(a=>types.has(a.assetType)),offset=Number(params.get('pageToken')??0),end=offset+PAGE;return {readTime:new Date().toISOString(),assets:assets.slice(offset,end),...(end<assets.length?{nextPageToken:String(end)}:{})};};
+const gcpTransport=(all:any[],policies:any[],now:Date):GcpRequest=>async(url,init)=>{
+  if(url.includes('bigquery.googleapis.com')){const scopes=[...new Set(all.filter(a=>!String(a.assetType).startsWith('cloudresourcemanager')).map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];return {jobComplete:true,rows:costPoints('gcp',scopes,now).map(p=>({f:[{v:p.month.replace('-','')},{v:p.scope},{v:p.service},{v:'USD'},{v:String(p.amount)}]}))};}
+  const params=new URL(url).searchParams,types=new Set(params.getAll('assetTypes')),source=params.get('contentType')==='IAM_POLICY'?policies:all,assets=source.filter(a=>!types.size||types.has(a.assetType)),offset=Number(params.get('pageToken')??0),end=offset+PAGE;
+  return {readTime:now.toISOString(),assets:assets.slice(offset,end),...(end<assets.length?{nextPageToken:String(end)}:{})};
+};
 const awsOrgTransport=(tree:OrgTree):AwsCaller=>async(_service,operation,input={})=>{
   if(operation==='DescribeOrganization')return {Organization:{Id:tree.id,Name:tree.name}};
   if(operation==='ListRoots')return {Roots:[{Id:`r-${tree.id}`}]};
@@ -33,24 +41,43 @@ const awsOrgTransport=(tree:OrgTree):AwsCaller=>async(_service,operation,input={
   if(operation==='ListAccountsForParent')return {Accounts:kids.filter(k=>k.scope).map(k=>({Id:k.scope,Name:k.name}))};
   return {OrganizationalUnits:kids.filter(k=>!k.scope).map(k=>({Id:k.id,Name:k.name}))};
 };
-function gcpOrgAssets(tree:OrgTree){
+function gcpOrgAssets(tree:OrgTree,numbers:Map<string,string>){
   const assets:any[]=[{name:`//cloudresourcemanager.googleapis.com/organizations/${tree.id}`,assetType:'cloudresourcemanager.googleapis.com/Organization',resource:{data:{name:`organizations/${tree.id}`,displayName:tree.name}}}];
   const walk=(t:OrgTree,parentType:'organization'|'folder')=>{for(const c of t.children??[]){
-    if(c.scope)assets.push({name:`//cloudresourcemanager.googleapis.com/projects/${c.scope}`,assetType:'cloudresourcemanager.googleapis.com/Project',resource:{data:{projectId:c.scope,name:c.name,parent:{type:parentType,id:t.id}}}});
+    if(c.scope)assets.push({name:`//cloudresourcemanager.googleapis.com/projects/${c.scope}`,assetType:'cloudresourcemanager.googleapis.com/Project',resource:{data:{projectId:c.scope,projectNumber:numbers.get(c.scope),name:c.name,parent:{type:parentType,id:t.id}}}});
     else{assets.push({name:`//cloudresourcemanager.googleapis.com/folders/${c.id}`,assetType:'cloudresourcemanager.googleapis.com/Folder',resource:{data:{name:`folders/${c.id}`,displayName:c.name,parent:`${parentType}s/${t.id}`}}});walk(c,'folder');}
   }};
   walk(tree,'organization');return assets;
 }
-async function collectScenario(s:Scenario){
+async function collectScenario(s:Scenario,now:Date){
   const parts:Normalized[]=[];
-  if(s.azure)parts.push(await collectAzureWith(Object.keys(s.azure.subscriptions),async()=>'demo-token',azureTransport(s.azure.rows,s.azure.subscriptions,s.azure.tree)));
-  for(const a of s.aws??[])parts.push(await collectAwsAccount(awsTransport(a.api),a.account,a.region,a.label));
+  if(s.azure){
+    const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
+    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now),{graphToken:async()=>'demo-token'}));
+  }
+  for(const a of s.aws??[]){const merged={...a.api,...awsIamApi(a.account,a.label,now)};parts.push(await collectAwsAccount(awsTransport(merged),a.account,a.region,a.label));}
+  const accounts=[...new Map((s.aws??[]).map(a=>[a.account,a])).values()];
+  for(const a of accounts){
+    const iam=await collectAwsIam(awsTransport(awsIamApi(a.account,a.label,now)),a.account),inventory=await collectAwsInventory(awsTransport({ListResources:{Resources:awsResources(a.account,a.label,a.region)}}));
+    parts.push({resources:[],links:[],warnings:[],scopeLabels:{},iam:iam.iam,awsInventory:{account:a.account,rows:inventory.rows}});
+  }
+  if(accounts.length){
+    const points=accounts.flatMap(a=>costPoints('aws',[a.account],now).map(p=>({...p})));
+    const months=[...new Set(points.map(p=>p.month))];
+    const ce:AwsCaller=async()=>({ResultsByTime:months.map(m=>({TimePeriod:{Start:`${m}-01`},Groups:points.filter(p=>p.month===m).map(p=>({Keys:[p.scope,p.service],Metrics:{UnblendedCost:{Amount:String(p.amount),Unit:'USD'}}}))}))});
+    parts.push({resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectAwsCost(ce,now)});
+  }
   if(s.awsOrg)parts.push({resources:[],links:[],warnings:[],scopeLabels:{},hierarchy:await awsHierarchy(awsOrgTransport(s.awsOrg))});
-  if(s.gcp)parts.push(await collectGcpWith(s.gcp.parent,gcpTransport([...s.gcp.assets,...(s.gcp.tree?gcpOrgAssets(s.gcp.tree):[])])));
+  if(s.gcp){
+    const projects=[...new Set(s.gcp.assets.map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];
+    const numbers=new Map<string,string>(),policies=gcpPolicies(projects,s.gcp.tree?{id:s.gcp.tree.id,domain:s.gcp.tree.name}:null,numbers);
+    const assets=[...s.gcp.assets,...projects.flatMap(gcpServices),...(s.gcp.tree?gcpOrgAssets(s.gcp.tree,numbers):[])],request=gcpTransport(assets,policies,now);
+    parts.push(await collectGcpWith(s.gcp.parent,request),{resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectGcpCost(request,'demo.billing.export',now)});
+  }
   return finish(parts);
 }
 export async function mockSnapshot(id:ScenarioId='standard'){
-  const scenario=fixtures[id],{resources,links,warnings,scopeLabels,hierarchy}=await collectScenario(scenario);
+  const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam}=await collectScenario(scenario,clock);
   const named=(name:string)=>{const r=resources.find(x=>x.name===name);if(!r)throw new Error(`Fixture ${id}: unknown resource ${name}`);return r;};
   applySites(scenario.onprem??[],resources,links,warnings,scopeLabels);
   addSyntheticTelemetry(resources);
@@ -61,7 +88,7 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
   const now=Date.now();
-  return validateSnapshot({version:1,mode:'mock',scenario:id,changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy});
+  return validateSnapshot({version:1,mode:'mock',scenario:id,changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
 }
 // A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
 function demoChanges(resources:Resource[],now:number){
@@ -76,7 +103,6 @@ function demoChanges(resources:Resource[],now:number){
 function addSyntheticTelemetry(resources:Resource[]){
   for(const [i,r] of resources.filter(r=>r.kind==='compute').entries()){
     if(!/stopped|deallocated|terminated|failed/i.test(r.status)){const cpu=18+(i*13)%62;r.metrics={cpu,memory:35+(i*17)%50,history:Array.from({length:12},(_,h)=>Math.max(4,Math.min(96,cpu+((h*7+i*5)%24)-12)))};}
-    r.iam=[{principal:r.provider==='azure'?'platform-operators':r.provider==='aws'?'PlatformReadOnly':'platform@example.internal',role:r.provider==='azure'?'Reader':r.provider==='aws'?'ReadOnlyAccess':'roles/viewer',scope:r.scope}];
   }
 }
 function syntheticFlow({hops,rate}:{hops:string[];rate:string},named:(name:string)=>Resource):Link[]{
