@@ -140,6 +140,8 @@ npm run test:e2e
 | `src/App.tsx` | 화면 전환, 탭, URL, 강조 표시 |
 | `src/pages/` | 대시보드, 조치 항목, 변경 이력, 네트워크, 노출·방화벽, IAM, 비용 화면 |
 | `src/ScopeBar.tsx` | 모든 화면에 적용되는 클라우드·관리 범위 필터 |
+| `src/CollectProgress.tsx`, `shared/collect.ts` | 수집 단계와 진행률 표시 |
+| `server/env.ts` | `.env`, `.env.local` 읽기 |
 | `src/ConnectGuide.tsx`, `shared/connectors.ts` | 첫 접속 연결 가이드 |
 | `src/charts.tsx` | 차트와 지표 카드 |
 | `src/ScopeHome.tsx`, `src/ScopeTree.tsx` | 관리 범위 첫 화면과 트리 |

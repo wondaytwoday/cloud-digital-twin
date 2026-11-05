@@ -6,13 +6,13 @@ import {diffResources} from '../shared/diff.js';
 import {FileSnapshotStore,type SnapshotStore} from './store.js';
 import {applySites,readSites} from './onprem.js';
 import {requireAccess,requireAdmin,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
-import {collectorEnabled,emptyStatus,liveStatus,runCollection,type ProviderState} from './runner.js';
+import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');
 app.use((_req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','X-Frame-Options':'DENY'});next();});
 app.use('/api/session',express.json({limit:'4kb'}));
-app.get('/api/health',(_req,res)=>res.json({ok:true,mode:process.env.DATA_MODE??'mock'}));
+app.get('/api/health',(_req,res)=>res.json({ok:true,mode:process.env.DATA_MODE??'mock',collector:collectorEnabled(),serverless:!!process.env.VERCEL}));
 sessionRoutes(app);
 export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
   const snapshots:Snapshot[]=[],warnings:string[]=[],changes:Change[]=[],status=await store.readStatus();let since:string|undefined;
@@ -38,19 +38,19 @@ app.get('/api/topology',requireAccess,async(req,res)=>{
   try{
     if(process.env.DATA_MODE!=='live'){res.json(await mockSnapshot(isScenario(req.query.scenario)?req.query.scenario:'standard'));return;}
     const snapshot=await liveSnapshot();
-    if(!snapshot){res.status(503).json({error:'실제 스냅샷이 없습니다. npm run collect로 먼저 수집하세요. 목데이터로 자동 대체하지 않습니다.',onboarding:collectorEnabled()});return;}
+    if(!snapshot){res.status(503).json({error:process.env.VERCEL?'Vercel 배포는 수집을 실행하거나 결과를 저장할 수 없어 보여줄 스냅샷이 없습니다. 클라우드에 접근되는 PC나 서버에서 npm run live를 실행하세요.':'실제 스냅샷이 없습니다. npm run collect로 먼저 수집하세요. 목데이터로 자동 대체하지 않습니다.',onboarding:collectorEnabled()});return;}
     const access=res.locals.access as AccessEntry|undefined;
     res.json(access?restrictSnapshot(snapshot,access.scopes):snapshot);
   }catch(e){console.error('Snapshot load failed:',e instanceof Error?e.message:'unknown');res.status(500).json({error:'스냅샷 형식 또는 참조가 올바르지 않습니다. 서버 로그와 수집 결과를 확인하세요.'});}
 });
 app.get('/api/collect/status',requireAccess,requireAdmin,async(_req,res)=>{
   res.set('Cache-Control','no-store');
-  try{res.json({enabled:collectorEnabled(),...(liveStatus()??await new FileSnapshotStore().readStatus()??emptyStatus())});}
+  try{res.json({enabled:collectorEnabled(),...await readCollectionStatus()});}
   catch{res.status(500).json({error:'수집 상태를 읽지 못했습니다.'});}
 });
 // The custom header makes a cross-site form or fetch impossible without a CORS grant this server never gives.
 app.post('/api/collect',requireAccess,requireAdmin,(req,res)=>{
-  if(!collectorEnabled()){res.status(409).json({error:'이 배포에서는 수집을 실행할 수 없습니다.'});return;}
+  if(!collectorEnabled()){res.status(409).json({error:'이 배포에서는 수집을 실행할 수 없습니다. npm run live로 실행한 서버에서만 수집합니다.'});return;}
   if(req.get('X-Atlas-Request')!=='1'){res.status(403).json({error:'잘못된 요청입니다.'});return;}
   runCollection().catch(e=>console.error('Collection failed:',e instanceof Error?e.message:'unknown'));
   res.status(202).json({started:true});

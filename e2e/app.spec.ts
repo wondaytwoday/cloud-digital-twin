@@ -98,6 +98,7 @@ test.describe('first visit',()=>{
     const context=await browser.newContext({viewport:{width:1600,height:1000}}),page=await context.newPage();
     await page.route('https://fonts.g*/**',r=>r.abort());await page.goto('/?scenario=standard');
     const guide=page.getByRole('dialog',{name:'클라우드 연결 가이드'});await expect(guide).toBeVisible();
+    await expect(guide).toContainText('목데이터 모드');await expect(guide).toContainText('npm run check');
     for(const [tab,text] of [['Microsoft Azure','Cost Management Reader'],['Amazon Web Services','AtlasCollector'],['Google Cloud','ATLAS_GCP_BILLING_TABLE']]){await guide.getByRole('tab',{name:tab}).click();await expect(guide).toContainText(text);}
     await guide.getByRole('button',{name:'목데이터로 둘러보기'}).click();await expect(guide).toHaveCount(0);
     await expect(page.getByRole('heading',{name:'운영 대시보드'})).toBeVisible();await expect(page.locator('.kpi-row')).toContainText('이번 달 예상 비용');
@@ -135,7 +136,7 @@ test('network page lists peerings and jumps to the map',async({page})=>{
   await page.locator('.table-link',{hasText:'er-seoul-01'}).first().click();await settled(page);await expect(page.locator('.inspector')).toContainText('er-seoul-01');
 });
 test('non-network services open in the inventory, not an empty map',async({page})=>{
-  await page.goto('/?scenario=standard');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-assets');await page.keyboard.press('Enter');
+  await page.goto('/?scenario=standard');await page.waitForSelector('.kpi-row');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-assets');await page.keyboard.press('Enter');
   await expect(page.locator('tbody tr',{hasText:'commerce-prod-assets'})).toBeVisible();
 });
 test('a scope chosen on one page applies everywhere and survives back',async({page})=>{
