@@ -14,7 +14,8 @@ import {costSpikes,summarizeCost} from '../shared/cost.ts';
 import {cidrOverlaps,hybridLinks,parseCidr,portMatches} from '../shared/network.ts';
 import {findings} from '../shared/findings.ts';
 import {normalizeAwsIam,normalizeAzureIam,normalizeGcpIam} from '../server/normalize.ts';
-import {configureCollector,runCollection,toSnapshot,type CollectorDrivers} from '../server/runner.ts';
+import {configureCollector,emptyStatus,explainAuth,liveStatus,needsCollection,readCollectionStatus,runCollection,toSnapshot,type CollectorDrivers} from '../server/runner.ts';
+import {newStages,overallProgress,providerProgress} from '../shared/collect.ts';
 import {FileSnapshotStore} from '../server/store.ts';
 import {restrictSnapshot} from '../server/auth.ts';
 import app,{liveSnapshot} from '../server/app.ts';
@@ -389,4 +390,60 @@ test('findings narrow with the focus, and an overlap stays visible from either s
   for(const side of [o.a,o.b]){const list=findings(s,undefined,focusFor(index,`${side.provider}:scope:${side.scope}`));assert.ok(list.some(f=>f.id===`overlap:${o.a.id}:${o.b.id}`));}
   const leaf=s.hierarchy.find(n=>n.scope&&s.iam.some(a=>a.scope===n.scope&&a.privileged))!,scoped=findings(s,undefined,focusFor(index,leaf.id));
   assert.ok(scoped.length<all.length);assert.ok(scoped.filter(f=>f.scope).every(f=>f.scope===leaf.scope||s.iam.some(a=>a.level!=='scope'&&a.scope===f.scope)));
+});
+test('env files fill gaps but never override the shell, and Vercel tokens stay out',async()=>{
+  const dir=await mkdtemp(path.join(tmpdir(),'atlas-env-')),{writeFile}=await import('node:fs/promises'),{loadEnvFiles}=await import('../server/env.ts');
+  await writeFile(path.join(dir,'.env'),'AZURE_CLIENT_ID=from-env\nAZURE_TENANT_ID=from-env\nAWS_PROFILE=from-env\n');await writeFile(path.join(dir,'.env.local'),'AZURE_TENANT_ID=from-local\nVERCEL_OIDC_TOKEN=secret\n');
+  const env:NodeJS.ProcessEnv={AWS_PROFILE:'from-shell'};loadEnvFiles(env,[path.join(dir,'.env.local'),path.join(dir,'.env'),path.join(dir,'.missing')]);
+  assert.equal(env.AWS_PROFILE,'from-shell');assert.equal(env.AZURE_TENANT_ID,'from-local');assert.equal(env.AZURE_CLIENT_ID,'from-env');assert.equal(env.VERCEL_OIDC_TOKEN,undefined);
+});
+test('a restart collects again whenever a cloud has no good result yet',()=>{
+  const at=new Date(1_000_000_000).toISOString(),soon=1_000_000_000+60_000,ok={state:'ok' as const},status=(gcp:'ok'|'unauthenticated'|'failed')=>({running:false,finishedAt:at,providers:{azure:ok,aws:ok,gcp:{state:gcp}}});
+  assert.equal(needsCollection(null,60,soon),true,'never collected');
+  assert.equal(needsCollection(status('ok'),60,soon),false,'recent and complete');
+  assert.equal(needsCollection(status('unauthenticated'),60,soon),true,'credentials were just added');
+  assert.equal(needsCollection(status('failed'),60,soon),true);
+  assert.equal(needsCollection(status('ok'),60,soon+3_600_000),true,'stale');
+});
+test('sign-in failures say what to change',()=>{
+  const azureEnv={AZURE_TENANT_ID:'t',AZURE_CLIENT_ID:'c',AZURE_CLIENT_SECRET:'s'};
+  assert.match(explainAuth('azure',new Error('x'),{AZURE_TENANT_ID:'t'}),/AZURE_CLIENT_ID, AZURE_CLIENT_SECRET/);
+  assert.match(explainAuth('azure',new Error('ChainedTokenCredential authentication failed.\nClientSecretCredential: AADSTS7000215: Invalid client secret'),azureEnv),/비밀 ID가 아닌 비밀 값/);
+  assert.match(explainAuth('azure',new Error('ChainedTokenCredential authentication failed.'),{}),/az login/);
+  assert.match(explainAuth('aws',new Error('x'),{AWS_ACCESS_KEY_ID:'a'}),/함께 설정/);
+  assert.match(explainAuth('aws',new Error('The provided authorization grant is invalid, expired, revoked, or malformed'),{}),/aws login/);
+  assert.match(explainAuth('aws',new Error('Could not load credentials from any providers'),{AWS_PROFILE:'p'}),/프로필 p/);
+  assert.match(explainAuth('gcp',new Error('x'),{GOOGLE_APPLICATION_CREDENTIALS:'/no/such/file.json'}),/파일을 찾지 못했습니다/);
+  assert.match(explainAuth('gcp',new Error('Could not load the default credentials.'),{}),/gcloud auth/);
+});
+test('runner: progress names the current stage, skips cost by policy, and settles every stage',async()=>{
+  const store=new FileSnapshotStore(await mkdtemp(path.join(tmpdir(),'atlas-')));let seen:string[]=[];
+  const collect=async({report}:any)=>{report('scopes',{state:'done',detail:'구독 1개'});report('resources',{detail:'자원 5개 읽음',done:1,total:2});seen=liveStatus()?.providers.azure.stages?.map(s=>`${s.id}:${s.state}`)??[];assert.equal(liveStatus()?.running,true);assert.equal(liveStatus()?.providers.azure.stages?.find(s=>s.id==='resources')?.detail,'자원 5개 읽음');return fakeResult('web-tier');};
+  const none={detect:async()=>{throw new Error('Could not load credentials from any providers');},collect:async()=>{throw new Error('must not run');}};
+  configureCollector({azure:{detect:async()=>'a',collect},aws:none,gcp:{detect:async()=>'g',collect:async()=>{throw new Error('boom');}}});
+  const status=await runCollection(store,()=>{}),stages=(p:'azure'|'aws'|'gcp')=>Object.fromEntries(status.providers[p].stages!.map(s=>[s.id,s.state]));
+  assert.ok(seen.includes('auth:done'));assert.equal(status.pid,process.pid);assert.ok(status.startedAt);
+  assert.deepEqual(stages('azure'),{auth:'done',scopes:'done',resources:'done',iam:'done',cost:'done',save:'done'});
+  assert.deepEqual(stages('aws'),{auth:'failed',scopes:'skipped',resources:'skipped',iam:'skipped',cost:'skipped',save:'skipped'});
+  assert.match(status.providers.aws.message!,/자격 증명을 찾지 못했습니다/);assert.equal(status.providers.gcp.state,'failed');
+  assert.equal(providerProgress(status.providers.aws.stages),1,'a skipped cloud does not hold the bar back');assert.equal(overallProgress(status)>.9,true);
+  configureCollector({azure:{detect:async()=>'a',collect:()=>fakeResult('web-tier')},aws:none,gcp:none});
+  const again=await runCollection(store);assert.equal(again.providers.azure.stages?.find(s=>s.id==='cost')?.state,'skipped','cost ran moments ago');
+});
+test('a status left by a killed process does not read as running forever',async()=>{
+  const store=new FileSnapshotStore(await mkdtemp(path.join(tmpdir(),'atlas-'))),base=emptyStatus();
+  base.providers.aws={state:'running',stages:newStages('aws').map(s=>s.id==='auth'?{...s,state:'running' as const}:s)};
+  await store.writeStatus({...base,running:true,pid:2_147_483_000});
+  const read=await readCollectionStatus(store);assert.equal(read.running,false);assert.equal(read.providers.aws.state,'failed');assert.equal(read.providers.aws.stages?.[0].state,'failed');assert.equal(read.providers.aws.stages?.[1].state,'skipped');
+  await store.writeStatus({...base,running:true,pid:process.pid});assert.equal((await readCollectionStatus(store)).running,true,'a live process is left alone');
+});
+test('collectors report progress through a real page walk',async()=>{
+  const events:string[]=[],report=(id:string,p:any={})=>events.push(`${id}:${p.state??'running'}:${p.detail??''}`);
+  const request=(async()=>new Response(JSON.stringify({data:[],displayName:'S',tenantId:'t',value:[],properties:{columns:[],rows:[]}}),{status:200})) as typeof fetch;
+  await collectAzureWith(['00000000-0000-4000-8000-000000000001'],async()=>'t',request,{report:report as any});
+  for(const want of ['scopes:running:구독 접근 확인','scopes:done:구독 1개','resources:running:Resource Graph 조회','resources:running:자원 0개 읽음','resources:done:자원 0개','iam:done:할당 0건','cost:done:0행'])assert.ok(events.includes(want),want);
+  events.length=0;
+  const gcp=async(url:string)=>url.includes('organizations:search')?{organizations:[]}:url.includes('/projects?')?{projects:[{projectId:'p1'}]}:{assets:[]};
+  await collectGcpAuto(gcp as any,{report:report as any});
+  for(const want of ['scopes:done:프로젝트 1개','resources:running:projects/p1 · 자원 0개 읽음','iam:running:projects/p1','resources:done:범위 1개','cost:skipped:ATLAS_GCP_BILLING_TABLE 미설정'])assert.ok(events.includes(want),want);
 });

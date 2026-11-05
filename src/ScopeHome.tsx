@@ -7,7 +7,7 @@ import {providerNames} from './layout';
 import {ScopeTree} from './ScopeTree';
 import {connectors} from '../shared/connectors';
 const leafNoun:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
-const badgeLabel:Record<string,string>={demo:'로그인 전',collected:'수집됨',partial:'일부 누락',missing:'미수집',failed:'수집 실패',unauthenticated:'로그인 필요',running:'수집 중'};
+const badgeLabel:Record<string,string>={demo:'예시 데이터',collected:'수집됨',partial:'일부 누락',missing:'미수집',failed:'수집 실패',unauthenticated:'로그인 필요',running:'수집 중'};
 const badgeTone:Record<string,string>={demo:'amber',collected:'',partial:'amber',missing:'neutral',failed:'red',unauthenticated:'amber',running:'neutral'};
 const groupKinds=new Set(['managementGroup','ou','folder']);
 export function ScopeHome({snapshot,index,onOpen,onConnect,onSelectResource}:{snapshot:Snapshot;index:ScopeIndex;onOpen:(id:string)=>void;onConnect:()=>void;onSelectResource:(id:string)=>void}){
@@ -23,7 +23,7 @@ export function ScopeHome({snapshot,index,onOpen,onConnect,onSelectResource}:{sn
         return <section className={`cloud-card ${p}`} key={p} aria-label={providerNames[p]}>
           <header><ProviderMark provider={p}/><div><h2>{providerNames[p]}</h2>{nodes.length?<p>{groups>0&&<>{hierarchyNouns[p==='azure'?'managementGroup':p==='aws'?'ou':'folder']} {groups} · </>}{leafNoun[p]} {scopes} · 자원 {count}</p>:<p>{snapshot.mode==='live'?'아직 수집되지 않음':'이 예시에는 없음'}</p>}</div>
             {connection&&<span className={`badge ${badgeTone[connection.status]}`}>{badgeLabel[connection.status]}</span>}</header>
-          {connection?.message&&connection.status!=='unauthenticated'&&<p className="cloud-note" role="status">{connection.message}</p>}
+          {connection?.message&&<p className="cloud-note" role="status">{connection.message}</p>}
           {nodes.length?<>
             <div className="cloud-body"><ScopeTree index={index} nodes={roots} onOpen={onOpen}/></div>
             {!hasOrg&&<p className="cloud-note">조직 계층을 읽지 않았거나 조직을 쓰지 않아 {leafNoun[p]}만 표시합니다.</p>}
