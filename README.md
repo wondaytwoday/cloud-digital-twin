@@ -193,4 +193,6 @@ npm run restore -- /backup/cloud-atlas/cloud-atlas-<시각>
 - 복구 전에 서버를 멈추고, 복구한 뒤 다시 시작하세요.
 - 백업 주기는 허용할 데이터 손실(RPO)에 맞춰 cron 등으로 실행합니다. 복구 시간(RTO)은 `--check`와 복구를 정기적으로 연습해 측정하세요.
 
+실제 계정으로 검증하기 전의 문서 기준 대조 결과와 검증 항목은 [docs/live-validation.md](docs/live-validation.md)에 있습니다.
+
 다른 서비스에 이 설계를 적용하려면 [docs/HANDOFF.md](docs/HANDOFF.md)를 보세요.

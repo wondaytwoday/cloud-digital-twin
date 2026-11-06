@@ -16,14 +16,33 @@ export function costWindow(now=new Date(),months=SIX_MONTHS){const start=new Dat
 // Injectable HTTP boundary permits contract tests and the demo mode without credentials or live calls.
 const AZURE_RESOURCES='Resources | project id, name, type, location, subscriptionId, resourceGroup, properties, tags, sku | order by id asc';
 const AZURE_IAM="authorizationresources | where type =~ 'microsoft.authorization/roleassignments' or type =~ 'microsoft.authorization/roledefinitions' | project id, type, properties, subscriptionId | order by id asc";
+const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
+// Azure answers throttling with 429 and how long to wait: Retry-After, or for Cost Management its own x-ms-ratelimit-*-retry-after headers.
+export const retryAfterMs=(headers:Headers,attempt:number)=>{
+  const named=[...headers.entries()].filter(([k])=>k==='retry-after'||/^x-ms-ratelimit-.*retry-after$/.test(k)).map(([,v])=>Number(v)).filter(n=>Number.isFinite(n)&&n>=0);
+  return Math.min(30_000,named.length?Math.max(100,Math.max(...named)*1000):Math.max(500,2**attempt*1000));
+};
+// Retries throttling and server errors with a fresh request each time, so the token and the per-request timeout are new on every attempt.
+export async function azureFetch(request:typeof fetch,url:string,init:()=>Promise<RequestInit>|RequestInit,attempts=4){
+  let response!:Response;
+  for(let attempt=0;attempt<attempts;attempt++){response=await request(url,await init());if(response.status!==429&&response.status<500)return response;if(attempt<attempts-1)await sleep(retryAfterMs(response.headers,attempt));}
+  return response;
+}
+// Resource Graph takes at most 1,000 subscriptions in one query (the CLI and SDKs batch the same way), so a larger tenant is read in batches.
+const ARG_BATCH=1000;
 export async function azurePages(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,query=AZURE_RESOURCES,onRows:(total:number)=>void=()=>{}){
+  const rows:Record<string,any>[]=[];
+  for(let i=0;i<subscriptions.length;i+=ARG_BATCH){const before=rows.length;rows.push(...await azureBatch(subscriptions.slice(i,i+ARG_BATCH),token,request,query,n=>onRows(before+n)));}
+  return rows;
+}
+async function azureBatch(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch,query:string,onRows:(total:number)=>void){
   const rows:Record<string,any>[]=[],seen=new Set<string>();let next:string|undefined;
   do{
     let response:Response|undefined;
     for(let attempt=0;attempt<4;attempt++){
       response=await request('https://management.azure.com/providers/Microsoft.ResourceGraph/resources?api-version=2024-04-01',{method:'POST',headers:{Authorization:`Bearer ${await token()}`,'Content-Type':'application/json'},body:JSON.stringify({subscriptions,query,options:{$top:1000,resultFormat:'objectArray',...(next?{$skipToken:next}:{})}}),signal:AbortSignal.timeout(30_000)});
       if(response.status!==429&&response.status<500)break;
-      if(attempt<3){const delay=Math.min(10_000,Math.max(500,(Number(response.headers.get('retry-after'))||2**attempt)*1000));await new Promise(r=>setTimeout(r,delay));}
+      if(attempt<3)await sleep(retryAfterMs(response.headers,attempt));
     }
     if(!response?.ok)throw new Error(`Azure Resource Graph HTTP ${response?.status}. 조회 범위와 Reader 권한을 확인하세요.`);
     const body=await response.json();if(!Array.isArray(body.data))throw new Error('Azure: expected objectArray');
@@ -56,21 +75,28 @@ export async function azureCost(subscriptions:string[],token:()=>Promise<string>
   const {start,end}=costWindow(now),rows:CostRow[]=[],failed:string[]=[];let done=0;
   for(const sub of subscriptions){
     onScope(done++,subscriptions.length);
-    const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}/providers/Microsoft.CostManagement/query?api-version=2023-11-01`,{method:'POST',headers:{Authorization:`Bearer ${await token()}`,'Content-Type':'application/json'},body:JSON.stringify({type:'ActualCost',timeframe:'Custom',timePeriod:{from:start,to:end},dataset:{granularity:'Monthly',aggregation:{totalCost:{name:'Cost',function:'Sum'}},grouping:[{type:'Dimension',name:'ServiceName'}]}}),signal:AbortSignal.timeout(60_000)});
-    if(!r.ok){failed.push(sub);continue;}
-    const body=await r.json(),cols=(body.properties?.columns??[]).map((c:any)=>c.name),at=(n:string)=>cols.indexOf(n);
-    for(const row of body.properties?.rows??[])rows.push({provider:'azure',scope:sub,service:row[at('ServiceName')]??'기타',month:String(row[at('BillingMonth')]).slice(0,7),amount:Number(row[at('Cost')]),currency:row[at('Currency')]??'USD'});
+    // Cost Management pages long answers through properties.nextLink, posted with the same query; a subscription that fails part way is dropped whole rather than undercounted.
+    const query=JSON.stringify({type:'ActualCost',timeframe:'Custom',timePeriod:{from:start,to:end},dataset:{granularity:'Monthly',aggregation:{totalCost:{name:'Cost',function:'Sum'}},grouping:[{type:'Dimension',name:'ServiceName'}]}}),mark=rows.length;let url:string|undefined=`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}/providers/Microsoft.CostManagement/query?api-version=2023-11-01`,ok=true;
+    while(url){
+      const r=await azureFetch(request,url,async()=>({method:'POST',headers:{Authorization:`Bearer ${await token()}`,'Content-Type':'application/json'},body:query,signal:AbortSignal.timeout(60_000)}));
+      if(!r.ok){ok=false;break;}
+      const body=await r.json(),cols=(body.properties?.columns??[]).map((c:any)=>c.name),at=(n:string)=>cols.indexOf(n);
+      for(const row of body.properties?.rows??[])rows.push({provider:'azure',scope:sub,service:row[at('ServiceName')]??'기타',month:String(row[at('BillingMonth')]).slice(0,7),amount:Number(row[at('Cost')]),currency:row[at('Currency')]??'USD'});
+      url=body.properties?.nextLink||undefined;
+    }
+    if(!ok){rows.length=mark;failed.push(sub);}
   }
   return{rows,failed};
 }
 // Activity Log keeps writes, deletes and actions per subscription; only the final Succeeded/Failed record of each operation is kept.
-export async function azureActivity(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,now=new Date()):Promise<Activity[]>{
-  const out:Activity[]=[],since=activitySince(now).toISOString();
-  for(const sub of subscriptions){
+// One subscription whose log cannot be read costs that subscription only; onFailed names it, and only when every one fails does the read fail.
+export async function azureActivity(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,now=new Date(),onFailed:(sub:string,e:unknown)=>void=()=>{}):Promise<Activity[]>{
+  const out:Activity[]=[],since=activitySince(now).toISOString();let failures=0,first:unknown;
+  for(const sub of subscriptions){const mark=out.length;try{
     const filter=encodeURIComponent(`eventTimestamp ge '${since}' and eventTimestamp le '${now.toISOString()}'`);
     let url:string|undefined=`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&$filter=${filter}&$select=eventTimestamp,caller,operationName,resourceId,status,eventDataId,httpRequest,claims`;let kept=0;
     while(url&&kept<ACTIVITY_CAP){
-      const r:Response=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(60_000)});if(!r.ok)throw new Error(`Activity Log 조회 실패 (${r.status})`);
+      const r:Response=await azureFetch(request,url,async()=>({headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(60_000)}));if(!r.ok)throw new Error(`Activity Log 조회 실패 (${r.status})`);
       const body:any=await r.json();
       for(const e of body.value??[]){
         const op=String(e.operationName?.value??''),status=String(e.status?.value??'');
@@ -80,13 +106,14 @@ export async function azureActivity(subscriptions:string[],token:()=>Promise<str
       }
       url=body.nextLink;
     }
-  }
+  }catch(e){out.length=mark;failures++;first??=e;onFailed(sub,e);}}
+  if(subscriptions.length&&failures===subscriptions.length)throw first;
   return out;
 }
 export async function collectAzureWith(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,options:CollectOptions&{graphToken?:()=>Promise<string>}={}):Promise<Normalized>{
   // Explicit scope checks prevent ARG silently succeeding with only some subscriptions.
   const labels:Record<string,string>={},tenantIds=new Set<string>(),readable:string[]=[],warnings:string[]=[],report=options.report??noReport;let checked=0;
-  for(const sub of subscriptions){report('scopes',{detail:'구독 접근 확인',done:checked++,total:subscriptions.length});const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok){warnings.push(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status}), 건너뜁니다.`);continue;}readable.push(sub);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
+  for(const sub of subscriptions){report('scopes',{detail:'구독 접근 확인',done:checked++,total:subscriptions.length});const r=await azureFetch(request,`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,async()=>({headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)}));if(!r.ok){warnings.push(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status}), 건너뜁니다.`);continue;}readable.push(sub);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
   if(!readable.length)throw new Error(warnings[0]??'Azure: 읽을 수 있는 구독이 없습니다.');
   report('scopes',{state:'done',detail:`구독 ${readable.length}개`});report('resources',{detail:'Resource Graph 조회'});
   const part=normalizeAzure(await azurePages(readable,token,request,AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`})),labels);
@@ -101,7 +128,7 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
     try{names=await azureDisplayNames(ids,options.graphToken,request);}catch{part.warnings.push('Azure: Microsoft Graph 조회 권한이 없어 IAM 주체를 ID로 표시합니다.');}
     part.iam=normalizeAzureIam(rows,names);report('iam',{state:'done',detail:`할당 ${count(part.iam.length)}건`});
   }catch(e){part.warnings.push(`Azure: 역할 할당을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('iam',{state:'failed',detail:'권한을 확인하세요'});gaps.iam='failed';}
-  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`Azure: 변경 기록(Activity Log)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('activity',{state:'failed',detail:'Reader 권한을 확인하세요'});gaps.activity='failed';}}else report('activity',{state:'skipped'});
+  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});const unread:string[]=[];try{part.activity=await azureActivity(readable,token,request,undefined,sub=>unread.push(sub));report('activity',{state:'done',detail:`${count(part.activity.length)}건`});if(unread.length){gaps.activity='partial';part.warnings.push(`Azure: 구독 ${unread.length}개의 변경 기록(Activity Log)을 읽지 못했습니다. Reader 권한을 확인하세요.`);}}catch(e){part.warnings.push(`Azure: 변경 기록(Activity Log)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('activity',{state:'failed',detail:'Reader 권한을 확인하세요'});gaps.activity='failed';}}else report('activity',{state:'skipped'});
   if(options.withCost!==false){try{const {rows,failed}=await azureCost(readable,token,request,undefined,(done,total)=>report('cost',{detail:'Cost Management 조회',done,total}));part.cost=rows;if(failed.length)part.warnings.push(`Azure: 구독 ${failed.length}개의 비용을 읽지 못했습니다. Cost Management Reader 권한을 확인하세요.`);report('cost',failed.length?{state:'failed',detail:`구독 ${failed.length}개 실패, 권한을 확인하세요`}:{state:'done',detail:`${count(rows.length)}행`});if(failed.length)gaps.cost=failed.length>=readable.length?'failed':'partial';}catch(e){part.warnings.push(`Azure: 비용을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('cost',{state:'failed',detail:'권한을 확인하세요'});gaps.cost='failed';}}
   part.gaps=gaps;const result=finish([part]);result.warnings.push('Azure: 보이는 지원 자원만 수집. 구독 내부 리소스별 접근 제한과 Resource Graph 반영 지연은 별도 확인 필요.');return result;
 }
@@ -139,9 +166,11 @@ export async function collectAzure(subscriptions:string[]=[],options:CollectOpti
   return collectAzureWith(targets,token,request,{...options,graphToken:tokenFor('https://graph.microsoft.com/.default')});
 }
 // Management events from CloudTrail's free 90-day history; read-only calls are filtered out at the source.
-export async function collectAwsActivity(call:AwsCaller,account:string,region:string,now=new Date()):Promise<Activity[]>{
-  const out:Activity[]=[];let token:string|undefined;
+// LookupEvents allows two calls a second per account and region, so pages are spaced rather than retried into throttling.
+export async function collectAwsActivity(call:AwsCaller,account:string,region:string,now=new Date(),paceMs=550):Promise<Activity[]>{
+  const out:Activity[]=[];let token:string|undefined,page=0;
   do{
+    if(page++)await sleep(paceMs);
     const r=await call('trail','LookupEvents',{LookupAttributes:[{AttributeKey:'ReadOnly',AttributeValue:'false'}],StartTime:activitySince(now),EndTime:now,MaxResults:50,...(token?{NextToken:token}:{})});
     for(const e of r.Events??[]){
       let detail:any={};try{detail=JSON.parse(e.CloudTrailEvent??'{}');}catch{/* summary fields still work */}
