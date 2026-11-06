@@ -1,4 +1,4 @@
-import {appendFile,mkdir,readdir,readFile} from 'node:fs/promises';
+import {appendFile,mkdir,readdir,readFile,rm,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import type {Request} from 'express';
@@ -11,6 +11,16 @@ const memory:AuditEvent[]=[];
 const recent=new Map<string,number>();
 // The same person reopening the same thing within a minute is one visit, not many.
 const DEDUPE_MS=60_000;
+// A write that fails is counted, so a gap in the trail is found now rather than at the next review.
+const writes:{failures:number;lastFailureAt?:string;lastSuccessAt?:string;lastError?:string}={failures:0};
+export const auditWriteState=()=>({...writes,failing:!!writes.lastFailureAt&&(!writes.lastSuccessAt||writes.lastFailureAt>=writes.lastSuccessAt)});
+// Proves the trail can still be written before anyone relies on it; error codes only, never paths.
+export async function probeAudit(){
+  if(!isLive())return{ok:true};
+  const file=join(root(),`.probe-${randomUUID()}`);
+  try{await mkdir(root(),{recursive:true});await writeFile(file,'');await rm(file,{force:true});return{ok:true};}
+  catch(e){return{ok:false,detail:(e as NodeJS.ErrnoException).code??'쓰기 실패'};}
+}
 export function actorOf(req:Request,name?:string){
   if(name)return name;
   if(isLive()&&process.env.ATLAS_LOOPBACK_ONLY==='1')return 'localhost';
@@ -21,8 +31,8 @@ export async function audit(req:Request,event:Omit<AuditEvent,'id'|'at'|'ip'|'ag
   if(['view','open','denied'].includes(event.action)){const last=recent.get(key);if(last&&now-last<DEDUPE_MS)return;recent.set(key,now);if(recent.size>5000)recent.clear();}
   const full:AuditEvent={id:randomUUID(),at:new Date(now).toISOString(),...event,...(isLive()?{ip:req.ip,agent:String(req.headers['user-agent']??'').slice(0,160)}:{})};
   if(!isLive()){memory.unshift(full);memory.length=Math.min(memory.length,500);return;}
-  try{await mkdir(root(),{recursive:true});await appendFile(join(root(),`${full.at.slice(0,7)}.jsonl`),JSON.stringify(full)+'\n');}
-  catch(e){console.error('Audit write failed:',e instanceof Error?e.message:'unknown');}
+  try{await mkdir(root(),{recursive:true});await appendFile(join(root(),`${full.at.slice(0,7)}.jsonl`),JSON.stringify(full)+'\n');writes.lastSuccessAt=new Date().toISOString();}
+  catch(e){writes.failures++;writes.lastFailureAt=new Date().toISOString();writes.lastError=(e as NodeJS.ErrnoException).code??'쓰기 실패';console.error('Audit write failed:',e instanceof Error?e.message:'unknown');}
 }
 // Reads the months that overlap the window, newest first. A damaged line is skipped, not fatal.
 export async function readAudit(days=30,now=new Date()):Promise<AuditEvent[]>{
@@ -34,4 +44,4 @@ export async function readAudit(days=30,now=new Date()):Promise<AuditEvent[]>{
   for(const f of files.filter(f=>months.has(f.slice(0,7)))){for(const line of (await readFile(join(root(),f),'utf8')).split('\n')){if(!line)continue;try{const e=AuditEventSchema.parse(JSON.parse(line));if(Date.parse(e.at)>=since)out.push(e);}catch{/* skip */}}}
   return out.sort((a,b)=>b.at.localeCompare(a.at));
 }
-export const resetAuditMemory=()=>{memory.length=0;recent.clear();};
+export const resetAuditMemory=()=>{memory.length=0;recent.clear();writes.failures=0;delete writes.lastFailureAt;delete writes.lastSuccessAt;delete writes.lastError;};

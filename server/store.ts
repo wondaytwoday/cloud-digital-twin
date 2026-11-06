@@ -31,6 +31,12 @@ export class FileSnapshotStore implements SnapshotStore{
   async previous(provider:string){const files=await this.history(provider),last=files[files.length-1];return last?this.read(path.join(this.root,'history',provider,last)):null;}
   async readStatus(){try{return JSON.parse(await this.fs.readFile(path.join(this.root,'status.json'),'utf8')) as CollectionStatus;}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e;}}
   async writeStatus(status:CollectionStatus){await this.fs.mkdir(this.root,{recursive:true,mode:0o700});const file=path.join(this.root,'status.json'),tmp=`${file}.${randomUUID()}.tmp`;try{await this.fs.writeFile(tmp,JSON.stringify(status));await this.fs.rename(tmp,file);}catch(e){await this.fs.rm(tmp,{force:true}).catch(()=>{});throw e;}}
+  // Readiness: the folder can take a new snapshot. Only an error code comes back, never a path.
+  async probe(){
+    const file=path.join(this.root,`.probe-${randomUUID()}`);
+    try{await this.fs.mkdir(this.root,{recursive:true,mode:0o700});await this.fs.writeFile(file,'');await this.fs.rm(file,{force:true});return{ok:true};}
+    catch(e){return{ok:false,detail:(e as NodeJS.ErrnoException).code??'쓰기 실패'};}
+  }
   // One collecting process per data folder on this host, so the server's timer and `npm run collect` never write the same files at once.
   // This is not a distributed lock: two hosts sharing a network folder are only kept apart by the age rule above.
   async lock(){

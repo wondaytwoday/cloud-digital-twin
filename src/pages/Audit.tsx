@@ -38,17 +38,18 @@ export function AuditPage({snapshot,focus,openResource,onCsv}:{snapshot:Snapshot
   </div>;
 }
 function PortalLog({days,mock,byName,openResource,onCsv}:{days:number;mock:boolean;byName:Map<string,string>;openResource:(id:string)=>void;onCsv:(content:string,name:string)=>void}){
-  const [events,setEvents]=useState<AuditEvent[]|null>(null),[error,setError]=useState(''),[who,setWho]=useState('all'),[action,setAction]=useState('all'),[q,setQ]=useState(''),[tick,setTick]=useState(0);
-  useEffect(()=>{let stale=false;setError('');fetch(`/api/audit?days=${days}`).then(async r=>{if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error??'기록을 불러오지 못했습니다.');return r.json();}).then(b=>{if(!stale)setEvents(b.events);}).catch(e=>{if(!stale){setEvents([]);setError(e.message);}});return()=>{stale=true;};},[days,tick]);
+  const [events,setEvents]=useState<AuditEvent[]|null>(null),[writes,setWrites]=useState<{failures:number;lastFailureAt?:string}|null>(null),[error,setError]=useState(''),[who,setWho]=useState('all'),[action,setAction]=useState('all'),[q,setQ]=useState(''),[tick,setTick]=useState(0);
+  useEffect(()=>{let stale=false;setError('');fetch(`/api/audit?days=${days}`).then(async r=>{if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error??'기록을 불러오지 못했습니다.');return r.json();}).then(b=>{if(!stale){setEvents(b.events);setWrites(b.writes?.failures?b.writes:null);}}).catch(e=>{if(!stale){setEvents([]);setError(e.message);}});return()=>{stale=true;};},[days,tick]);
   const all=events??[],people=[...new Set(all.map(e=>e.actor))].sort();
   const shown=all.filter(e=>(who==='all'||e.actor===who)&&(action==='all'||e.action===action)&&(!q||`${e.actor} ${e.target??''} ${e.detail??''} ${e.ip??''}`.toLowerCase().includes(q.toLowerCase())));
   const daily=useMemo(()=>perDay(all,e=>e.at,e=>BUCKET[e.action],BUCKETS.map(b=>b.key),Math.min(days,30)),[all,days]),alarms=bursts(all);
   const humans=new Set(all.filter(e=>e.action==='login'||e.action==='view').map(e=>e.actor)),failed=all.filter(e=>e.action==='login_failed'||e.action==='denied').length;
-  if(error)return <div className="panel empty-panel" role="alert"><p>{error}</p><p className="muted small">접근 로그는 전체 범위(*) 권한이 있는 사용자만 볼 수 있습니다.</p></div>;
+  if(error)return <div className="panel empty-panel" role="alert"><p>{error}</p><p className="muted small">접근 로그는 auditor 역할이 있는 전체 범위(*) 토큰만 볼 수 있습니다.</p></div>;
   if(!events)return <div className="skeleton" role="status"><RefreshCw className="spin"/>기록을 불러오는 중입니다.</div>;
   const exportCsv=()=>onCsv(csv([['time','actor','action','target','detail','ip','agent'],...shown.map(e=>[e.at,e.actor,e.action,e.target??'',e.detail??'',e.ip??'',e.agent??''])]),'cloud-atlas-portal-audit.csv');
   return <>
     {mock&&<p className="muted small page-notice">예시 기록에 이 브라우저에서 방금 한 조회가 함께 보입니다. 실제 운영에서는 서버의 data/audit에 월별로 쌓이고 IP와 브라우저 정보도 남습니다.</p>}
+    {writes&&<div className="notice warn page-notice" role="alert"><AlertTriangle size={15}/><p>서버가 접근 기록을 {writes.failures}번 남기지 못했습니다{writes.lastFailureAt?` (마지막 ${when(writes.lastFailureAt)})`:''}. 그동안의 기록은 빠져 있을 수 있습니다. 서버의 데이터 폴더 권한과 디스크 공간을 확인하세요.</p></div>}
     {alarms.length>0&&<div className="notice warn page-notice"><AlertTriangle size={15}/><p>로그인 실패가 몰린 구간이 {alarms.length}번 있습니다: {alarms.map(a=>`${when(a.at)} ${a.from}에서 ${a.count}회`).join(', ')}. 토큰이 유출됐거나 추측 시도일 수 있습니다.</p></div>}
     <section className="kpi-row" aria-label="포털 접근 지표"><Kpi label="접속한 사람" value={String(humans.size)} hint={`최근 ${days}일`}/><Kpi label="로그인 실패·거부" value={String(failed)} tone={failed?'warn':undefined} hint={alarms.length?`몰림 ${alarms.length}회`:'몰림 없음'}/><Kpi label="화면 조회" value={String(all.filter(e=>e.action==='view').length)}/><Kpi label="리소스 열람" value={String(all.filter(e=>e.action==='open').length)}/><Kpi label="수집·내보내기" value={String(all.filter(e=>e.action==='collect'||e.action==='export').length)}/></section>
     <div className="dash-grid">

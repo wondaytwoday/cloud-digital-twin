@@ -3,7 +3,7 @@ import {mockSnapshot} from './mock.js';
 import {validateSnapshot,type Change,type Snapshot} from '../shared/schema.js';
 import {isScenario} from '../shared/scenarios.js';
 import {parseFx} from '../shared/cost.js';
-import {actorOf,audit,readAudit} from './audit.js';
+import {actorOf,audit,auditWriteState,probeAudit,readAudit} from './audit.js';
 import {demoAudit} from './fixtures/audit.js';
 import {diffResources} from '../shared/diff.js';
 import {FileSnapshotStore,type SnapshotStore} from './store.js';
@@ -18,6 +18,18 @@ app.use((_req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-
 app.use('/api/session',express.json({limit:'4kb'}));
 app.use('/api/audit',express.json({limit:'4kb'}));
 app.get('/api/health',(_req,res)=>res.json({ok:true,mode:process.env.DATA_MODE??'mock',collector:collectorEnabled(),serverless:!!process.env.VERCEL}));
+// Readiness for a load balancer or monitor: health only says the process answers; this says it can keep data and keep its audit trail.
+// Old data is reported but does not fail readiness: a stale portal still answers, and the dashboard already says the data is old.
+app.get('/api/ready',async(_req,res)=>{
+  res.set('Cache-Control','no-store');
+  if(process.env.DATA_MODE!=='live'){res.json({ready:true,mode:'mock'});return;}
+  const store=new FileSnapshotStore(),storage=await store.probe(),trail=auditWriteState(),probe=await probeAudit();
+  const audit={ok:probe.ok&&!trail.failing,...(probe.ok?{}:{detail:probe.detail}),...(trail.failing?{detail:`최근 기록 실패 ${trail.failures}회 (${trail.lastError})`}:{})};
+  let stale=0,missing=0;
+  try{const hours=staleAfterHours(process.env);for(const p of ['azure','aws','gcp']){const s=await store.latest(p);if(!s)missing++;else if(isStale(s.collectedAt,hours))stale++;}}catch{/* unreadable snapshots are the topology route's error to report */}
+  const ready=storage.ok&&audit.ok;
+  res.status(ready?200:503).json({ready,mode:'live',checks:{storage,audit,data:{stale,missing}}});
+});
 sessionRoutes(app);
 export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
   const snapshots:Snapshot[]=[],warnings:string[]=[],changes:Change[]=[],status=await store.readStatus();let since:string|undefined;
@@ -77,7 +89,9 @@ app.post('/api/audit/event',requireAccess,(req,res)=>{
 app.get('/api/audit',requireAccess,requireRole('auditor'),async(req,res)=>{
   res.set('Cache-Control','no-store');
   const days=Math.min(90,Math.max(1,Number(req.query.days)||30)),live=process.env.DATA_MODE==='live',own=await readAudit(days);
-  res.json({mode:live?'live':'mock',days,events:live?own:[...own,...demoAudit(new Date())].sort((a,b)=>b.at.localeCompare(a.at))});
+  // Failed writes travel with the log, so whoever reads it knows it may have gaps.
+  const {failures,lastFailureAt,failing}=auditWriteState();
+  res.json({mode:live?'live':'mock',days,writes:{failures,lastFailureAt,failing},events:live?own:[...own,...demoAudit(new Date())].sort((a,b)=>b.at.localeCompare(a.at))});
 });
 app.use('/api',(_req,res)=>res.status(404).json({error:'API not found'}));
 export default app;
