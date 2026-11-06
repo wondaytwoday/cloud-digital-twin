@@ -178,3 +178,4 @@ button:not(:disabled){transition:background-color .15s,color .15s,border-color .
 .conn-chips .conn-stale small{color:var(--amber)}
 .scope-meta .meta-partial{font-size:11px;color:var(--amber);border:1px solid currentColor;border-radius:3px;padding:0 3px;line-height:15px}.scope-meta em.meta-failed{color:var(--warn)}
 .properties dd.muted{color:var(--faint);font-weight:400}.properties .inherited{color:var(--muted);font-weight:400}
+.tfplan .notice{margin:0 0 10px}.plan-candidates{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}.plan-candidates li{display:flex;flex-direction:column}.plan-candidates small{color:var(--muted)}.tfplan details summary{cursor:pointer}

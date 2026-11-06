@@ -4,6 +4,7 @@ import type {Change,Snapshot} from '../../shared/schema';
 import {inScope,type Focus} from '../../shared/hierarchy';
 import {ProviderMark} from '../graph';
 import {Kpi} from '../charts';
+import {TfPlanPanel} from '../TfPlan';
 import {Columns,Donut,HBars,ShareBar,PROVIDER_COLOR,PROVIDER_LABEL,SEVERITY_COLOR} from '@/ui/viz';
 const KINDS:Record<Change['kind'],{label:string;icon:typeof Plus}>={added:{label:'추가',icon:Plus},changed:{label:'변경',icon:PenLine},removed:{label:'삭제',icon:Minus}};
 const KIND_COLOR:Record<Change['kind'],string>={added:'var(--path)',changed:'var(--accent)',removed:'var(--warn)'};
@@ -20,6 +21,7 @@ export function ChangesPage({snapshot,focus,openResource}:{snapshot:Snapshot;foc
       <section className="panel"><header className="panel-head"><h2>클라우드별</h2></header><Columns xKey="cloud" height={170} data={['azure','aws','gcp'].filter(p=>items.some(c=>c.provider===p)).map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries((Object.keys(KINDS) as Change['kind'][]).map(k=>[k,items.filter(c=>c.provider===p&&c.kind===k).length]))}))} series={(Object.keys(KINDS) as Change['kind'][]).map(k=>({key:k,label:KINDS[k].label,color:KIND_COLOR[k]}))}/></section>
       <section className="panel"><header className="panel-head"><h2>변경이 많은 범위</h2></header><HBars data={[...items.reduce((m,c)=>m.set(c.scope,(m.get(c.scope)??0)+1),new Map<string,number>())].sort((a,b)=>b[1]-a[1]).slice(0,8).map(([s,v])=>({key:s,label:label(s),value:v}))} labelWidth={120}/></section>
     </div>}
+    <TfPlanPanel snapshot={snapshot} openResource={openResource}/>
     <p className="muted small page-notice">누가 바꿨는지는 보안 › 접근 로그의 클라우드 변경에서 확인할 수 있습니다.</p>
     <section className="panel"><header className="panel-head wrap"><h2>변경 내역 <span className="count">{shown.length}</span></h2><div className="segmented" role="group" aria-label="변경 유형 필터">{(['all','added','changed','removed'] as const).map(k=><button key={k} className={kind===k?'active':''} aria-pressed={kind===k} onClick={()=>setKind(k)}>{k==='all'?'전체':KINDS[k].label}</button>)}</div></header>
       {shown.length?<div className="table-wrap"><table className="data-table"><thead><tr><th>유형</th><th>자원</th><th>클라우드</th><th>범위</th><th>내용</th></tr></thead><tbody>{shown.map(c=>{const Icon=KINDS[c.kind].icon;return <tr key={c.id+c.kind}><td><span className={`change-kind change-${c.kind}`}><Icon size={13}/>{KINDS[c.kind].label}</span></td><td>{known.has(c.id)?<button className="table-link" onClick={()=>openResource(c.id)}>{c.name}<ArrowUpRight size={12}/></button>:c.name}</td><td><ProviderMark provider={c.provider}/></td><td>{label(c.scope)}</td><td>{c.detail}</td></tr>})}</tbody></table></div>:<p className="muted small empty-note">이 조건에 해당하는 변경이 없습니다.</p>}</section></div>;
