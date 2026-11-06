@@ -40,11 +40,31 @@ export function sessionRoutes(app:import('express').Express){
   app.delete('/api/session',(req,res)=>{const entry=findEntry(requestToken(req));if(entry)audit(req,{actor:entry.name,action:'logout'});res.clearCookie(COOKIE,{path:'/api'});res.json({ok:true});});
 }
 // Server-side, so a restricted user's browser never receives other scopes at all.
+// Every field is listed on purpose: the type below fails to compile when the schema gains a field, so nothing reaches a restricted user until someone decides how to filter it.
 export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   if(scopes.includes('*'))return snapshot;
-  const allowed=new Set(scopes),resources=snapshot.resources.filter(r=>allowed.has(r.scope)),ids=new Set(resources.map(r=>r.id));
+  const allowed=new Set(scopes),mine=(scope:string)=>allowed.has(scope);
+  // Copied, so dropping a parent outside the user's scopes never edits the snapshot other requests read.
+  const resources=snapshot.resources.filter(r=>mine(r.scope)).map(r=>({...r})),ids=new Set(resources.map(r=>r.id));
   for(const r of resources)if(r.parent&&!ids.has(r.parent))delete r.parent;
   const keep=new Set<string>();const nodes=new Map(snapshot.hierarchy.map(n=>[n.id,n]));
-  for(const n of snapshot.hierarchy)if(n.scope&&allowed.has(n.scope))for(let c:typeof n|undefined=n;c;c=c.parent?nodes.get(c.parent):undefined)keep.add(c.id);
-  return{...snapshot,resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),cost:snapshot.cost.filter(c=>allowed.has(c.scope)),activity:snapshot.activity.filter(a=>allowed.has(a.scope)),iam:snapshot.iam.filter(a=>allowed.has(a.scope)),scopes:snapshot.scopes.filter(s=>allowed.has(s)),connections:[],warnings:[],changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>allowed.has(c.scope))}:undefined,scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>allowed.has(k)))};
+  for(const n of snapshot.hierarchy)if(n.scope&&mine(n.scope))for(let c:typeof n|undefined=n;c;c=c.parent?nodes.get(c.parent):undefined)keep.add(c.id);
+  const incomplete=snapshot.incomplete.filter(mine);
+  // A provider-wide status speaks for scopes this user cannot see, so only what holds for their own scopes is kept: no message, no total.
+  const providerOf=new Map([...snapshot.hierarchy.filter(n=>n.scope).map(n=>[n.scope!,n.provider] as const),...resources.map(r=>[r.scope,r.provider] as const)]);
+  const connections=snapshot.connections.flatMap(c=>{
+    const own=[...allowed].filter(s=>providerOf.get(s)===c.provider);if(!own.length)return [];
+    const status=c.status==='partial'&&!own.some(s=>incomplete.includes(s))?'collected':c.status;
+    return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{})}];
+  });
+  const restricted:{[K in keyof Required<Snapshot>]:Snapshot[K]}={
+    version:snapshot.version,mode:snapshot.mode,scenario:snapshot.scenario,collectedAt:snapshot.collectedAt,costAt:snapshot.costAt,fx:snapshot.fx,
+    resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),
+    scopes:snapshot.scopes.filter(mine),scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>mine(k))),incomplete,
+    cost:snapshot.cost.filter(c=>mine(c.scope)),activity:snapshot.activity.filter(a=>mine(a.scope)),iam:snapshot.iam.filter(a=>mine(a.scope)),
+    changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>mine(c.scope))}:undefined,
+    // Collector warnings quote other scopes by ID and name, so none are passed on.
+    warnings:[],connections,
+  };
+  return Object.fromEntries(Object.entries(restricted).filter(([,v])=>v!==undefined)) as Snapshot;
 }
