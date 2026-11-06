@@ -14,7 +14,7 @@ import {costSpikes,summarizeCost} from '../shared/cost.ts';
 import {cidrOverlaps,hybridLinks,parseCidr,portMatches} from '../shared/network.ts';
 import {findings} from '../shared/findings.ts';
 import {normalizeAwsIam,normalizeAzureIam,normalizeGcpIam} from '../server/normalize.ts';
-import {configureCollector,emptyStatus,explainAuth,liveStatus,needsCollection,readCollectionStatus,runCollection,toSnapshot,type CollectorDrivers} from '../server/runner.ts';
+import {checkCredentials,configureCollector,emptyStatus,explainAuth,liveStatus,needsCollection,readCollectionStatus,runCollection,toSnapshot,type CollectorDrivers} from '../server/runner.ts';
 import {newStages,overallProgress,providerProgress} from '../shared/collect.ts';
 import {FileSnapshotStore} from '../server/store.ts';
 import {restrictSnapshot} from '../server/auth.ts';
@@ -207,6 +207,15 @@ test('discovery finds enabled Azure subscriptions across pages',async()=>{
   const j=(b:unknown)=>new Response(JSON.stringify(b));
   const request=(async(u:unknown)=>String(u).includes('page2')?j({value:[{subscriptionId:'b',state:'Enabled'}]}):j({value:[{subscriptionId:'a',state:'Enabled'},{subscriptionId:'x',state:'Disabled'}],nextLink:'https://management.azure.com/page2'})) as typeof fetch;
   assert.deepEqual(await discoverAzureSubscriptions(async()=>'t',request),['a','b']);
+});
+test('Azure discovery names the fix for each way it fails',async()=>{
+  const j=(b:unknown,status=200)=>(async()=>new Response(JSON.stringify(b),{status})) as unknown as typeof fetch;
+  await assert.rejects(discoverAzureSubscriptions(async()=>'t',j({value:[]})),/Reader 역할/);
+  await assert.rejects(discoverAzureSubscriptions(async()=>'t',j({value:[{subscriptionId:'a',state:'Disabled'}]})),/활성 상태가 아닙니다 \(Disabled\)/);
+  await assert.rejects(discoverAzureSubscriptions(async()=>'t',j({error:{code:'InvalidAuthenticationTokenTenant',message:'wrong issuer'}},401)),/401 InvalidAuthenticationTokenTenant.*AZURE_TENANT_ID/);
+  await assert.rejects(discoverAzureSubscriptions(async()=>'t',j({error:{code:'AuthorizationFailed'}},403)),/403 AuthorizationFailed/);
+  const down=(async()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code:'ENOTFOUND'}});}) as unknown as typeof fetch;
+  await assert.rejects(discoverAzureSubscriptions(async()=>'t',down),/ENOTFOUND.*HTTPS_PROXY/);
 });
 test('an unreadable Azure subscription is skipped, not fatal',async()=>{
   const j=(b:unknown,status=200)=>new Response(JSON.stringify(b),{status});
@@ -446,4 +455,12 @@ test('collectors report progress through a real page walk',async()=>{
   const gcp=async(url:string)=>url.includes('organizations:search')?{organizations:[]}:url.includes('/projects?')?{projects:[{projectId:'p1'}]}:{assets:[]};
   await collectGcpAuto(gcp as any,{report:report as any});
   for(const want of ['scopes:done:프로젝트 1개','resources:running:projects/p1 · 자원 0개 읽음','iam:running:projects/p1','resources:done:범위 1개','cost:skipped:ATLAS_GCP_BILLING_TABLE 미설정'])assert.ok(events.includes(want),want);
+});
+test('the credential check reports a sign-in that sees no scope as not connected',async()=>{
+  const collect=async()=>{throw new Error('unused');},none={detect:async()=>{throw new Error('Could not load credentials');},collect};
+  configureCollector({azure:{detect:async()=>'Azure 자격 증명',scope:async()=>{throw new Error('Azure: 역할이 할당된 구독이 없습니다.');},collect},aws:none,gcp:{detect:async()=>'g',scope:async()=>'프로젝트 2개',collect}});
+  const r=Object.fromEntries((await checkCredentials()).map(x=>[x.provider,x]));
+  assert.equal(r.azure.ok,false);assert.match(r.azure.detail,/로그인됨 \(Azure 자격 증명\).*역할이 할당된 구독이 없습니다/);
+  assert.equal(r.gcp.ok,true);assert.equal(r.gcp.detail,'g · 프로젝트 2개');
+  configureCollector();
 });

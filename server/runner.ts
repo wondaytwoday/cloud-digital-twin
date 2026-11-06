@@ -1,11 +1,11 @@
-import {collectAws,collectAzure,collectGcpAuto,type CollectOptions} from './collectors.js';
+import {collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,type CollectOptions} from './collectors.js';
 import type {Normalized} from './normalize.js';
 import {FileSnapshotStore,type SnapshotStore} from './store.js';
 import {existsSync} from 'node:fs';
 import {validateSnapshot} from '../shared/schema.js';
 import {newStages,type CollectionStatus,type ProviderId,type ProviderState,type ProviderStatus,type Report,type Stage} from '../shared/collect.js';
 export type {CollectionStatus,ProviderId,ProviderState,ProviderStatus};
-export type ProviderDriver={detect:()=>Promise<string>;collect:(options:CollectOptions&{report?:Report})=>Promise<Normalized>};
+export type ProviderDriver={detect:()=>Promise<string>;scope?:()=>Promise<string>;collect:(options:CollectOptions&{report?:Report})=>Promise<Normalized>};
 export type CollectorDrivers=Record<ProviderId,ProviderDriver>;
 export const PROVIDERS:ProviderId[]=['azure','aws','gcp'];
 // Cost APIs bill per request or per byte scanned, so they run far less often than inventory.
@@ -51,6 +51,8 @@ const explainFailure=(message:string)=>/quota project|local Application Default 
 const realDrivers:CollectorDrivers={
   azure:{
     detect:async()=>{const {DefaultAzureCredential}=await import('@azure/identity');await new DefaultAzureCredential().getToken('https://management.azure.com/.default');return 'Azure 자격 증명';},
+    // Sign-in alone proves nothing about roles, so the check also lists what the identity can see.
+    scope:async()=>{const {DefaultAzureCredential}=await import('@azure/identity'),credential=new DefaultAzureCredential();return `구독 ${(await discoverAzureSubscriptions(async()=>(await credential.getToken('https://management.azure.com/.default')).token)).length}개`;},
     collect:options=>collectAzure([],options),
   },
   aws:{
@@ -63,7 +65,7 @@ const realDrivers:CollectorDrivers={
   },
 };
 let drivers=realDrivers;
-export const configureCollector=(next:CollectorDrivers)=>{drivers=next;};
+export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
 export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
@@ -80,7 +82,12 @@ export async function readCollectionStatus(store:SnapshotStore=new FileSnapshotS
 // Rerun at start whenever a cloud has no good result: someone who just set credentials and restarted should not wait for the next hour.
 export const needsCollection=(status:CollectionStatus|null,minutes:number,now=Date.now())=>!status?.finishedAt||!minutes||now-Date.parse(status.finishedAt)>minutes*60_000||PROVIDERS.some(p=>!['ok','partial'].includes(status.providers[p]?.state));
 const settleStages=(stages:Stage[]=[],outcome:'done'|'failed')=>stages.map(s=>s.state==='running'?{...s,state:outcome}:s.state==='pending'?{...s,state:outcome==='done'?'done' as const:'skipped' as const}:s);
-export async function checkCredentials(){return Promise.all(PROVIDERS.map(async p=>{try{return{provider:p,ok:true,detail:await withTimeout(drivers[p].detect(),DETECT_TIMEOUT,'로그인 확인')};}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}}));}
+export async function checkCredentials(){return Promise.all(PROVIDERS.map(async p=>{
+  let login:string;
+  try{login=await withTimeout(drivers[p].detect(),DETECT_TIMEOUT,'로그인 확인');}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}
+  const scope=drivers[p].scope;if(!scope)return{provider:p,ok:true,detail:login};
+  try{return{provider:p,ok:true,detail:`${login} · ${await withTimeout(scope(),DETECT_TIMEOUT,'범위 확인')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
+}));}
 // One run at a time. Providers run independently, so one cloud's failure neither blocks the others nor replaces its last good snapshot.
 export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{}):Promise<CollectionStatus>{
   if(current)return current;

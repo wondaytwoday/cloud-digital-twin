@@ -78,16 +78,35 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
   const result=finish([part]);result.warnings.push('Azure: 보이는 지원 자원만 수집. 구독 내부 리소스별 접근 제한과 Resource Graph 반영 지연은 별도 확인 필요.');return result;
 }
 // Everything the signed-in identity can see, so nobody has to type subscription IDs.
+// Sign-in passing says nothing about roles or the network path to ARM, so each failure here names its own fix.
 export async function discoverAzureSubscriptions(token:()=>Promise<string>,request:typeof fetch=fetch){
-  const found:string[]=[];let url:string|undefined='https://management.azure.com/subscriptions?api-version=2022-12-01';
-  while(url){const r:Response=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok)throw new Error(`Azure 구독 목록 조회 실패 (${r.status})`);const body:any=await r.json();found.push(...(body.value??[]).filter((s:any)=>s.state==='Enabled').map((s:any)=>s.subscriptionId));url=body.nextLink;}
+  const found:string[]=[],inactive:string[]=[];let url:string|undefined='https://management.azure.com/subscriptions?api-version=2022-12-01';
+  while(url){
+    let r:Response;
+    try{r=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});}catch(e){throw new Error(azureNetworkMessage(e));}
+    if(!r.ok){const body:any=await r.json().catch(()=>({}));throw new Error(azureListMessage(r.status,body?.error));}
+    const body:any=await r.json();
+    for(const s of body.value??[])s.state==='Enabled'?found.push(s.subscriptionId):inactive.push(s.state);
+    url=body.nextLink;
+  }
+  if(!found.length)throw new Error(inactive.length?`Azure: 구독 ${inactive.length}개가 보이지만 활성 상태가 아닙니다 (${[...new Set(inactive)].join(', ')}).`:'Azure: 로그인은 됐지만 이 서비스 주체에 역할이 할당된 구독이 없습니다. 구독이나 테넌트 루트 관리 그룹에 Reader 역할을 할당하세요. 할당 직후에는 반영까지 몇 분 걸릴 수 있습니다.');
   return found;
+}
+function azureNetworkMessage(e:unknown){
+  const err=e as any,code=err?.cause?.code??err?.code??(err?.name==='TimeoutError'?'시간 초과':err?.message);
+  if(/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(String(code)))return `Azure: management.azure.com 인증서를 신뢰하지 못했습니다 (${code}). 사내 TLS 검사가 있으면 셸에서 NODE_EXTRA_CA_CERTS에 회사 루트 인증서 경로를 지정하세요.`;
+  return `Azure: management.azure.com에 연결하지 못했습니다 (${code}). 프록시를 거쳐야 하는 네트워크면 HTTPS_PROXY를 설정하세요.`;
+}
+function azureListMessage(status:number,error?:{code?:string;message?:string}){
+  const detail=[error?.code,error?.message?.split('\n')[0].slice(0,160)].filter(Boolean).join(': ');
+  if(status===401)return `Azure 구독 목록 조회를 거부했습니다 (401${detail?` ${detail}`:''}). AZURE_TENANT_ID가 구독이 있는 테넌트인지 확인하세요.`;
+  if(status===403)return `Azure 구독 목록을 읽을 권한이 없습니다 (403${detail?` ${detail}`:''}). 서비스 주체에 Reader 역할을 할당하세요.`;
+  return `Azure 구독 목록 조회 실패 (${status}${detail?` ${detail}`:''})`;
 }
 export async function collectAzure(subscriptions:string[]=[],options:CollectOptions={}):Promise<Normalized>{
   const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),token=async()=>(await credential.getToken('https://management.azure.com/.default')).token;
   options.report?.('scopes',{detail:'구독 목록 조회'});
   const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token);
-  if(!targets.length)throw new Error('Azure: 이 계정으로 볼 수 있는 활성 구독이 없습니다.');
   return collectAzureWith(targets,token,fetch,{...options,graphToken:async()=>(await credential.getToken('https://graph.microsoft.com/.default')).token});
 }
 type AwsService='ec2'|'elb'|'rds'|'dx'|'eks'|'org'|'iam'|'ce'|'rex';
