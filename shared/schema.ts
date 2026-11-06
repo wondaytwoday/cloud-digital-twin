@@ -13,7 +13,7 @@ export const ResourceSchema = z.object({
   rules: z.array(z.object({direction:z.string(),action:z.string(),protocol:z.string(),ports:z.string(),source:z.string(),destination:z.string(),priority:z.string()})).default([]),
   iam: z.array(z.object({principal:z.string(),role:z.string(),scope:z.string()})).default([]),
   tags: z.record(z.string(), z.string()).default({}), source: z.string(),
-  metrics: z.object({cpu:z.number(),memory:z.number(),history:z.array(z.number())}).optional(),
+  metrics: z.object({cpu:z.number(),memory:z.number(),disk:z.number().optional(),gpu:z.number().optional(),history:z.array(z.number())}).optional(),
 });
 export type Resource = z.infer<typeof ResourceSchema>;
 export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.string(),kind:z.enum(['attachment','policy','peering','route','simulation']),transit:z.boolean().optional(),label:z.string(), evidence:z.string(),protocol:z.string().optional(),ports:z.string().optional(),rate:z.string().optional()});

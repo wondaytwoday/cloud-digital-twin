@@ -6,11 +6,13 @@ export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
-export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation';hasFlow:boolean;label:string;points:{x:number;y:number}[]};
+export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean};
 export type Topology={nodes:Placed[];edges:Bundle[];rollup:(id:string)=>string|undefined};
 export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'Amazon Web Services',gcp:'Google Cloud',onprem:'On-premises'};
 export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
+// Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
+const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
 const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
 const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','firewall','external','subnet','network','onprem'];
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
@@ -61,6 +63,8 @@ function summarize(items:Map<string,Item>,children:Map<string,string[]>,id:strin
 }
 // Runs in a worker: a large expanded graph takes long enough to freeze the page otherwise.
 let engine:Promise<import('elkjs/lib/elk-api').ELK>|undefined;
+// Tests run ELK in-process; the app always uses the worker.
+export const setLayoutEngine=(e:import('elkjs/lib/elk-api').ELK)=>{engine=Promise.resolve(e);};
 const elk=()=>engine??=(async()=>{
   const [{default:ELK},{default:workerUrl}]=await Promise.all([import('elkjs/lib/elk-api.js'),import('elkjs/lib/elk-worker.min.js?url')]);
   return new ELK({workerUrl,workerFactory:url=>new Worker(url!)});
@@ -68,7 +72,7 @@ const elk=()=>engine??=(async()=>{
 const ROOT_LAYOUT:Record<string,string>={
   'elk.algorithm':'layered','elk.direction':'RIGHT','elk.hierarchyHandling':'INCLUDE_CHILDREN','elk.edgeRouting':'ORTHOGONAL','elk.json.edgeCoords':'ROOT',
   'elk.layered.spacing.nodeNodeBetweenLayers':'96','elk.spacing.nodeNode':'20','elk.spacing.edgeNode':'16','elk.spacing.edgeEdge':'10','elk.layered.spacing.edgeNodeBetweenLayers':'16','elk.layered.spacing.edgeEdgeBetweenLayers':'10',
-  'elk.layered.considerModelOrder.strategy':'NODES_AND_EDGES','elk.layered.crossingMinimization.forceNodeModelOrder':'false','elk.layered.nodePlacement.strategy':'NETWORK_SIMPLEX','elk.separateConnectedComponents':'false','elk.padding':'[top=0,left=0,bottom=0,right=0]',
+  'elk.layered.considerModelOrder.strategy':'NODES_AND_EDGES','elk.layered.crossingMinimization.forceNodeModelOrder':'false','elk.layered.nodePlacement.strategy':'BRANDES_KOEPF','elk.layered.nodePlacement.bk.fixedAlignment':'BALANCED','elk.separateConnectedComponents':'false','elk.padding':'[top=0,left=0,bottom=0,right=0]',
 };
 const layoutCache=new Map<string,Promise<ElkNode>>();
 function cachedLayout(input:ElkNode){
@@ -106,11 +110,40 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   const roots=[...items.values()].filter(it=>!it.parent);
   const edgeList=[...groups.entries()].map(([key,g])=>{const [source,target]=rankOf(g.a)<=rankOf(g.b)?[g.a,g.b]:[g.b,g.a];return{id:key,source,target,links:g.links};});
   const touched=new Set(edgeList.flatMap(e=>[e.source,e.target]));
+  const chainOf=new Map<string,Set<string>>();
+  const chain=(id:string)=>{let c=chainOf.get(id);if(!c){c=new Set();for(let it=items.get(id);it;it=it.parent?items.get(it.parent):undefined)c.add(it.id);chainOf.set(id,c);}return c;};
+  // A fan is three or more siblings whose every connection outside themselves goes to one and the same node.
+  type Fan={id:string;hub:string;members:Item[];cellX:number[];cellY:number[];colLeft:number[];rowTop:number[];col:number[];row:number[];width:number;height:number};
+  const fans=new Map<string,Fan>(),fanOf=new Map<string,Fan>(),memberLayouts=new Map<string,ElkNode>();
+  const fanCandidates=new Map<string,Item[]>();
+  // Traffic into a spoke usually leaves from a subnet inside the hub, which still counts as the hub.
+  const topIn=(container:string,id:string)=>{let c=items.get(id);while(c?.parent&&c.parent!==container)c=items.get(c.parent);return c?.parent===container?c.id:id;};
+  for(const container of items.values()){
+    if((container.variant!=='provider'&&container.variant!=='region')||!isOpen(container))continue;
+    for(const kid of children.get(container.id)??[]){
+      const k=items.get(kid)!;if(!k.resource||k.provider==='onprem')continue;
+      const crossing=edgeList.filter(e=>chain(e.source).has(kid)!==chain(e.target).has(kid));
+      const others=new Set(crossing.map(e=>topIn(container.id,chain(e.source).has(kid)?e.target:e.source)));
+      if(others.size!==1)continue;
+      const hub=[...others][0],key=`${container.id}|${hub}`;
+      (fanCandidates.get(key)??fanCandidates.set(key,[]).get(key)!).push(k);
+    }
+  }
+  for(const [key,members] of fanCandidates){
+    if(members.length<FAN.min)continue;
+    const hub=key.slice(key.indexOf('|')+1);if(members.some(m=>m.id===hub))continue;
+    members.sort((a,b)=>orderKey(a)-orderKey(b)||a.label.localeCompare(b.label));
+    const fan:Fan={id:`fan:${key}`,hub,members,cellX:[],cellY:[],colLeft:[],rowTop:[],col:[],row:[],width:0,height:0};
+    fans.set(fan.id,fan);for(const m of members)fanOf.set(m.id,fan);
+  }
+  const memberOf=(id:string)=>{for(const c of chain(id)){if(fanOf.has(c))return c;}return undefined;};
+  const fanEdge=(e:{source:string;target:string})=>{const m=memberOf(e.source)??memberOf(e.target);if(!m)return undefined;const other=chain(e.source).has(m)?e.target:e.source;return fanOf.get(m)!.hub===topIn(items.get(m)!.parent!,other)&&!memberOf(other)?m:undefined;};
+  const hubSide=(e:{source:string;target:string},m:string)=>chain(e.source).has(m)?e.target:e.source;
   // Unconnected same-size children would otherwise stack in one tall column, so they are laid out as a grid inside one block.
   const packs=new Map<string,Item[]>();
   const toElk=(it:Item):ElkNode=>{
     if(!isOpen(it)){const s=sizeOf(it);return{id:it.id,...s};}
-    const kids=children.get(it.id)!.map(id=>items.get(id)!).sort((a,b)=>orderKey(a)-orderKey(b)||a.label.localeCompare(b.label));
+    const kids=children.get(it.id)!.map(id=>items.get(id)!).filter(k=>!fanOf.has(k.id)).sort((a,b)=>orderKey(a)-orderKey(b)||a.label.localeCompare(b.label));
     const packable=it.variant==='network'||it.variant==='subnet'?kids.filter(k=>!isOpen(k)&&sizeOf(k)===CARD&&!touched.has(k.id)||!isOpen(k)&&k.variant==='subnet'&&!touched.has(k.id)):[];
     const elkKids:ElkNode[]=[];
     if(packable.length>=3){
@@ -119,41 +152,89 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
     }
     const packed=new Set(packable.length>=3?packable.map(k=>k.id):[]);
     elkKids.push(...kids.filter(k=>!packed.has(k.id)).map(toElk));
+    for(const fan of fans.values())if(items.get(fan.members[0].id)!.parent===it.id)elkKids.push({id:fan.id,width:fan.width,height:fan.height});
     return{id:it.id,layoutOptions:{'elk.padding':`[top=${PADDING_TOP[it.variant!]},left=16,bottom=16,right=16]`,...(it.variant==='network'||it.variant==='subnet'?{'elk.nodeSize.constraints':'MINIMUM_SIZE','elk.nodeSize.minimum':it.variant==='network'?'(340,0)':'(270,0)'}:{})},children:elkKids};
   };
+  const inMember=(e:{source:string;target:string},m:string)=>chain(e.source).has(m)&&chain(e.target).has(m);
+  // Open members are laid out on their own, then the grid is sized around them.
+  await Promise.all([...fans.values()].flatMap(f=>f.members.filter(isOpen).map(async m=>{
+    const internal=edgeList.filter(e=>inMember(e,m.id));
+    const laid=await cachedLayout({id:'root',layoutOptions:ROOT_LAYOUT,children:[toElk(m)],edges:internal.map(e=>({id:e.id,sources:[e.source],targets:[e.target]}))});
+    memberLayouts.set(m.id,laid);
+  })));
+  for(const fan of fans.values()){
+    const dims=fan.members.map(m=>{const l=memberLayouts.get(m.id)?.children?.[0];return l?{w:l.width??0,h:l.height??0}:{w:sizeOf(m).width,h:sizeOf(m).height};});
+    const avgW=dims.reduce((s,d)=>s+d.w,0)/dims.length,avgH=dims.reduce((s,d)=>s+d.h,0)/dims.length;
+    const cols=Math.max(1,Math.min(dims.length,Math.round(Math.sqrt(dims.length*(avgH+FAN.laneY)/(avgW+FAN.laneX)*1.4)))),rows=Math.ceil(dims.length/cols);
+    const colW=Array.from({length:cols},(_,c)=>Math.max(...dims.filter((_,i)=>i%cols===c).map(d=>d.w))),rowH=Array.from({length:rows},(_,r)=>Math.max(...dims.filter((_,i)=>Math.floor(i/cols)===r).map(d=>d.h)));
+    for(let c=0,x=FAN.lead;c<cols;c++){fan.colLeft.push(x);x+=colW[c]+FAN.laneX;}
+    for(let r=0,y=FAN.top;r<rows;r++){fan.rowTop.push(y);y+=rowH[r]+FAN.laneY;}
+    dims.forEach((_,i)=>{fan.col.push(i%cols);fan.row.push(Math.floor(i/cols));fan.cellX.push(fan.colLeft[i%cols]);fan.cellY.push(fan.rowTop[Math.floor(i/cols)]);});
+    fan.width=fan.colLeft[cols-1]+colW[cols-1];fan.height=fan.rowTop[rows-1]+rowH[rows-1];
+  }
   const rootOf=(id:string)=>{let c=items.get(id);while(c?.parent)c=items.get(c.parent);return c;};
   const sites=roots.filter(r=>r.provider==='onprem').sort((a,b)=>a.label.localeCompare(b.label)),clouds=roots.filter(r=>r.provider!=='onprem').sort((a,b)=>['azure','aws','gcp'].indexOf(a.provider)-['azure','aws','gcp'].indexOf(b.provider));
   // One ELK run per cloud: expanding something in AWS cannot rearrange Azure, and an unchanged cloud comes straight from cache.
   const laidClouds=await Promise.all(clouds.map(async cloud=>{
-    const inside=edgeList.filter(e=>rootOf(e.source)===cloud&&rootOf(e.target)===cloud);
+    const inside=edgeList.filter(e=>rootOf(e.source)===cloud&&rootOf(e.target)===cloud&&!fanEdge(e)&&![...fanOf.keys()].some(m=>inMember(e,m)));
+    // One routed lead per distinct start inside the hub; the lanes take it from the grid's edge.
+    const fanLinks=[...fans.values()].filter(f=>rootOf(f.hub)===cloud).flatMap(f=>[...new Set(edgeList.flatMap(e=>{const m=fanEdge(e);return m&&fanOf.get(m)===f?[hubSide(e,m)]:[];}))].map(x=>({id:`${f.id}:edge:${x}`,sources:[x],targets:[f.id]})));
     const fromSites=edgeList.filter(e=>items.get(e.source)?.provider==='onprem'&&rootOf(e.target)===cloud);
     const portals=[...new Set(fromSites.map(e=>e.source))].map(site=>({id:`portal:${cloud.id}:${site}`,width:2,height:2}));
     const portalEdges=fromSites.map(e=>({id:e.id,sources:[`portal:${cloud.id}:${e.source}`],targets:[e.target]}));
-    const input:ElkNode={id:'root',layoutOptions:ROOT_LAYOUT,children:[...portals,toElk(cloud)],edges:[...portalEdges,...inside.map(e=>({id:e.id,sources:[e.source],targets:[e.target]}))]};
+    const input:ElkNode={id:'root',layoutOptions:ROOT_LAYOUT,children:[...portals,toElk(cloud)],edges:[...portalEdges,...inside.map(e=>({id:e.id,sources:[e.source],targets:[e.target]})),...fanLinks]};
     return{cloud,laid:await cachedLayout(input)};
   }));
-  const nodes:Placed[]=[],sections=new Map<string,{x:number;y:number}[]>(),portalY=new Map<string,number[]>();
+  const nodes:Placed[]=[],sections=new Map<string,{x:number;y:number}[]>(),portalY=new Map<string,number[]>(),fanAt=new Map<string,{x:number;y:number}>();
   const place=(id:string,x:number,y:number,width:number,height:number,depth:number,collapsed:boolean)=>{
     const item=items.get(id)!,kids=children.get(id)??[];
     nodes.push({id,x,y,width,height,depth,item,collapsed,expandable:!!kids.length&&!item.outOfScope,summary:item.variant?summarize(items,children,id):{total:0,stopped:0,warn:0,counts:{}},policies:policyCount(item.resource),hub:hubs.has(id)});
   };
+  const addSections=(laid:ElkNode,dx:number,dy:number)=>{for(const e of laid.edges??[]){const sec=(e as any).sections?.[0];if(sec)sections.set(e.id,[sec.startPoint,...(sec.bendPoints??[]),sec.endPoint].map((pt:{x:number;y:number})=>({x:pt.x+dx,y:pt.y+dy})));}};
   const walk=(n:ElkNode,ox:number,oy:number,depth:number)=>{for(const c of n.children??[]){
     const x=ox+(c.x??0),y=oy+(c.y??0);
     if(c.id.startsWith('portal:'))continue;
     const pack=packs.get(c.id);
     if(pack){const cols=Math.min(3,Math.ceil(Math.sqrt(pack.length)));pack.forEach((k,i)=>place(k.id,x+(i%cols)*(CARD.width+PACK_GAP),y+Math.floor(i/cols)*(CARD.height+PACK_GAP),CARD.width,CARD.height,depth,true));continue;}
+    const fan=fans.get(c.id);
+    if(fan){fanAt.set(fan.id,{x,y});fan.members.forEach((m,i)=>{
+      const cx=x+fan.cellX[i],cy=y+fan.cellY[i],laid=memberLayouts.get(m.id),own=laid?.children?.[0];
+      if(laid&&own){place(m.id,cx,cy,own.width??0,own.height??0,depth,false);walk(own,cx,cy,depth+1);addSections(laid,cx-(own.x??0),cy-(own.y??0));}
+      else{const s=sizeOf(m);place(m.id,cx,cy,s.width,s.height,depth,true);}
+    });continue;}
     place(c.id,x,y,c.width??0,c.height??0,depth,!c.children?.length);
     walk(c,x,y,depth+1);
   }};
+  // The hub's one routed edge reaches the grid; from there each spoke is fed down the left lane, along its row channel and into its own lane.
+  const tidy=(pts:{x:number;y:number}[])=>pts.filter((p,i,a)=>i===0||p.x!==a[i-1].x||p.y!==a[i-1].y).filter((p,i,a)=>i===0||i===a.length-1||!((a[i-1].x===p.x&&p.x===a[i+1].x)||(a[i-1].y===p.y&&p.y===a[i+1].y)));
+  const routeFans=()=>{for(const fan of fans.values()){
+    const at=fanAt.get(fan.id);if(!at)continue;
+    const lane0=at.x+FAN.lead/2,byId=new Map(nodes.map(n=>[n.id,n]));
+    fan.members.forEach((m,i)=>{
+      const placed=byId.get(m.id)!,ty=placed.collapsed?placed.y+placed.height/2:placed.y+22,c=fan.col[i],r=fan.row[i],chan=at.y+fan.rowTop[r]-(r===0?FAN.top/2:FAN.laneY/2),laneC=at.x+fan.colLeft[c]-FAN.laneX/2;
+      for(const e of edgeList){
+        if(fanEdge(e)!==m.id)continue;
+        const lead=sections.get(`${fan.id}:edge:${hubSide(e,m.id)}`);if(!lead)continue;
+        const end=lead[lead.length-1],inner=chain(e.source).has(m.id)?e.source:e.target,target=byId.get(inner);
+        const tail=c===0?[{x:lane0,y:end.y},{x:lane0,y:ty}]:[{x:lane0,y:end.y},{x:lane0,y:chan},{x:laneC,y:chan},{x:laneC,y:ty}];
+        // An endpoint deeper inside an open spoke is reached down the spoke's own left padding.
+        const into=target&&target.id!==m.id?[{x:placed.x+8,y:ty},{x:placed.x+8,y:target.y+target.height/2},{x:target.x,y:target.y+target.height/2}]:[{x:placed.x,y:ty}];
+        const path=tidy([...lead,...tail,...into]);
+        sections.set(e.id,e.source===inner?[...path].reverse():path);trunks.add(e.id);
+      }
+    });
+  }};
+  const trunks=new Set<string>();
   const siteColumn=sites.length?CARD.width+TRUNK_GAP+sites.length*TRUNK_STEP:0;let cursor=8;
   for(const {cloud,laid} of laidClouds){
     const frame=laid.children!.find(c=>c.id===cloud.id)!,portalNodes=laid.children!.filter(c=>c.id.startsWith('portal:'));
     const dx=siteColumn+(sites.length?16:0)-(frame.x??0),dy=cursor-Math.min(frame.y??0,...portalNodes.map(p=>p.y??0));
     walk({id:'root',children:[frame]},dx,dy,0);
     for(const p of portalNodes)(portalY.get(p.id)??portalY.set(p.id,[]).get(p.id)!).push((p.y??0)+dy);
-    for(const e of laid.edges??[]){const sec=(e as any).sections?.[0];if(sec)sections.set(e.id,[sec.startPoint,...(sec.bendPoints??[]),sec.endPoint].map((pt:{x:number;y:number})=>({x:pt.x+dx,y:pt.y+dy})));}
+    addSections(laid,dx,dy);
     cursor=dy+Math.max((frame.y??0)+(frame.height??0),...portalNodes.map(p=>(p.y??0)+(p.height??0)))+CLOUD_GAP;
   }
+  routeFans();
   // Sites sit beside the clouds they connect to, then get nudged apart.
   const siteCenter=(site:Item)=>{const ys=[...portalY].filter(([k])=>k.endsWith(`:${site.id}`)).flatMap(([,v])=>v);return ys.length?ys.reduce((a,b)=>a+b,0)/ys.length:cursor/2;};
   let siteCursor=-Infinity;
@@ -171,7 +252,7 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
     const config=e.links.filter(l=>l.kind!=='simulation');
     const hybrid=items.get(e.source)?.provider==='onprem'||items.get(e.target)?.provider==='onprem';
     const first=config[0]??e.links[0];
-    return{id:e.id,source:e.source,target:e.target,links:e.links,kind:bundleKind(e.links,hybrid),hasFlow:e.links.some(l=>l.kind==='simulation'),label:config.length>1?`${first.label} +${config.length-1}`:first.label,points:sections.get(e.id)??[]};
+    return{id:e.id,source:e.source,target:e.target,links:e.links,kind:bundleKind(e.links,hybrid),hasFlow:e.links.some(l=>l.kind==='simulation'),label:config.length>1?`${first.label} +${config.length-1}`:first.label,points:sections.get(e.id)??[],trunk:trunks.has(e.id)};
   });
   return{nodes,edges,rollup:visible};
 }

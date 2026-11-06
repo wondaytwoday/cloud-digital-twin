@@ -79,6 +79,15 @@ test('inventory filters and sorts',async({page})=>{
   await expect(page.getByRole('columnheader',{name:'상태'})).toHaveAttribute('aria-sort','ascending');
   expect(await page.locator('tbody tr').count()).toBeGreaterThan(5);
 });
+test('resources is its own page: no map tabs or scope tree, charts per category',async({page})=>{
+  await page.goto('/?scenario=standard&view=inventory');await expect(page.getByRole('heading',{name:'리소스',level:1})).toBeVisible();
+  await expect(page.getByRole('tablist',{name:'열린 범위'})).toHaveCount(0);await expect(page.getByRole('complementary',{name:'관리 범위 탐색'})).toHaveCount(0);await expect(page.getByText('전체 지도')).toHaveCount(0);
+  await expect(page.getByRole('img').or(page.locator('.recharts-surface')).first()).toBeVisible();
+  await page.getByRole('tab',{name:/^컴퓨팅/}).click();
+  await expect(page.getByText('VM 사용률')).toBeVisible();await expect(page.getByText('GPU 인스턴스')).toBeVisible();
+  expect(await page.getByRole('meter').count()).toBeGreaterThan(5);
+  await page.getByRole('button',{name:/^api-prod-01/}).click();await expect(page).toHaveURL(/view=map/);
+});
 test('exports produce files',async({page})=>{
   await openMap(page);
   for(const [label,ext] of [['draw.io','.drawio'],['지도 PNG','.png'],['지도 SVG','.svg'],['스냅샷 JSON','.json']] as const){

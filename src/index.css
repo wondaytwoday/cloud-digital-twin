@@ -1,0 +1,53 @@
+/* Layer order keeps the existing app styles working: vendor and app rules sit under Tailwind utilities, and Tailwind only scans the shadcn code. */
+@layer vendor, theme, app, components, utilities;
+@import '@xyflow/react/dist/style.css' layer(vendor);
+@import 'tailwindcss/theme.css' layer(theme);
+@import './style.css' layer(app);
+@import 'tailwindcss/utilities.css' layer(utilities) source(none);
+@source './ui';
+@source './pages/Resources.tsx';
+
+/* shadcn tokens point at the app's own palette, so new components match the rest of the portal. */
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--surface);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--accent);
+  --color-primary-foreground: #fff;
+  --color-secondary: var(--bg);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--bg);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--accent-soft);
+  --color-accent-foreground: var(--accent);
+  --color-destructive: var(--warn);
+  --color-border: var(--line);
+  --color-input: var(--line-strong);
+  --color-ring: var(--accent);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --font-sans: 'Noto Sans KR', -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+/* :root{font-size:13px} is the app's base, so Tailwind's rem scale would shrink; the scale is pinned in px instead. */
+@theme {
+  --spacing: 4px;
+  --text-xs: 12px; --text-xs--line-height: 16px;
+  --text-sm: 13px; --text-sm--line-height: 18px;
+  --text-base: 14px; --text-base--line-height: 20px;
+  --text-lg: 16px; --text-lg--line-height: 22px;
+  --text-xl: 18px; --text-xl--line-height: 24px;
+  --text-2xl: 22px; --text-2xl--line-height: 28px;
+}
+:root { --chart-1: #1e40af; --chart-2: #0f7a68; --chart-3: #a85f0c; --chart-4: #6a55b0; --chart-5: #b4412f; }
+@layer app { .shad *, .shad *::before, .shad *::after { border-style: solid; border-width: 0; border-color: var(--line); } }

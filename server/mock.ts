@@ -102,7 +102,7 @@ function demoChanges(resources:Resource[],now:number){
 }
 function addSyntheticTelemetry(resources:Resource[]){
   for(const [i,r] of resources.filter(r=>r.kind==='compute').entries()){
-    if(!/stopped|deallocated|terminated|failed/i.test(r.status)){const cpu=18+(i*13)%62;r.metrics={cpu,memory:35+(i*17)%50,history:Array.from({length:12},(_,h)=>Math.max(4,Math.min(96,cpu+((h*7+i*5)%24)-12)))};}
+    if(!/stopped|deallocated|terminated|failed/i.test(r.status)){const cpu=18+(i*13)%62;r.metrics={cpu,memory:35+(i*17)%50,disk:22+(i*23)%71,...(/×/.test(r.specs['GPU']??'')?{gpu:40+(i*29)%55}:{}),history:Array.from({length:12},(_,h)=>Math.max(4,Math.min(96,cpu+((h*7+i*5)%24)-12)))};}
   }
 }
 function syntheticFlow({hops,rate}:{hops:string[];rate:string},named:(name:string)=>Resource):Link[]{
