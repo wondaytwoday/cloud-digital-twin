@@ -68,7 +68,7 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
     return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{}),...(c.stale!==undefined?{stale:c.stale}:{}),...(c.datasets?{datasets:c.datasets}:{})}];
   });
   const restricted:{[K in keyof Required<Snapshot>]:Snapshot[K]}={
-    version:snapshot.version,mode:snapshot.mode,scenario:snapshot.scenario,collectedAt:snapshot.collectedAt,costAt:snapshot.costAt,fx:snapshot.fx,
+    version:snapshot.version,mode:snapshot.mode,scenario:snapshot.scenario,collectedAt:snapshot.collectedAt,costAt:snapshot.costAt,fx:snapshot.fx,ownership:snapshot.ownership,
     resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),
     scopes:snapshot.scopes.filter(mine),scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>mine(k))),incomplete,
     cost:snapshot.cost.filter(c=>mine(c.scope)),activity:snapshot.activity.filter(a=>mine(a.scope)),iam:snapshot.iam.filter(a=>mine(a.scope)),

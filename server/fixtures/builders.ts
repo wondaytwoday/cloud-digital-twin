@@ -1,8 +1,13 @@
 // Synthetic, documented API-shaped fixtures. Never customer data.
 import type {Raw} from './types.js';
 type Rule=[string,string,string,string,string,string,number];
+// Owner and service tags on part of the estate, picked by name, so the demo shows tagged resources and untagged gaps side by side.
+// Azure uses Owner/Service, AWS owner/service and GCP lower-case labels, the way people actually type them.
+const TEAMS:[RegExp,string,string][]=[[/hub|connectivity|transit|network|vgw|afw|er-/i,'network-team','connectivity'],[/checkout|orders|commerce/i,'commerce-team','checkout'],[/data|analytics|etl|warehouse/i,'data-team','analytics'],[/platform|aks|api/i,'platform-team','platform-api']];
+const team=(hint:string)=>TEAMS.find(([re])=>re.test(hint));
+export const ownerTags=(hint:string,owner='owner',service='service'):Record<string,string>=>{const t=team(hint);return t?{[owner]:t[1],[service]:t[2]}:{};};
 export const azId=(sub:string,rg:string,type:string,n:string)=>`/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.${type}/${n}`;
-export const azRow=(sub:string,rg:string,type:string,name:string,properties:object,extra:Raw={},location='koreacentral'):Raw=>({id:azId(sub,rg,type,name),type:`Microsoft.${type}`,name,location,subscriptionId:sub,resourceGroup:rg,tags:{environment:rg.includes('dev')?'dev':'production'},properties,...extra});
+export const azRow=(sub:string,rg:string,type:string,name:string,properties:object,extra:Raw={},location='koreacentral'):Raw=>({id:azId(sub,rg,type,name),type:`Microsoft.${type}`,name,location,subscriptionId:sub,resourceGroup:rg,tags:{environment:rg.includes('dev')?'dev':'production',...ownerTags(`${rg} ${name}`,'Owner','Service')},properties,...extra});
 export const vnetId=(sub:string,rg:string,n:string)=>azId(sub,rg,'Network/virtualNetworks',n);
 export const subnetId=(sub:string,rg:string,vnet:string,n:string)=>`${vnetId(sub,rg,vnet)}/subnets/${n}`;
 export const nsgId=(sub:string,rg:string,n:string)=>azId(sub,rg,'Network/networkSecurityGroups',n);
@@ -13,7 +18,7 @@ export const nicConfig=(sub:string,rg:string,vmName:string)=>({id:`${azId(sub,rg
 export const privateService=(sub:string,rg:string,type:string,name:string,properties:object,subnet:string,ip:string,location?:string)=>[azRow(sub,rg,type,name,properties,{},location),azRow(sub,rg,'Network/privateEndpoints',`pe-${name}`,{subnet:{id:subnet},customDnsConfigs:[{ipAddresses:[ip]}],privateLinkServiceConnections:[{properties:{privateLinkServiceId:azId(sub,rg,type,name)}}]},{},location)];
 export const standardRules:Rule[]=[['AllowCorporateHTTPS','Inbound','Allow','Tcp','443','10.0.0.0/8',100],['DenyInternet','Inbound','Deny','*','*','Internet',4000]];
 export const tag=(name:string,extra:Raw={})=>[{Key:'Name',Value:name},...Object.entries(extra).map(([Key,Value])=>({Key,Value}))];
-export const ec2=(id:string,name:string,type:string,subnet:string,ip:string,sg:string,state='running')=>({InstanceId:id,InstanceType:type,SubnetId:subnet,PrivateIpAddress:ip,State:{Name:state},SecurityGroups:[{GroupId:sg}],Tags:tag(name,{environment:'production'})});
+export const ec2=(id:string,name:string,type:string,subnet:string,ip:string,sg:string,state='running')=>({InstanceId:id,InstanceType:type,SubnetId:subnet,PrivateIpAddress:ip,State:{Name:state},SecurityGroups:[{GroupId:sg}],Tags:tag(name,{environment:'production',...ownerTags(name)})});
 export const awsSubnet=(id:string,name:string,vpc:string,cidr:string,az:string,isPublic=false)=>({SubnetId:id,VpcId:vpc,CidrBlock:cidr,AvailabilityZone:az,MapPublicIpOnLaunch:isPublic,Tags:tag(name)});
 export const sgRule=(port:number,cidr:string)=>({IpProtocol:'tcp',FromPort:port,ToPort:port,IpRanges:[{CidrIp:cidr}]});
 export const egress=[{IpProtocol:'-1',IpRanges:[{CidrIp:'0.0.0.0/0'}]}];
@@ -22,7 +27,7 @@ export const instanceTypes:Raw[]=[{InstanceType:'t3.medium',VCpuInfo:{DefaultVCp
 export const compute=(project:string)=>`//compute.googleapis.com/projects/${project}`;
 export const asset=(type:string,name:string,data:object,location='asia-northeast3')=>({name,assetType:type,resource:{location,data}});
 export const gcpSubnetName=(project:string,region:string,n:string)=>`${compute(project)}/regions/${region}/subnetworks/${n}`;
-export const gce=(project:string,network:string,subnetwork:string,n:string,ip:string,machine:string,status='RUNNING',extra:object={},zone='asia-northeast3-a')=>asset('compute.googleapis.com/Instance',`${compute(project)}/zones/${zone}/instances/${n}`,{name:n,machineType:`zones/${zone}/machineTypes/${machine}`,status,labels:{environment:project.includes('sandbox')?'sandbox':'production'},networkInterfaces:[{network,subnetwork,networkIP:ip}],disks:[{boot:true,diskSizeGb:'100'}],...extra},zone.slice(0,-2));
+export const gce=(project:string,network:string,subnetwork:string,n:string,ip:string,machine:string,status='RUNNING',extra:object={},zone='asia-northeast3-a')=>asset('compute.googleapis.com/Instance',`${compute(project)}/zones/${zone}/instances/${n}`,{name:n,machineType:`zones/${zone}/machineTypes/${machine}`,status,labels:{environment:project.includes('sandbox')?'sandbox':'production',...(project.includes('sandbox')?{}:ownerTags(`${project} ${n}`))},networkInterfaces:[{network,subnetwork,networkIP:ip}],disks:[{boot:true,diskSizeGb:'100'}],...extra},zone.slice(0,-2));
 export const publicIp=(sub:string,rg:string,name:string,address:string,location?:string)=>azRow(sub,rg,'Network/publicIPAddresses',name,{ipAddress:address,publicIPAllocationMethod:'Static'},{},location);
 // Attaches an address to the NIC a vm() helper created.
 export function withPublicIp(rows:Raw[],vmName:string,sub:string,rg:string,pip:string){const nic=rows.find(r=>r.name===`${vmName}-nic`)!;nic.properties.ipConfigurations[0].properties.publicIPAddress={id:azId(sub,rg,'Network/publicIPAddresses',pip)};return rows;}

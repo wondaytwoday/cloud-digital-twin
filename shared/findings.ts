@@ -3,9 +3,10 @@ import {costSpikes,money} from './cost.js';
 import {cidrOverlaps,hybridLinks} from './network.js';
 import {exposures,health} from './topology.js';
 import {ALL_FOCUS,iamInScope,inScope,type Focus} from './hierarchy.js';
+import {DEFAULT_OWNERSHIP_KEYS,ownershipOf} from './ownership.js';
 export type Severity='critical'|'high'|'medium'|'info';
 export type Category='infra'|'network'|'iam'|'cost';
-export type Finding={id:string;severity:Severity;category:Category;title:string;detail:string;provider?:string;scope?:string;target?:{view:'map'|'iam'|'cost'|'network'|'security'|'inventory';id?:string}};
+export type Finding={id:string;severity:Severity;category:Category;title:string;detail:string;provider?:string;scope?:string;target?:{view:'map'|'iam'|'cost'|'network'|'security'|'inventory';id?:string};owner?:string};
 const ORDER:Severity[]=['critical','high','medium','info'];
 const KEY_MAX_DAYS=90;
 // Everything the portal thinks an operator should look at, in one list. Each entry names its evidence and stays a candidate rather than a verdict.
@@ -36,5 +37,8 @@ export function findings(s:Snapshot,now=new Date(),focus:Focus=ALL_FOCUS):Findin
   const grouped=new Map<string,Finding&{scopes:string[]}>();
   for(const f of out){const key=f.category==='iam'?`${f.severity}|${f.title}`:f.id,seen=grouped.get(key);if(!seen)grouped.set(key,{...f,scopes:f.scope?[f.scope]:[]});else if(f.scope&&!seen.scopes.includes(f.scope))seen.scopes.push(f.scope);}
   const unique=[...grouped.values()].map(({scopes,...f})=>scopes.length>1?{...f,detail:`${f.detail.split(' · ')[0]} · 범위 ${scopes.length}개: ${scopes.slice(0,2).map(label).join(', ')}${scopes.length>2?' 외':''}`}:f);
-  return unique.sort((a,b)=>ORDER.indexOf(a.severity)-ORDER.indexOf(b.severity));
+  // A finding about one resource names who answers for it, so it can be handed to them.
+  const byId=new Map(s.resources.map(r=>[r.id,r])),keys=s.ownership??DEFAULT_OWNERSHIP_KEYS;
+  const owned=unique.map(f=>{const r=f.target?.id?byId.get(f.target.id):undefined,owner=r&&ownershipOf(r,byId,keys).owner;return owner?{...f,owner}:f;});
+  return owned.sort((a,b)=>ORDER.indexOf(a.severity)-ORDER.indexOf(b.severity));
 }

@@ -11,6 +11,7 @@ import {applySites,readSites} from './onprem.js';
 import {requireAccess,requireRole,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
 import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
 import {isStale,staleAfterHours} from '../shared/freshness.js';
+import {ownershipKeys} from '../shared/ownership.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');
@@ -59,13 +60,13 @@ app.get('/api/topology',requireAccess,async(req,res)=>{
   res.set('Cache-Control','no-store');
   try{
     // Rates are the operator's setting, applied when read, so changing .env takes effect without a new collection.
-    const fx=parseFx(process.env);
-    if(process.env.DATA_MODE!=='live'){res.json({...await mockSnapshot(isScenario(req.query.scenario)?req.query.scenario:'standard'),fx});return;}
+    const fx=parseFx(process.env),ownership=ownershipKeys(process.env);
+    if(process.env.DATA_MODE!=='live'){res.json({...await mockSnapshot(isScenario(req.query.scenario)?req.query.scenario:'standard'),fx,ownership});return;}
     const snapshot=await liveSnapshot();
     if(!snapshot){res.status(503).json({error:process.env.VERCEL?'Vercel 배포는 수집을 실행하거나 결과를 저장할 수 없어 보여줄 스냅샷이 없습니다. 클라우드에 접근되는 PC나 서버에서 npm run live를 실행하세요.':'실제 스냅샷이 없습니다. npm run collect로 먼저 수집하세요. 목데이터로 자동 대체하지 않습니다.',onboarding:collectorEnabled()});return;}
     const access=res.locals.access as AccessEntry|undefined;
     audit(req,{actor:actorOf(req,access?.name),action:'view',target:'portal',detail:'인벤토리 조회'});
-    res.json({...(access?restrictSnapshot(snapshot,access.scopes):snapshot),fx});
+    res.json({...(access?restrictSnapshot(snapshot,access.scopes):snapshot),fx,ownership});
   }catch(e){console.error('Snapshot load failed:',e instanceof Error?e.message:'unknown');res.status(500).json({error:'스냅샷 형식 또는 참조가 올바르지 않습니다. 서버 로그와 수집 결과를 확인하세요.'});}
 });
 app.get('/api/collect/status',requireAccess,requireRole('operator'),async(_req,res)=>{

@@ -3,6 +3,7 @@ import {ArrowUpRight,Copy,Check,ShieldCheck,Activity,Info,Link2,X,Route,Unplug,A
 import type {Resource,Snapshot} from '../shared/schema';
 import {exposures,health,isWideInbound} from '../shared/topology';
 import {kindNames,ProviderMark,ResourceIcon} from './graph';
+import {DEFAULT_OWNERSHIP_KEYS,ownershipOf} from '../shared/ownership';
 import {providerNames,scopeNouns,type Bundle} from './layout';
 type Common={snapshot:Snapshot;onSelect:(id:string)=>void;onClose:()=>void};
 const scopeName=(s:Snapshot,id:string)=>s.scopeLabels[id]??id;
@@ -34,7 +35,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
       {r.kind!=='firewall'&&r.kind!=='external'&&r.provider!=='onprem'&&<div className="hero-actions"><button className="button" onClick={()=>onTrace(r.id)}><Route size={14}/>경로 추적</button>{canImpact&&<button className="button" onClick={()=>onImpact(r.id)}><Unplug size={14}/>단절 영향</button>}</div>}</div>
     <div className="tabs" role="tablist" aria-label="리소스 상세">{[['overview','개요'],['network',`네트워크${policies.length+r.rules.length?` ${policies.length+(r.rules.length?1:0)}`:''}`],['access','접근 권한']].map(([k,l])=><button key={k} role="tab" aria-selected={tab===k} onClick={()=>setTab(k)}>{l}</button>)}</div>
     <div className="inspector-body" role="tabpanel">
-    {tab==='overview'&&<>{change&&<div className={`notice change-${change.kind}`}><Info size={15}/><p>최근 수집에서 변경됨: {change.detail}</p></div>}<h3>구성</h3><dl className="properties">{Object.entries(r.specs).map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}{r.ip&&<div><dt>사설 IP</dt><dd className="mono">{r.ip}</dd></div>}{r.publicIp&&<div><dt>공인 IP</dt><dd className="mono">{r.publicIp}</dd></div>}{r.cidr&&<div><dt>CIDR</dt><dd className="mono">{r.cidr}</dd></div>}{r.group&&<div><dt>{r.provider==='azure'?'리소스 그룹':'위치'}</dt><dd>{r.group}</dd></div>}</dl>
+    {tab==='overview'&&<>{change&&<div className={`notice change-${change.kind}`}><Info size={15}/><p>최근 수집에서 변경됨: {change.detail}</p></div>}<Ownership snapshot={snapshot} resource={r}/><h3>구성</h3><dl className="properties">{Object.entries(r.specs).map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}{r.ip&&<div><dt>사설 IP</dt><dd className="mono">{r.ip}</dd></div>}{r.publicIp&&<div><dt>공인 IP</dt><dd className="mono">{r.publicIp}</dd></div>}{r.cidr&&<div><dt>CIDR</dt><dd className="mono">{r.cidr}</dd></div>}{r.group&&<div><dt>{r.provider==='azure'?'리소스 그룹':'위치'}</dt><dd>{r.group}</dd></div>}</dl>
       {r.metrics&&<div className="metrics"><div className="section-row"><h3><Activity size={13}/>사용률</h3><span className="demo-label">예제값</span></div><div className="metric-values"><div><small>CPU</small><strong>{r.metrics.cpu}<em>%</em></strong></div><div><small>메모리</small><strong>{r.metrics.memory}<em>%</em></strong></div></div><svg className="sparkline" viewBox="0 0 260 55" aria-label="시뮬레이션 CPU 추이" role="img"><polyline points={r.metrics.history.map((v,i)=>`${i*23.5},${55-v*.5}`).join(' ')} fill="none" stroke="currentColor" strokeWidth="2"/></svg></div>}
       {!!Object.keys(r.tags).length&&<><h3>태그</h3><div className="tags">{Object.entries(r.tags).map(([k,v])=><span key={k}>{k}<b>{v}</b></span>)}</div></>}
       <h3>수집 출처</h3><p className="small">{r.source}</p><button className="id-copy" onClick={copy} title={r.nativeId}><span>{r.nativeId}</span>{copied?<Check size={13}/>:<Copy size={13}/>}</button></>}
@@ -87,4 +88,12 @@ export function PathPanel({snapshot,from,to,path,activeHop,picking,onPick,onChan
 export function ImpactPanel({snapshot,id,lost,onSelect,onClose}:{snapshot:Snapshot;id:string;lost:string[];onSelect:(id:string)=>void;onClose:()=>void}){
   const r=snapshot.resources.find(x=>x.id===id)!,items=lost.map(l=>snapshot.resources.find(x=>x.id===l)!).filter(x=>x.kind!=='subnet');
   return <aside className="inspector"><div className="inspector-head"><span>단절 영향</span><button className="icon-button" onClick={onClose} aria-label="단절 영향 닫기"><X size={16}/></button></div><div className="hero"><div className="large-icon impact"><Unplug size={20}/></div><h2>{r.name}</h2><p className="muted small">이 자원이 사라지면 사내망까지 이어지는 구성 경로가 모두 끊기는 자원입니다.</p></div><div className="inspector-body"><h3>영향 가능 자원 <span className="count">{items.length}</span></h3>{items.length?items.map(x=><button key={x.id} className="relation-row" onClick={()=>onSelect(x.id)}><ResourceIcon resource={x} size={22}/><span>{x.name}<small>{kindNames[x.kind]} · {scopeName(snapshot,x.scope)}</small></span><ArrowUpRight size={13}/></button>):<p className="muted small">수집한 구성에서는 다른 경로가 남아 있거나 사내망에 의존하는 자원이 없습니다.</p>}<div className="notice"><Info size={15}/><p>구성과 피어링 전이 규칙으로 계산한 가능성입니다. 경로 우선순위와 BGP 상태는 반영하지 않아 실제 장애 영향으로 단정할 수 없습니다.</p></div></div></aside>;
+}
+
+// Who to ask about this resource. An inherited value names where it came from, and a missing one says which tag would set it.
+function Ownership({snapshot,resource}:{snapshot:Snapshot;resource:Resource}){
+  const keys=snapshot.ownership??DEFAULT_OWNERSHIP_KEYS,byId=useMemo(()=>new Map(snapshot.resources.map(x=>[x.id,x])),[snapshot]),o=ownershipOf(resource,byId,keys);
+  if(resource.provider==='onprem'||resource.kind==='external')return null;
+  const value=(v:string|undefined,from:string|undefined,tags:string[])=>v?<dd>{v}{from&&<small className="inherited"> · {from}에서 상속</small>}</dd>:<dd className="muted" title={`태그 ${tags.join(', ')} 중 하나로 지정합니다.`}>미지정</dd>;
+  return <><h3>담당</h3><dl className="properties"><div><dt>담당자</dt>{value(o.owner,o.ownerFrom,keys.owner)}</div><div><dt>서비스</dt>{value(o.service,o.serviceFrom,keys.service)}</div></dl></>;
 }

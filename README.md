@@ -128,6 +128,8 @@ npm run collect -- --provider aws --regions ap-northeast-2
 | `ATLAS_AWS_ACCOUNTS` | Organizations를 읽지 못할 때의 계정 목록 (`이름=ID,이름=ID`) |
 | `ATLAS_GCP_BILLING_TABLE` | BigQuery 결제 내보내기 테이블 (`프로젝트.데이터셋.테이블`) |
 | `ATLAS_COST_HOURS` | 비용 조회 주기(시간). 기본 24 |
+| `ATLAS_OWNER_TAGS` | 담당자를 읽을 태그 키, 쉼표로 구분해 앞쪽 우선. 기본 `owner,team,owner-team,담당자,담당팀`. 대소문자 무시 |
+| `ATLAS_SERVICE_TAGS` | 서비스를 읽을 태그 키. 기본 `service,app,application,system,workload,서비스` |
 | `ATLAS_HISTORY_DAYS` | 스냅샷 이력 보존 기간(일). 기본 30. 기간과 상관없이 최근 이력 2개는 항상 남김 |
 | `ATLAS_STALE_HOURS` | 이 시간보다 오래된 클라우드 데이터를 '오래됨'으로 표시. 기본은 수집 주기의 3배(최소 3시간), 자동 수집을 끄면 24 |
 
