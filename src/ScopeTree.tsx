@@ -24,7 +24,8 @@ export function ScopeTree({index,nodes,activeId,compact,action='토폴로지 열
           <span className="scope-meta">
             {!!s?.warn&&<span className="meta-warn" title={`이상 ${s.warn}`}><AlertTriangle size={12}/>{s.warn}</span>}
             {!compact&&!!s?.stopped&&<span className="meta-stopped" title={`중지 ${s.stopped}`}><CircleOff size={12}/>{s.stopped}</span>}
-            {empty?<em>미수집</em>:<b title={`자원 ${s?.resources}`}>{s?.resources}</b>}
+            {!!s?.incomplete&&!empty&&<span className="meta-partial" title={n.scope?'권한이나 오류로 이 범위의 일부 항목을 읽지 못했습니다. 숫자는 읽은 것만 셉니다.':`아래 범위 ${s.incomplete}개를 일부만 읽었습니다. 숫자는 읽은 것만 셉니다.`}>일부</span>}
+            {empty?(s?.incomplete?<em className="meta-failed" title="권한이나 오류로 이 범위를 읽지 못했습니다. 자원이 없다는 뜻이 아닙니다.">읽기 실패</em>:<em title="수집된 자원이 없습니다. 비어 있는 범위이거나 수집 대상이 아니었을 수 있습니다.">미수집</em>):<b title={`자원 ${s?.resources} (서브넷·보안 정책 포함)`}>{s?.resources}</b>}
           </span>
         </button>
       </div>

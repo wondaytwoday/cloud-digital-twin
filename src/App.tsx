@@ -94,7 +94,7 @@ function Workspace(){
   const startCollect=async()=>{const r=await fetch('/api/collect',{method:'POST',headers:{'X-Atlas-Request':'1'}});if(!r.ok){setToast((await r.json()).error??'수집을 시작하지 못했습니다.');return;}setToast('수집을 시작했습니다.');refreshCollect();setTimeout(()=>refreshCollect(),1500);};
   const logout=async()=>{await fetch('/api/session',{method:'DELETE'});setSnapshot(null);setNeedsLogin(true);setSession({required:true});};
   useEffect(()=>{if(toast){const t=setTimeout(()=>setToast(''),2500);return()=>clearTimeout(t)}},[toast]);
-  const index=useMemo(()=>snapshot?buildScopeIndex(snapshot.hierarchy,snapshot.resources):null,[snapshot]);
+  const index=useMemo(()=>snapshot?buildScopeIndex(snapshot.hierarchy,snapshot.resources,snapshot.incomplete):null,[snapshot]);
   const focus=useMemo(()=>focusFor(index,active),[index,active]);
   const byId=useMemo(()=>new Map(snapshot?.resources.map(r=>[r.id,r])),[snapshot]);
   const model=useMemo(()=>({resources:snapshot?.resources??[],links:snapshot?.links??[]}),[snapshot]);

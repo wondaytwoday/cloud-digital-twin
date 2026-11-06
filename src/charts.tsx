@@ -28,9 +28,9 @@ export const Delta=({value}:{value:number|null})=>value===null?<span className="
 export function BarRows({rows,total,format}:{rows:{key:string;label:string;sub?:string;value:number;series?:string;change?:number|null;onClick?:()=>void}[];total:number;format:(v:number)=>string}){
   return <ul className="bar-rows">{rows.map(r=>{const body=<><span className="bar-row-name"><span>{r.series&&<i className={`swatch c-${r.series}`}/>}{r.label}</span>{r.sub&&<small>{r.sub}</small>}</span><span className="bar-row-track" aria-hidden="true"><i className={r.series?`c-${r.series}`:'c-neutral'} style={{width:`${total?r.value/total*100:0}%`}}/></span><span className="bar-row-value">{format(r.value)}</span>{r.change!==undefined&&<Delta value={r.change}/>}</>;return <li key={r.key}>{r.onClick?<button onClick={r.onClick}>{body}</button>:<div>{body}</div>}</li>})}</ul>;
 }
-export function Kpi({label,value,hint,tone,onClick}:{label:string;value:string;hint?:string;tone?:'bad'|'warn';onClick?:()=>void}){
+export function Kpi({label,value,hint,tone,title,onClick}:{label:string;value:string;hint?:string;tone?:'bad'|'warn';title?:string;onClick?:()=>void}){
   const inner=<><span className="kpi-label">{label}</span><strong className={tone?`kpi-${tone}`:''}>{value}</strong>{hint&&<small>{hint}</small>}</>;
-  return onClick?<button className="kpi" onClick={onClick}>{inner}</button>:<div className="kpi">{inner}</div>;
+  return onClick?<button className="kpi" title={title} onClick={onClick}>{inner}</button>:<div className="kpi" title={title}>{inner}</div>;
 }
 export function ProviderFilter({value,onChange,present}:{value:string;onChange:(v:string)=>void;present:string[]}){
   return <div className="segmented" role="group" aria-label="클라우드 필터">{['all',...present].map(p=><button key={p} className={value===p?'active':''} aria-pressed={value===p} onClick={()=>onChange(p)}>{p==='all'?'전체':NAMES[p]}</button>)}</div>;

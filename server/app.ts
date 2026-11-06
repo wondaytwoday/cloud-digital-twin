@@ -10,6 +10,7 @@ import {FileSnapshotStore,type SnapshotStore} from './store.js';
 import {applySites,readSites} from './onprem.js';
 import {requireAccess,requireRole,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
 import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
+import {isStale,staleAfterHours} from '../shared/freshness.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');
@@ -34,7 +35,8 @@ export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
   applySites(await readSites(),resources,links,allWarnings,scopeLabels);
   return validateSnapshot({version:1,mode:'live',collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),cost:snapshots.flatMap(s=>s.cost),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
     const s=snapshots.find(x=>x.resources.some(r=>r.provider===p)),run=status?.providers[p],state:Record<ProviderState,string>={idle:s?'collected':'missing',running:'running',ok:'collected',partial:'partial',failed:'failed',unauthenticated:'unauthenticated'};
-    return{provider:p,status:run?state[run.state]:s?'collected':'missing',api:'수집 스냅샷',scopes:s?.scopes.length??0,collectedAt:s?.collectedAt,message:run?.message};
+    // Stale is judged on the snapshot shown, not the last attempt: a run that keeps failing leaves old data on screen, which is exactly what must be flagged.
+    return{provider:p,status:run?state[run.state]:s?'collected':'missing',api:'수집 스냅샷',scopes:s?.scopes.length??0,collectedAt:s?.collectedAt,message:run?.message,...(s?{stale:isStale(s.collectedAt,staleAfterHours(process.env))}:{})};
   })});
 }
 app.get('/api/topology',requireAccess,async(req,res)=>{

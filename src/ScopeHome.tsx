@@ -6,6 +6,7 @@ import {Attention} from './Detail';
 import {providerNames} from './layout';
 import {ScopeTree} from './ScopeTree';
 import {connectors} from '../shared/connectors';
+import {countDefinition,resourceCounts} from '../shared/freshness';
 const leafNoun:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const badgeLabel:Record<string,string>={demo:'예시 데이터',collected:'수집됨',partial:'일부 누락',missing:'미수집',failed:'수집 실패',unauthenticated:'로그인 필요',running:'수집 중'};
 const badgeTone:Record<string,string>={demo:'amber',collected:'',partial:'amber',missing:'neutral',failed:'red',unauthenticated:'amber',running:'neutral'};
@@ -14,7 +15,7 @@ export function ScopeHome({snapshot,index,onOpen,onConnect,onSelectResource}:{sn
   const leaves=snapshot.hierarchy.filter(n=>n.scope),real=snapshot.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external');
   const total=Object.values(index.roots).flat().reduce((s,n)=>{const x=index.stats.get(n.id);return{warn:s.warn+(x?.warn??0),stopped:s.stopped+(x?.stopped??0)};},{warn:0,stopped:0});
   return <div className="home"><div className="home-head"><div><h1>관리 범위</h1><p>조직 계층에서 범위를 고르면 그 범위의 토폴로지가 새 탭으로 열립니다.</p></div>
-      <dl className="home-stats"><div><dt>범위</dt><dd>{leaves.length}</dd></div><div><dt>자원</dt><dd>{real.length}</dd></div><div className={total.warn?'warn':''}><dt>이상</dt><dd>{total.warn}</dd></div><div><dt>중지</dt><dd>{total.stopped}</dd></div></dl>
+      <dl className="home-stats"><div><dt>범위</dt><dd>{leaves.length}</dd></div><div title={countDefinition(resourceCounts(snapshot.resources))}><dt>자원</dt><dd>{real.length}</dd></div><div className={total.warn?'warn':''}><dt>이상</dt><dd>{total.warn}</dd></div><div><dt>중지</dt><dd>{total.stopped}</dd></div></dl>
       <button className="button primary" onClick={()=>onOpen('all')}><Network size={15}/>전체 연결 지도</button></div>
     <div className="home-grid">
       {(['azure','aws','gcp'] as const).map(p=>{

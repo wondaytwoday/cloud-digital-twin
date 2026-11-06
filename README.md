@@ -126,6 +126,7 @@ npm run collect -- --provider aws --regions ap-northeast-2
 | `ATLAS_AWS_ACCOUNTS` | Organizations를 읽지 못할 때의 계정 목록 (`이름=ID,이름=ID`) |
 | `ATLAS_GCP_BILLING_TABLE` | BigQuery 결제 내보내기 테이블 (`프로젝트.데이터셋.테이블`) |
 | `ATLAS_COST_HOURS` | 비용 조회 주기(시간). 기본 24 |
+| `ATLAS_STALE_HOURS` | 이 시간보다 오래된 클라우드 데이터를 '오래됨'으로 표시. 기본은 수집 주기의 3배(최소 3시간), 자동 수집을 끄면 24 |
 
 사내망 경계는 CSP API로 복원할 수 없어 `data/onprem.json`에 직접 등록합니다.
 

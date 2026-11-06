@@ -8,6 +8,8 @@ import {allRules,cidrOverlaps,hybridLinks} from '../../shared/network';
 import {CATEGORIES,categoryOf,fleetTotals} from '../../shared/capacity';
 import type {Finding,Severity} from '../../shared/findings';
 import {iamInScope,inScope,type Focus} from '../../shared/hierarchy';
+import {age,countDefinition,resourceCounts} from '../../shared/freshness';
+import type {Connection} from '../../shared/schema';
 import {ProviderMark} from '../graph';
 import {CostTrend,Kpi} from '../charts';
 import {FindingList} from './Findings';
@@ -18,6 +20,14 @@ const SEVERITY:Record<Severity,string>={critical:'긴급',high:'높음',medium:'
 const HEALTH=[{key:'ok',label:'정상',color:'var(--path)'},{key:'warn',label:'이상',color:'var(--warn)'},{key:'stopped',label:'중지',color:'var(--faint)'},{key:'unknown',label:'권한 없음',color:'var(--amber)'},{key:'neutral',label:'구성만 수집',color:'var(--line-strong)'}] as const;
 const CATEGORY_COLOR:Record<string,string>={compute:'var(--accent)',container:'#7c93c9',data:'var(--path)',network:'var(--peering)',security:'var(--amber)',service:'var(--line-strong)'};
 const gib=(v:number)=>v>=1024?`${(v/1024).toFixed(1)} TiB`:`${Math.round(v)} GiB`;
+const CONN_LABEL:Record<string,string>={demo:'예시',collected:'수집됨',partial:'일부',missing:'미연결',failed:'실패',unauthenticated:'로그인 필요',running:'수집 중'};
+// What a reader must know before trusting the numbers below: which cloud is old, failing, or only partly read.
+function freshnessIssues(connections:Connection[]){
+  return connections.flatMap(c=>{const name=PROVIDER_LABEL[c.provider],when=c.collectedAt?age(c.collectedAt):undefined;
+    if((c.status==='failed'||c.status==='unauthenticated')&&when)return [`${name}: 마지막 수집이 실패해 ${when} 데이터를 보여줍니다`];
+    if(c.status==='failed'||c.status==='unauthenticated'||c.status==='missing')return [`${name}: 수집된 데이터가 없습니다`];
+    const out:string[]=[];if(c.stale&&when)out.push(`${name}: ${when} 수집, 갱신 주기를 넘겼습니다`);if(c.status==='partial')out.push(`${name}: 일부 범위를 읽지 못했습니다`);return out;});
+}
 const days7=(now=Date.now())=>Array.from({length:7},(_,i)=>new Date(now-(6-i)*86_400_000).toISOString().slice(0,10));
 // Admins see who used the portal; others simply get no card, since the log is restricted on the server.
 function usePortalAudit(){
@@ -43,15 +53,18 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const activity=snapshot.activity.filter(a=>inScope(focus,a.provider,a.scope)),week=days7();
   const changes=(snapshot.changes?.items??[]).filter(c=>inScope(focus,c.provider,c.scope));
   const headline=cost.projected??cost.currentTotal,delta=cost.previousTotal?(headline-cost.previousTotal)/cost.previousTotal:null;
-  const warnCount=real.filter(r=>health(r.status)==='warn').length;
+  const warnCount=real.filter(r=>health(r.status)==='warn').length,counts=resourceCounts(resources);
+  const gaps=snapshot.incomplete.filter(x=>inScope(focus,snapshot.hierarchy.find(n=>n.scope===x)?.provider??resources.find(r=>r.scope===x)?.provider??focus.provider,x)).length;
+  const conns=snapshot.connections.filter(c=>c.provider!=='onprem'&&(focus.provider==='all'||c.provider===focus.provider)),issues=snapshot.mode==='live'?freshnessIssues(conns):[];
+  const times=new Set(conns.map(c=>c.collectedAt).filter(Boolean));
   const byCloud=present.map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries(CATEGORIES.map(c=>[c.id,resources.filter(r=>r.provider===p&&r.kind!=='subnet'&&categoryOf(r.kind)===c.id).length]))}));
   const dailyActivity=week.map(d=>({x:d.slice(5).replace('-','/'),...Object.fromEntries(present.map(p=>[p,activity.filter(a=>a.provider===p&&a.at.startsWith(d)).length]))}));
   const logins=portal?week.map(d=>new Set(portal.filter(e=>e.at.startsWith(d)&&(e.action==='login'||e.action==='view')).map(e=>e.actor)).size):[];
   const failedLogins=portal?.filter(e=>e.action==='login_failed').length??0;
-  return <div className="page"><header className="page-head"><div><h1>통합 대시보드</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. 자원, 사용률, 비용, IAM, 기록 모두 실제 값이 아닙니다.':`수집 시각 ${new Date(snapshot.collectedAt).toLocaleString('ko-KR')}`}</p></div>
-      <div className="page-actions"><ul className="conn-chips" aria-label="클라우드 연결">{snapshot.connections.filter(c=>c.provider!=='onprem').map(c=><li key={c.provider} className={`conn-${c.status}`}><ProviderMark provider={c.provider}/>{PROVIDER_LABEL[c.provider]}<small>{({demo:'예시',collected:'수집됨',partial:'일부',missing:'미연결',failed:'실패',unauthenticated:'로그인 필요',running:'수집 중'} as Record<string,string>)[c.status]}</small></li>)}</ul><button className="button primary" onClick={()=>go('map')}><Network size={15}/>토폴로지 보기</button></div></header>
+  return <div className="page"><header className="page-head"><div><h1>통합 대시보드</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. 자원, 사용률, 비용, IAM, 기록 모두 실제 값이 아닙니다.':`${times.size>1?'가장 오래된 수집':'수집 시각'} ${new Date(snapshot.collectedAt).toLocaleString('ko-KR')}`}</p>{issues.length>0&&<ul className="freshness-note" role="status" aria-label="데이터 최신성">{issues.map(t=><li key={t}>{t}</li>)}</ul>}</div>
+      <div className="page-actions"><ul className="conn-chips" aria-label="클라우드 연결">{snapshot.connections.filter(c=>c.provider!=='onprem').map(c=><li key={c.provider} className={`conn-${c.status} ${c.stale?'conn-stale':''}`} title={c.collectedAt&&snapshot.mode==='live'?`${PROVIDER_LABEL[c.provider]} 데이터 수집 ${new Date(c.collectedAt).toLocaleString('ko-KR')}${c.stale?' · 갱신 주기를 넘겼습니다':''}`:undefined}><ProviderMark provider={c.provider}/>{PROVIDER_LABEL[c.provider]}<small>{CONN_LABEL[c.status]}{c.collectedAt&&snapshot.mode==='live'&&` · ${c.stale?'오래됨 ':''}${age(c.collectedAt)}`}</small></li>)}</ul><button className="button primary" onClick={()=>go('map')}><Network size={15}/>토폴로지 보기</button></div></header>
     <section className="kpi-row" aria-label="주요 지표">
-      <Kpi label="리소스" value={real.length.toLocaleString('ko-KR')} hint={warnCount?`이상 ${warnCount}개`:`범위 ${new Set(resources.map(r=>r.scope)).size}개`} tone={warnCount?'bad':undefined} onClick={()=>go('inventory')}/>
+      <Kpi label="리소스" value={real.length.toLocaleString('ko-KR')} hint={[warnCount?`이상 ${warnCount}개`:`범위 ${new Set(resources.map(r=>r.scope)).size}개`,gaps?`범위 ${gaps}개 일부 누락`:`서브넷·정책 포함 ${counts.all.toLocaleString('ko-KR')}`].join(' · ')} tone={warnCount?'bad':gaps?'warn':undefined} title={`서브넷과 보안 정책을 뺀 수입니다. ${countDefinition(counts)}${gaps?` 범위 ${gaps}개는 일부만 읽어 실제보다 적을 수 있습니다.`:''}`} onClick={()=>go('inventory')}/>
       <Kpi label="VM" value={String(fleet.count)} hint={`실행 ${fleet.running} · vCPU ${fleet.vcpu} · ${gib(fleet.memoryGiB)}`} onClick={()=>go('inventory')}/>
       <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} onClick={()=>go('cost')}/>
       <Kpi label="조치 필요" value={String(urgent)} hint={`전체 ${list.length}건 · 긴급·높음`} tone={urgent?'bad':undefined} onClick={()=>go('findings')}/>

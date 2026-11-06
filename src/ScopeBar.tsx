@@ -5,11 +5,13 @@ import type {Focus,ScopeIndex} from '../shared/hierarchy';
 import {ProviderFilter} from './charts';
 import {ProviderMark} from './graph';
 import {ScopeTree} from './ScopeTree';
+import {countDefinition,resourceCounts} from '../shared/freshness';
 const NAMES:Record<string,string>={azure:'Azure',aws:'AWS',gcp:'Google Cloud'};
 const ORDER=['azure','aws','gcp'] as const;
 type Panel={snapshot:Snapshot;index:ScopeIndex;active:string;allLabel:string;action?:string;onPick:(tab:string)=>void};
 export function ScopePanel({snapshot,index,active,allLabel,action,onPick}:Panel){
-  return <><button className={`side-provider ${active==='all'?'is-active':''}`} onClick={()=>onPick('all')}><Layers3 size={16}/>{allLabel}<b>{snapshot.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').length}</b></button>{ORDER.filter(p=>index.roots[p].length).map(p=><div className="side-group" key={p}><button className={`side-provider ${active===`provider:${p}`?'is-active':''}`} onClick={()=>onPick(`provider:${p}`)}><ProviderMark provider={p}/>{NAMES[p]}<b>{snapshot.resources.filter(r=>r.provider===p&&r.scope!=='external').length}</b></button><ScopeTree compact index={index} nodes={index.roots[p]} activeId={active} action={action} onOpen={onPick}/></div>)}</>;
+  const all=resourceCounts(snapshot.resources),of=(p:string)=>resourceCounts(snapshot.resources.filter(r=>r.provider===p));
+  return <><button className={`side-provider ${active==='all'?'is-active':''}`} onClick={()=>onPick('all')}><Layers3 size={16}/>{allLabel}<b title={countDefinition(all)}>{all.all}</b></button>{ORDER.filter(p=>index.roots[p].length).map(p=><div className="side-group" key={p}><button className={`side-provider ${active===`provider:${p}`?'is-active':''}`} onClick={()=>onPick(`provider:${p}`)}><ProviderMark provider={p}/>{NAMES[p]}<b title={countDefinition(of(p))}>{of(p).all}</b></button><ScopeTree compact index={index} nodes={index.roots[p]} activeId={active} action={action} onOpen={onPick}/></div>)}</>;
 }
 // The same selection as the map's tabs, so a scope chosen on any page follows you to every other page.
 export function ScopeBar({snapshot,index,active,focus,label,onPick,onHome}:{snapshot:Snapshot;index:ScopeIndex;active:string;focus:Focus;label:string;onPick:(tab:string)=>void;onHome:()=>void}){

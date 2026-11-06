@@ -65,7 +65,7 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   const connections=snapshot.connections.flatMap(c=>{
     const own=[...allowed].filter(s=>providerOf.get(s)===c.provider);if(!own.length)return [];
     const status=c.status==='partial'&&!own.some(s=>incomplete.includes(s))?'collected':c.status;
-    return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{})}];
+    return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{}),...(c.stale!==undefined?{stale:c.stale}:{})}];
   });
   const restricted:{[K in keyof Required<Snapshot>]:Snapshot[K]}={
     version:snapshot.version,mode:snapshot.mode,scenario:snapshot.scenario,collectedAt:snapshot.collectedAt,costAt:snapshot.costAt,fx:snapshot.fx,
