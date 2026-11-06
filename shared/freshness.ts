@@ -12,8 +12,12 @@ export function age(at:string,now=Date.now()){
 }
 // One definition of "how many resources", so every page either shows the same number or says what it leaves out.
 // Subnets and security policies (NSGs, security groups, firewall rules) are configuration of a network, not things that run; on-prem sites and unreadable peers are not inventory.
+// NICs are parts of the machine they attach to, and Kubernetes objects are counted on their own, so neither inflates the headline.
+export const K8S_KINDS=new Set<Resource['kind']>(['node','namespace','workload','pod','k8sservice','ingress','serviceaccount','pvc','pv']);
+export const isPrimary=(r:Resource)=>r.provider!=='onprem'&&r.scope!=='external'&&r.kind!=='subnet'&&r.kind!=='firewall'&&r.kind!=='nic'&&!K8S_KINDS.has(r.kind);
 export function resourceCounts(resources:Resource[]){
-  const inventory=resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external'),subnets=inventory.filter(r=>r.kind==='subnet').length,policies=inventory.filter(r=>r.kind==='firewall').length;
-  return{all:inventory.length,primary:inventory.length-subnets-policies,subnets,policies};
+  const inventory=resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external'),of=(f:(r:Resource)=>boolean)=>inventory.filter(f).length;
+  return{all:inventory.length,primary:of(isPrimary),subnets:of(r=>r.kind==='subnet'),policies:of(r=>r.kind==='firewall'),nics:of(r=>r.kind==='nic'),kubernetes:of(r=>K8S_KINDS.has(r.kind))};
 }
-export const countDefinition=(c:ReturnType<typeof resourceCounts>)=>`서브넷 ${c.subnets.toLocaleString('ko-KR')}개와 보안 정책(NSG·보안 그룹·방화벽 규칙) ${c.policies.toLocaleString('ko-KR')}개를 포함하면 ${c.all.toLocaleString('ko-KR')}개입니다. 사내망과 조회 권한이 없는 외부 참조는 세지 않습니다.`;
+const n=(v:number)=>v.toLocaleString('ko-KR');
+export const countDefinition=(c:ReturnType<typeof resourceCounts>)=>`서브넷 ${n(c.subnets)}개, 보안 정책(NSG·보안 그룹·방화벽 규칙) ${n(c.policies)}개${c.nics?`, NIC ${n(c.nics)}개`:''}${c.kubernetes?`, Kubernetes 개체 ${n(c.kubernetes)}개`:''}를 포함하면 ${n(c.all)}개입니다. 사내망과 조회 권한이 없는 외부 참조는 세지 않습니다.`;

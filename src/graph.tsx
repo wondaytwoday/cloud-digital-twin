@@ -1,13 +1,13 @@
 import {memo} from 'react';
 import {Handle,Position,EdgeLabelRenderer,type EdgeProps,type NodeProps,type Node,type Edge} from '@xyflow/react';
-import {Server,ShieldCheck,Network,Router,Building2,Rows3,Flame,Split,Database,Boxes,ArrowLeftRight,CircleHelp,HardDrive,Globe2,ChevronDown,ChevronRight,AlertTriangle,CircleOff} from 'lucide-react';
+import {Server,ShieldCheck,Network,Router,Building2,Rows3,Flame,Split,Database,Boxes,ArrowLeftRight,CircleHelp,HardDrive,Globe2,ChevronDown,ChevronRight,AlertTriangle,CircleOff,Cable,Disc,FolderOpen,Archive,Plug,Fingerprint,Cpu,FolderTree,Layers,Box,Waypoints,DoorOpen,UserCog,FileBox,Database as Volume} from 'lucide-react';
 import type {Resource,ResourceKind} from '../shared/schema';
 import {health} from '../shared/topology';
 import {groupIcon,iconKey,providerLogo} from '../shared/iconKeys';
 import {iconUrl} from './icons';
 import type {Bundle,Placed} from './layout';
-export const icons:Record<ResourceKind,typeof Server>={compute:Server,firewall:ShieldCheck,appliance:Flame,network:Network,subnet:Rows3,gateway:Router,loadbalancer:Split,nat:ArrowLeftRight,database:Database,storage:HardDrive,cluster:Boxes,onprem:Building2,external:CircleHelp,service:Boxes};
-export const kindNames:Record<ResourceKind,string>={compute:'VM',firewall:'보안 정책',appliance:'방화벽',network:'네트워크',subnet:'서브넷',gateway:'게이트웨이',loadbalancer:'로드밸런서',nat:'NAT',database:'데이터베이스',storage:'스토리지',cluster:'클러스터',onprem:'사내망',external:'외부 참조',service:'기타 서비스'};
+export const icons:Record<ResourceKind,typeof Server>={compute:Server,firewall:ShieldCheck,appliance:Flame,network:Network,subnet:Rows3,gateway:Router,loadbalancer:Split,nat:ArrowLeftRight,database:Database,storage:HardDrive,cluster:Boxes,onprem:Building2,external:CircleHelp,service:Boxes,nic:Cable,disk:Disc,fileshare:FolderOpen,bucket:Archive,endpoint:Plug,identity:Fingerprint,node:Cpu,namespace:FolderTree,workload:Layers,pod:Box,k8sservice:Waypoints,ingress:DoorOpen,serviceaccount:UserCog,pvc:FileBox,pv:Volume};
+export const kindNames:Record<ResourceKind,string>={compute:'VM',firewall:'보안 정책',appliance:'방화벽',network:'네트워크',subnet:'서브넷',gateway:'게이트웨이',loadbalancer:'로드밸런서',nat:'NAT',database:'데이터베이스',storage:'스토리지',cluster:'클러스터',onprem:'사내망',external:'외부 참조',service:'기타 서비스',nic:'NIC',disk:'디스크',fileshare:'파일 공유',bucket:'객체 스토리지',endpoint:'엔드포인트',identity:'실행 신원',node:'K8s 노드',namespace:'네임스페이스',workload:'워크로드',pod:'Pod',k8sservice:'K8s Service',ingress:'Ingress',serviceaccount:'ServiceAccount',pvc:'PVC',pv:'PV'};
 export const ProviderMark=({provider}:{provider:string})=>{const logo=iconUrl(providerLogo[provider]);return logo?<img className={`provider-logo ${provider}`} src={logo} alt="" aria-hidden="true"/>:<span className={`provider-mark ${provider}`} aria-hidden="true">{provider==='gcp'?'G':'DC'}</span>;};
 export function ResourceIcon({resource,size=28}:{resource:Pick<Resource,'type'|'specs'|'kind'>;size?:number}){
   const url=iconUrl(iconKey(resource));if(url)return <img className="csp-icon" src={url} width={size} height={size} alt="" aria-hidden="true" draggable={false}/>;

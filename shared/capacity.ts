@@ -11,10 +11,11 @@ export function capacityOf(r:Resource):Capacity{
 // Categories follow how an operator looks for things, not the collector's kind list.
 export const CATEGORIES=[
   {id:'compute',label:'컴퓨팅',kinds:['compute']},
-  {id:'container',label:'컨테이너',kinds:['cluster']},
-  {id:'data',label:'데이터·스토리지',kinds:['database','storage']},
-  {id:'network',label:'네트워크',kinds:['network','subnet','gateway','loadbalancer','nat','appliance','external','onprem']},
+  {id:'container',label:'컨테이너',kinds:['cluster','node','namespace','workload','pod','k8sservice','ingress','serviceaccount','pvc','pv']},
+  {id:'data',label:'데이터·스토리지',kinds:['database','storage','disk','fileshare','bucket']},
+  {id:'network',label:'네트워크',kinds:['network','subnet','gateway','loadbalancer','nat','appliance','external','onprem','nic','endpoint']},
   {id:'security',label:'보안 정책',kinds:['firewall']},
+  {id:'identity',label:'실행 신원',kinds:['identity']},
   {id:'service',label:'기타 서비스',kinds:['service']},
 ] as const satisfies readonly {id:string;label:string;kinds:readonly ResourceKind[]}[];
 export type CategoryId=typeof CATEGORIES[number]['id'];

@@ -8,7 +8,7 @@ import {allRules,cidrOverlaps,hybridLinks} from '../../shared/network';
 import {CATEGORIES,categoryOf,fleetTotals} from '../../shared/capacity';
 import type {Finding,Severity} from '../../shared/findings';
 import {iamInScope,inScope,type Focus} from '../../shared/hierarchy';
-import {age,countDefinition,resourceCounts} from '../../shared/freshness';
+import {age,countDefinition,isPrimary,resourceCounts} from '../../shared/freshness';
 import {coverageGaps,gapHint} from '../coverage';
 import type {Connection} from '../../shared/schema';
 import {ProviderMark} from '../graph';
@@ -19,7 +19,7 @@ export type Go=(view:'findings'|'changes'|'map'|'iam'|'cost'|'network'|'security
 const changeIcon={added:Plus,removed:Minus,changed:PenLine};
 const SEVERITY:Record<Severity,string>={critical:'긴급',high:'높음',medium:'보통',info:'참고'};
 const HEALTH=[{key:'ok',label:'정상',color:'var(--path)'},{key:'warn',label:'이상',color:'var(--warn)'},{key:'stopped',label:'중지',color:'var(--faint)'},{key:'unknown',label:'권한 없음',color:'var(--amber)'},{key:'neutral',label:'구성만 수집',color:'var(--line-strong)'}] as const;
-const CATEGORY_COLOR:Record<string,string>={compute:'var(--accent)',container:'#7c93c9',data:'var(--path)',network:'var(--peering)',security:'var(--amber)',service:'var(--line-strong)'};
+const CATEGORY_COLOR:Record<string,string>={compute:'var(--accent)',container:'#7c93c9',data:'var(--path)',network:'var(--peering)',security:'var(--amber)',identity:'#9a6fb0',service:'var(--line-strong)'};
 const gib=(v:number)=>v>=1024?`${(v/1024).toFixed(1)} TiB`:`${Math.round(v)} GiB`;
 const CONN_LABEL:Record<string,string>={demo:'예시',collected:'수집됨',partial:'일부',missing:'미연결',failed:'실패',unauthenticated:'로그인 필요',running:'수집 중'};
 // What a reader must know before trusting the numbers below: which cloud is old, failing, or only partly read.
@@ -44,7 +44,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const resources=useMemo(()=>snapshot.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external'&&inScope(focus,r.provider,r.scope)),[snapshot,focus]);
   const {currency,fx}=useCostCurrency(snapshot),cost=useMemo(()=>summarizeCost(snapshot.cost.filter(c=>inScope(focus,c.provider,c.scope)),undefined,fx,currency),[snapshot,focus,fx,currency]);
   const fmt=(v:number)=>money(v,currency),iam=snapshot.iam.filter(a=>iamInScope(focus,a)),portal=usePortalAudit();
-  const real=resources.filter(r=>r.kind!=='subnet'&&r.kind!=='firewall'),vms=resources.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms);
+  const real=resources.filter(isPrimary),vms=resources.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms);
   const urgent=list.filter(f=>f.severity==='critical'||f.severity==='high').length;
   const exposed=exposures(snapshot.resources,snapshot.links).filter(e=>inScope(focus,e.resource.provider,e.resource.scope));
   const rules=allRules(snapshot.resources).filter(({policy})=>inScope(focus,policy.provider,policy.scope)),wide=rules.filter(({rule})=>isWideInbound(rule)).length;
