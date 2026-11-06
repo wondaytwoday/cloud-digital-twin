@@ -8,7 +8,7 @@ import {demoAudit} from './fixtures/audit.js';
 import {diffResources} from '../shared/diff.js';
 import {FileSnapshotStore,type SnapshotStore} from './store.js';
 import {applySites,readSites} from './onprem.js';
-import {requireAccess,requireAdmin,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
+import {requireAccess,requireRole,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
 import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
@@ -50,13 +50,13 @@ app.get('/api/topology',requireAccess,async(req,res)=>{
     res.json({...(access?restrictSnapshot(snapshot,access.scopes):snapshot),fx});
   }catch(e){console.error('Snapshot load failed:',e instanceof Error?e.message:'unknown');res.status(500).json({error:'스냅샷 형식 또는 참조가 올바르지 않습니다. 서버 로그와 수집 결과를 확인하세요.'});}
 });
-app.get('/api/collect/status',requireAccess,requireAdmin,async(_req,res)=>{
+app.get('/api/collect/status',requireAccess,requireRole('operator'),async(_req,res)=>{
   res.set('Cache-Control','no-store');
   try{res.json({enabled:collectorEnabled(),...await readCollectionStatus()});}
   catch{res.status(500).json({error:'수집 상태를 읽지 못했습니다.'});}
 });
 // The custom header makes a cross-site form or fetch impossible without a CORS grant this server never gives.
-app.post('/api/collect',requireAccess,requireAdmin,(req,res)=>{
+app.post('/api/collect',requireAccess,requireRole('operator'),(req,res)=>{
   if(!collectorEnabled()){res.status(409).json({error:'이 배포에서는 수집을 실행할 수 없습니다. npm run live로 실행한 서버에서만 수집합니다.'});return;}
   if(req.get('X-Atlas-Request')!=='1'){res.status(403).json({error:'잘못된 요청입니다.'});return;}
   audit(req,{actor:actorOf(req,(res.locals.access as AccessEntry|undefined)?.name),action:'collect',detail:'수집 시작'});
@@ -71,8 +71,8 @@ app.post('/api/audit/event',requireAccess,(req,res)=>{
   audit(req,{actor:actorOf(req,(res.locals.access as AccessEntry|undefined)?.name),action,target,...(detail?{detail}:{})});
   res.status(204).end();
 });
-// Everyone's activity is visible here, so only full-scope users may read it.
-app.get('/api/audit',requireAccess,requireAdmin,async(req,res)=>{
+// Everyone's activity is visible here, so only full-scope auditors may read it.
+app.get('/api/audit',requireAccess,requireRole('auditor'),async(req,res)=>{
   res.set('Cache-Control','no-store');
   const days=Math.min(90,Math.max(1,Number(req.query.days)||30)),live=process.env.DATA_MODE==='live',own=await readAudit(days);
   res.json({mode:live?'live':'mock',days,events:live?own:[...own,...demoAudit(new Date())].sort((a,b)=>b.at.localeCompare(a.at))});

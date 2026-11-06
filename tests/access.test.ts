@@ -70,3 +70,41 @@ test('over HTTP, a restricted token gets only its own scope, gaps included',asyn
     for(const mark of foreignMarks(s,sub))assert.ok(!json.includes(mark),`leaked ${mark}`);
   });
 });
+
+const roleTokens=[
+  {name:'reader',tokenSha256:sha('all-scope'),scopes:['*']},
+  {name:'operator',tokenSha256:sha('operator'),scopes:['*'],roles:['operator']},
+  {name:'auditor',tokenSha256:sha('auditor'),scopes:['*'],roles:['auditor']},
+  {name:'scoped-operator',tokenSha256:sha('scoped-operator'),scopes:['some-scope'],roles:['operator','auditor']},
+];
+const call=(base:string,token:string,route:string,init:RequestInit={})=>fetch(`${base}${route}`,{...init,headers:{Authorization:`Bearer ${token}`,...init.headers}}).then(r=>r.status);
+test('seeing every scope grants no admin action; each action needs its own role',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'atlas-'));
+  await withServer({DATA_MODE:'live',SNAPSHOT_DIR:root,ACCESS_TOKENS:JSON.stringify(roleTokens),ATLAS_COLLECTOR:undefined,ATLAS_LOOPBACK_ONLY:undefined},async base=>{
+    const collect={method:'POST',headers:{'X-Atlas-Request':'1'}};
+    // A full-scope reader with no role: reads the inventory, but neither runs collection nor reads who used the portal.
+    assert.equal(await call(base,'all-scope','/api/topology'),503,'authorized, nothing collected yet');
+    assert.equal(await call(base,'all-scope','/api/collect',collect),403);
+    assert.equal(await call(base,'all-scope','/api/collect/status'),403);
+    assert.equal(await call(base,'all-scope','/api/audit'),403);
+    // Each role opens only its own door. 409: allowed, but this server has no collector.
+    assert.equal(await call(base,'operator','/api/collect',collect),409);
+    assert.equal(await call(base,'operator','/api/collect/status'),200);
+    assert.equal(await call(base,'operator','/api/audit'),403);
+    assert.equal(await call(base,'auditor','/api/audit'),200);
+    assert.equal(await call(base,'auditor','/api/collect',collect),403);
+    // A role on a restricted token would expose other scopes through status and the log, so it is refused.
+    assert.equal(await call(base,'scoped-operator','/api/collect/status'),403);
+    assert.equal(await call(base,'scoped-operator','/api/audit'),403);
+    const denied=await fetch(`${base}/api/audit`,{headers:{Authorization:'Bearer auditor'}}).then(r=>r.json());
+    assert.ok(denied.events.some((e:{actor:string;action:string;detail?:string})=>e.actor==='reader'&&e.action==='denied'&&e.detail==='operator 역할 없음'),'a refused action is in the log');
+    assert.ok(denied.events.some((e:{actor:string;detail?:string})=>e.actor==='scoped-operator'&&e.detail==='operator 역할, 전체 범위 아님'),'and says why');
+    const session=await fetch(`${base}/api/session`,{headers:{Authorization:'Bearer operator'}}).then(r=>r.json());
+    assert.deepEqual(session.roles,['operator']);
+  });
+});
+test('the single local user keeps every action without tokens',async()=>{
+  await withServer({DATA_MODE:'live',ACCESS_TOKENS:undefined,ATLAS_LOOPBACK_ONLY:'1',SNAPSHOT_DIR:await mkdtemp(path.join(tmpdir(),'atlas-'))},async base=>{
+    assert.equal((await fetch(`${base}/api/collect/status`)).status,200);assert.equal((await fetch(`${base}/api/audit`)).status,200);
+  });
+});

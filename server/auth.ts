@@ -4,7 +4,10 @@ import {z} from 'zod';
 import type {Snapshot} from '../shared/schema.js';
 import {audit} from './audit.js';
 const COOKIE='atlas_session';
-const AccessEntry=z.object({name:z.string(),tokenSha256:z.string().regex(/^[a-f0-9]{64}$/),scopes:z.array(z.string()).min(1)});
+// Scopes decide what a token can read; roles decide what it can do. Seeing everything grants no action by itself.
+export const ROLES={operator:'수집 실행·상태 조회',auditor:'포털 접근 기록 조회'} as const;
+export type Role=keyof typeof ROLES;
+const AccessEntry=z.object({name:z.string(),tokenSha256:z.string().regex(/^[a-f0-9]{64}$/),scopes:z.array(z.string()).min(1),roles:z.array(z.enum(Object.keys(ROLES) as [Role,...Role[]])).default([])});
 export type AccessEntry=z.infer<typeof AccessEntry>;
 const sha256=(v:string)=>createHash('sha256').update(v).digest('hex');
 export const accessEntries=():AccessEntry[]=>z.array(AccessEntry).parse(JSON.parse(process.env.ACCESS_TOKENS??'[]'));
@@ -26,9 +29,16 @@ export const requireAccess:RequestHandler=(req:Request,res:Response,next:NextFun
   if(process.env.ATLAS_LOOPBACK_ONLY==='1'){if(['127.0.0.1','localhost','[::1]'].includes(req.hostname))return next();res.status(403).json({error:'localhost로만 접근할 수 있습니다.'});return;}
   res.status(503).json({error:'접근 제어가 설정되지 않아 실제 데이터를 제공하지 않습니다. ACCESS_TOKENS를 설정하세요.'});
 };
-export const requireAdmin:RequestHandler=(_req,res,next)=>{const access=res.locals.access as AccessEntry|undefined;if(access&&!access.scopes.includes('*')){res.status(403).json({error:'전체 범위 권한이 필요합니다.'});return;}next();};
+// Without an access entry there is one local user (mock data, or a loopback-only live server), who runs everything.
+// A role also needs every scope: collection status and the access log speak about all scopes, which a restricted token must not read.
+export const requireRole=(role:Role):RequestHandler=>(req,res,next)=>{
+  const access=res.locals.access as AccessEntry|undefined;if(!access)return next();
+  const refusal=!access.roles.includes(role)?{error:`${ROLES[role]}에는 ${role} 역할이 필요합니다.`,detail:`${role} 역할 없음`}:!access.scopes.includes('*')?{error:`${ROLES[role]}은 전체 범위(*) 토큰에만 허용됩니다.`,detail:`${role} 역할, 전체 범위 아님`}:undefined;
+  if(refusal){audit(req,{actor:access.name,action:'denied',target:req.path,detail:refusal.detail});res.status(403).json({error:refusal.error});return;}
+  next();
+};
 export function sessionRoutes(app:import('express').Express){
-  app.get('/api/session',(req,res)=>{const required=isLive()&&accessEntries().length>0,entry=required?findEntry(requestToken(req)):undefined;res.json({required,authenticated:!required||!!entry,name:entry?.name});});
+  app.get('/api/session',(req,res)=>{const required=isLive()&&accessEntries().length>0,entry=required?findEntry(requestToken(req)):undefined;res.json({required,authenticated:!required||!!entry,name:entry?.name,roles:entry?.roles});});
   app.post('/api/session',(req,res)=>{
     if(!allowAttempt(req.ip??'unknown')){audit(req,{actor:'알 수 없음',action:'login_failed',detail:'시도 횟수 초과'});res.status(429).json({error:'시도가 너무 많습니다. 잠시 후 다시 시도하세요.'});return;}
     const token=typeof req.body?.token==='string'?req.body.token:undefined;
