@@ -1,20 +1,30 @@
 import type {ElkNode} from 'elkjs/lib/elk-api';
 import type {Link,Resource,ResourceKind,Snapshot} from '../shared/schema';
 import {adjacency,distances,findPath,health,ingressIds} from '../shared/topology';
-export type Variant='provider'|'region'|'network'|'subnet';
+// managed: services that live outside every subnet (Azure SQL, Storage), grouped so the map does not pretend they sit in a network.
+export type Variant='provider'|'region'|'network'|'subnet'|'managed';
 export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;expanded:Set<string>};
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
-export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean};
+// overlay bundles take no part in placement: they are drawn straight, and only while one of their ends is in focus, so turning them on never moves the map.
+export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation'|'service';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean;overlay?:boolean};
+// Relations that explain a dependency rather than shape the network: they never feed the layout.
+const OVERLAY_KINDS=new Set<Link['kind']>(['private_link','forwards_to','uses_identity','mounts','binds_to','selects','runs_on','owns','resolves_to','contains','role_binding','permission_evidence','observed_flow']);
 export type Topology={nodes:Placed[];edges:Bundle[];rollup:(id:string)=>string|undefined};
 export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'Amazon Web Services',gcp:'Google Cloud',onprem:'On-premises'};
 export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
-const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
+const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40,managed:44};
+const MANAGED=new Set<ResourceKind>(['database','bucket','storage','fileshare']);
+export const managedId=(provider:string)=>`managed:${provider}`;
 const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','firewall','external','subnet','network','onprem'];
+// The network view draws what packets reach. Parts of a machine (NICs), what it uses (disks, identities) and Kubernetes objects
+// appear in their own views and in the detail panel, so they never crowd the network map.
+const NOT_ON_NETWORK_MAP=new Set<ResourceKind>(['nic','disk','fileshare','identity','node','namespace','workload','pod','k8sservice','ingress','serviceaccount','pvc','pv']);
+const NETWORK_NODES=(r:Resource)=>!NOT_ON_NETWORK_MAP.has(r.kind);
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
@@ -23,6 +33,7 @@ export function defaultExpanded(snapshot:Snapshot,level:number){
   for(const p of ['azure','aws','gcp'])out.add(`provider:${p}`);
   for(const r of snapshot.resources)out.add(regionId(r));
   for(const r of snapshot.resources){if(level>=1&&r.kind==='network')out.add(r.id);if(level>=2&&r.kind==='subnet')out.add(r.id);}
+  if(level>=2)for(const p of ['azure','aws','gcp'])out.add(managedId(p));
   return out;
 }
 // Chooses what stays visible. Scope filters keep the out-of-scope route to on-prem, collapsed, so circuits never look disconnected.
@@ -44,10 +55,11 @@ function buildItems(snapshot:Snapshot,f:Filter){
   for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(r.provider)??regionsOf.set(r.provider,new Set()).get(r.provider)!).add(r.region);
   const topLevel=(r:Resource)=>(regionsOf.get(r.provider)?.size??0)>=2&&regionsOf.get(r.provider)!.has(r.region)?ensure({id:regionId(r),parent:provider(r.provider),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):provider(r.provider);
   for(const r of keep.values()){
-    if(r.kind==='service'||(r.kind==='firewall'&&!f.policy))continue;
+    if(r.kind==='service'||(r.kind==='firewall'&&!f.policy)||!NETWORK_NODES(r))continue;
     if(r.provider==='onprem'){ensure({id:r.id,resource:r,label:r.name,provider:r.provider});continue;}
     const container=r.kind==='network'||r.kind==='subnet';
-    ensure({id:r.id,parent:r.parent&&keep.has(r.parent)?r.parent:topLevel(r),resource:r,variant:container?r.kind as Variant:undefined,label:r.name,subtitle:r.cidr,provider:r.provider,outOfScope:outside.has(r.id)});
+    const managed=MANAGED.has(r.kind)&&!(r.parent&&keep.has(r.parent))?ensure({id:managedId(r.provider),parent:provider(r.provider),variant:'managed',label:'관리형 서비스',subtitle:'서브넷 밖 · Private Link로 연결',provider:r.provider}):undefined;
+    ensure({id:r.id,parent:r.parent&&keep.has(r.parent)?r.parent:managed??topLevel(r),resource:r,variant:container?r.kind as Variant:undefined,label:r.name,subtitle:r.cidr,provider:r.provider,outOfScope:outside.has(r.id)});
   }
   return items;
 }
@@ -93,8 +105,9 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   const byId=new Map(snapshot.resources.map(r=>[r.id,r]));
   const graph=adjacency(snapshot.resources,snapshot.links),dist=distances(graph,ingressIds(snapshot.resources));
   const rankOf=(id:string):number=>dist.get(id)??Math.min(9999,...(children.get(id)??[]).map(rankOf));
-  const groups=new Map<string,{a:string;b:string;links:Link[]}>();
+  const groups=new Map<string,{a:string;b:string;links:Link[]}>(),overlay=new Map<string,{a:string;b:string;links:Link[]}>();
   for(const l of snapshot.links){
+    if(OVERLAY_KINDS.has(l.kind)){const a=visible(l.source),b=visible(l.target);if(a&&b&&a!==b){const key=`o:${[a,b].sort().join('|')}`;(overlay.get(key)??overlay.set(key,{a,b,links:[]}).get(key)!).links.push(l);}continue;}
     if(l.kind==='route'||(l.kind==='policy'&&!f.policy)||(l.kind==='simulation'&&!f.flow))continue;
     const a=visible(l.source),b=visible(l.target);if(!a||!b||a===b)continue;
     const within=(top:string,other:string)=>{for(let c=items.get(other);c;c=c.parent?items.get(c.parent):undefined)if(c.id===top)return true;return false;};
@@ -254,5 +267,7 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
     const first=config[0]??e.links[0];
     return{id:e.id,source:e.source,target:e.target,links:e.links,kind:bundleKind(e.links,hybrid),hasFlow:e.links.some(l=>l.kind==='simulation'),label:config.length>1?`${first.label} +${config.length-1}`:first.label,points:sections.get(e.id)??[],trunk:trunks.has(e.id)};
   });
+  const centre=(id:string)=>{const n=nodes.find(x=>x.id===id)!;return{x:n.x+n.width/2,y:n.y+n.height/2};};
+  for(const [key,g] of overlay)if(placedIds.has(g.a)&&placedIds.has(g.b))edges.push({id:key,source:g.a,target:g.b,links:g.links,kind:'service',hasFlow:false,label:g.links.length>1?`${g.links[0].label} +${g.links.length-1}`:g.links[0].label,points:[centre(g.a),centre(g.b)],overlay:true});
   return{nodes,edges,rollup:visible};
 }

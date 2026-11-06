@@ -12,13 +12,18 @@ export function health(status:string):Health{
   if(words.some(w=>WARN.has(w)))return 'warn';
   return words.some(w=>OK.has(w))?'ok':'neutral';
 }
-// Connectivity graph: containment plus configured links. Policies and simulated flows are not hops.
+// Attachments that carry packets join network things; a disk or an identity attached to a VM is a dependency, not a hop.
+const NOT_A_HOP=new Set<Resource['kind']>(['disk','fileshare','bucket','identity','serviceaccount','pvc','pv','firewall']);
+export const carriesTraffic=(l:Link,byId:Map<string,Resource>)=>(l.kind==='attachment'||l.kind==='peering'||l.kind==='private_link'||l.kind==='route')&&!NOT_A_HOP.has(byId.get(l.source)?.kind as Resource['kind'])&&!NOT_A_HOP.has(byId.get(l.target)?.kind as Resource['kind']);
+// Layout and on-prem reachability graph: containment plus configured links. This is a drawing aid, not a statement that traffic flows;
+// the flow analyser in shared/flow.ts decides that from routes and policies.
 export function adjacency(resources:Resource[],links:Link[]):Graph{
   const graph:Graph=new Map(),ids=new Set<string>();
   for(const r of resources)if(r.kind!=='firewall'){ids.add(r.id);graph.set(r.id,new Set());}
   const join=(a:string,b:string)=>{if(ids.has(a)&&ids.has(b)){graph.get(a)!.add(b);graph.get(b)!.add(a);}};
+  const byId=new Map(resources.map(r=>[r.id,r]));
   for(const r of resources)if(r.parent)join(r.id,r.parent);
-  for(const l of links)if(l.kind==='attachment'||l.kind==='peering')join(l.source,l.target);
+  for(const l of links)if(l.kind!=='route'&&carriesTraffic(l,byId))join(l.source,l.target);
   return graph;
 }
 export function ingressIds(resources:Resource[]){
@@ -36,12 +41,12 @@ export function distances(graph:Graph,sources:string[]){
 type State='L'|'P'|'Q'|'X';
 export type RoutingModel={resources:Resource[];links:Link[]};
 function buildRouting({resources,links}:RoutingModel){
-  const byId=new Map(resources.filter(r=>r.kind!=='firewall').map(r=>[r.id,r]));
+  const all=new Map(resources.map(r=>[r.id,r])),byId=new Map(resources.filter(r=>!NOT_A_HOP.has(r.kind)).map(r=>[r.id,r]));
   const networkOf=(id:string)=>{for(let c=byId.get(id);c;c=c.parent?byId.get(c.parent):undefined)if(c.kind==='network')return c.id;return undefined;};
-  const edges=new Map<string,{to:string;kind:'contain'|'attachment'|'peering'|'route';transit?:boolean}[]>();
-  const add=(a:string,b:string,kind:'contain'|'attachment'|'peering'|'route',transit?:boolean)=>{if(!byId.has(a)||!byId.has(b))return;(edges.get(a)??edges.set(a,[]).get(a)!).push({to:b,kind,transit});if(kind!=='route')(edges.get(b)??edges.set(b,[]).get(b)!).push({to:a,kind,transit});};
+  const edges=new Map<string,{to:string;kind:'contain'|'attachment'|'peering'|'route'|'private_link';transit?:boolean}[]>();
+  const add=(a:string,b:string,kind:'contain'|'attachment'|'peering'|'route'|'private_link',transit?:boolean)=>{if(!byId.has(a)||!byId.has(b))return;(edges.get(a)??edges.set(a,[]).get(a)!).push({to:b,kind,transit});if(kind!=='route')(edges.get(b)??edges.set(b,[]).get(b)!).push({to:a,kind,transit});};
   for(const r of byId.values())if(r.parent)add(r.id,r.parent,'contain');
-  for(const l of links)if(l.kind==='attachment'||l.kind==='peering'||l.kind==='route')add(l.source,l.target,l.kind,l.transit);
+  for(const l of links)if(carriesTraffic(l,all))add(l.source,l.target,l.kind as 'attachment'|'peering'|'route'|'private_link',l.transit);
   const step=(state:State,from:string,e:{to:string;kind:string;transit?:boolean}):State|null=>{
     if(e.kind==='contain')return state;
     // A UDR hands traffic that starts in this network to a router, which decides afresh inside the hub. One way, and never for transit traffic.

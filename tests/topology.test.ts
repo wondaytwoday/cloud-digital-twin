@@ -20,14 +20,17 @@ import {FileSnapshotStore} from '../server/store.ts';
 import {restrictSnapshot} from '../server/auth.ts';
 import app,{liveSnapshot} from '../server/app.ts';
 import {diffResources} from '../shared/diff.ts';
-import {iconKey,groupIcon,providerLogo} from '../shared/iconKeys.ts';
+import {GLYPH_KINDS,iconKey,groupIcon,providerLogo} from '../shared/iconKeys.ts';
 import {scenarios} from '../shared/scenarios.ts';
 import {buildScopeIndex,focusFor,iamInScope,inScope} from '../shared/hierarchy.ts';
 const load=async()=>{const s=await mockSnapshot('standard'),named=(n:string)=>s.resources.find(r=>r.name===n)!;return{s,named,graph:{resources:s.resources,links:s.links}};};
 test('fixtures survive pagination and normalization across every provider',async()=>{
   const {s,named}=await load();
   for(const n of ['vnet-hub','afw-hub','sql-platform','aks-platform','tgw-core','rds-orders','alb-checkout','vpc-shared','gke-analytics','sql-analytics','sandbox-01'])assert.ok(named(n),n);
-  assert.equal(named('sql-platform').parent,s.resources.find(r=>r.kind==='subnet'&&r.name==='data'&&r.provider==='azure')!.id);
+  // A managed service is not inside the subnet: its private endpoint is, joined to it by private_link.
+  const dataSubnet=s.resources.find(r=>r.kind==='subnet'&&r.name==='data'&&r.provider==='azure')!.id,pe=named('pe-sql-platform');
+  assert.equal(named('sql-platform').parent,undefined);assert.equal(pe.kind,'endpoint');assert.equal(pe.parent,dataSubnet);assert.equal(pe.ip,'10.10.3.5');
+  assert.ok(s.links.some(l=>l.kind==='private_link'&&l.source===pe.id&&l.target===named('sql-platform').id));
   assert.equal(named('checkout-api-01').specs['vCPU'],'4');
   assert.equal(named('worker-gpu-01').specs['GPU'],'1 × NVIDIA T4');
   assert.equal(named('warehouse-01').status,'deallocated');
@@ -73,7 +76,7 @@ test('every scenario validates, and only documented gaps lack an official icon',
     for(const r of s.resources){
       const key=iconKey(r);
       if(key)assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),`${id}: ${key}`);
-      else assert.ok(r.provider==='onprem'||r.kind==='external'||r.type==='AWS::EC2::SecurityGroup'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
+      else assert.ok(r.provider==='onprem'||r.kind==='external'||GLYPH_KINDS.has(r.kind)||r.type==='AWS::EC2::SecurityGroup'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
     }
   }
   for(const key of [...Object.values(providerLogo),...Object.values(groupIcon).flatMap(v=>Object.values(v))])assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),key);

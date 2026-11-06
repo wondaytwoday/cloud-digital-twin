@@ -57,6 +57,8 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   // Copied, so dropping a parent outside the user's scopes never edits the snapshot other requests read.
   const resources=snapshot.resources.filter(r=>mine(r.scope)).map(r=>({...r})),ids=new Set(resources.map(r=>r.id));
   for(const r of resources)if(r.parent&&!ids.has(r.parent))delete r.parent;
+  // A route of the user's own may point at a device in a scope they cannot see: the address they configured stays, the device's ID does not.
+  for(const r of resources)if(r.routes.some(x=>x.target&&!ids.has(x.target)))r.routes=r.routes.map(({target,...x})=>target&&!ids.has(target)?x:{...x,...(target?{target}:{})});
   const keep=new Set<string>();const nodes=new Map(snapshot.hierarchy.map(n=>[n.id,n]));
   for(const n of snapshot.hierarchy)if(n.scope&&mine(n.scope))for(let c:typeof n|undefined=n;c;c=c.parent?nodes.get(c.parent):undefined)keep.add(c.id);
   const incomplete=snapshot.incomplete.filter(mine);

@@ -17,10 +17,12 @@ const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'a
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
 const name=(r:Raw)=>r.Tags?.find((t:Raw)=>t.Key==='Name')?.Value;
-const relation=(source:string,target:string,kind:Link['kind'],label:string,evidence:string,transit?:boolean):Link=>({id:`${kind}:${source}:${target}`,source,target,kind,label,evidence,...(transit?{transit}:{})});
-const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['storage','Storage account']};
+// Every relation says where it came from. Collector links are configured unless the call says otherwise (an IP matched to a device is inferred).
+const relation=(source:string,target:string,kind:Link['kind'],label:string,evidence:string,extra:boolean|Partial<Link>={}):Link=>({id:`${kind}:${source}:${target}`,source,target,kind,label,evidence,basis:'configured',...(typeof extra==='boolean'?(extra?{transit:true}:{}):extra)});
+// Managed services reached through Private Link. They live outside any subnet; only their private endpoint has an address in one.
+const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['bucket','Storage account (Blob·Files)'],'microsoft.sql/servers':['database','Azure SQL']};
 // Rows folded into other resources, so they never appear as items of their own.
-const AZURE_CONSUMED=new Set(['microsoft.network/networkinterfaces','microsoft.network/privateendpoints','microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
+const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
@@ -64,8 +66,12 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
   const byId=new Map(rows.map(r=>[r.id.toLowerCase(),r]));
   const nicOwner=new Map<string,string>();
   for(const r of rows)if(r.type.toLowerCase()==='microsoft.compute/virtualmachines')for(const n of r.properties?.networkProfile?.networkInterfaces??[])nicOwner.set(n.id.toLowerCase(),r.id);
-  const privateEndpoints=new Map<string,Raw>();
-  for(const r of rows)if(r.type.toLowerCase()==='microsoft.network/privateendpoints')for(const c of r.properties?.privateLinkServiceConnections??[])if(c.properties?.privateLinkServiceId)privateEndpoints.set(c.properties.privateLinkServiceId.toLowerCase(),r.properties);
+  const endpointsFor=new Map<string,number>();
+  for(const r of rows)if(r.type.toLowerCase()==='microsoft.network/privateendpoints')for(const c of r.properties?.privateLinkServiceConnections??[])if(c.properties?.privateLinkServiceId)endpointsFor.set(c.properties.privateLinkServiceId.toLowerCase(),(endpointsFor.get(c.properties.privateLinkServiceId.toLowerCase())??0)+1);
+  const publicIpOf=(ref?:Raw)=>ref?.id?byId.get(ref.id.toLowerCase())?.properties?.ipAddress as string|undefined:undefined;
+  // Each IP configuration of a NIC, in order with the primary first: a VM with two NICs or a NIC with secondary IPs keeps every address.
+  const ipConfigs=(nic?:Raw)=>[...(nic?.properties?.ipConfigurations??[])].sort((a:Raw,b:Raw)=>Number(!!b.properties?.primary)-Number(!!a.properties?.primary));
+  const primaryNic=(vm:Raw)=>{const list=vm.properties?.networkProfile?.networkInterfaces??[],pick=list.find((n:Raw)=>n.properties?.primary)??list[0];return pick?byId.get(pick.id.toLowerCase()):undefined;};
   for(const r of rows){
     const native=r.id.toLowerCase(),t=r.type.toLowerCase(),p=r.properties??{}, common=[r.subscriptionId,r.location??'global','Azure Resource Graph'] as const;
     const add=(kind:Resource['kind'],extra:Partial<Resource>={})=>resources.push(base('azure',native,r.name,kind,r.type,...common,{group:r.resourceGroup,tags:r.tags??{},...extra}));
@@ -74,9 +80,34 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
       for(const sub of p.subnets??[]){resources.push(base('azure',sub.id.toLowerCase(),sub.name,'subnet','Microsoft.Network/virtualNetworks/subnets',...common,{group:r.resourceGroup,parent:id(r.id),cidr:sub.properties?.addressPrefix??sub.properties?.addressPrefixes?.join(', ')}));if(sub.properties?.networkSecurityGroup?.id)links.push(relation(id(sub.properties.networkSecurityGroup.id),id(sub.id),'policy','NSG 적용','subnet.properties.networkSecurityGroup.id'));}
       for(const peer of p.virtualNetworkPeerings??[])if(peer.properties?.remoteVirtualNetwork?.id)links.push(relation(id(r.id),id(peer.properties.remoteVirtualNetwork.id),'peering',peer.properties.allowGatewayTransit||peer.properties.useRemoteGateways?'Peering · transit':'Peering','virtualNetworkPeerings.remoteVirtualNetwork.id',!!(peer.properties.allowGatewayTransit||peer.properties.useRemoteGateways)));
     } else if(t==='microsoft.compute/virtualmachines'){
-      const nic=byId.get(p.networkProfile?.networkInterfaces?.[0]?.id?.toLowerCase()), ip=nic?.properties?.ipConfigurations?.[0]?.properties,size=p.hardwareProfile?.vmSize;
-      add('compute',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,publicIp:ip?.publicIPAddress?.id?byId.get(ip.publicIPAddress.id.toLowerCase())?.properties?.ipAddress:undefined,status:p.extended?.instanceView?.powerState?.code?.split('/').pop()??p.provisioningState??'미확인',specs:{'인스턴스':size??'미확인','OS':p.storageProfile?.osDisk?.osType??'미확인',...skuSpecs(azureSkus[size]),...diskSpec([p.storageProfile?.osDisk?.diskSizeGB,...(p.storageProfile?.dataDisks??[]).map((d:Raw)=>d.diskSizeGB)])}});
-      if(nic?.properties?.networkSecurityGroup?.id)links.push(relation(id(nic.properties.networkSecurityGroup.id),id(r.id),'policy','NIC 보안 정책','networkInterface.networkSecurityGroup.id'));
+      // parent is where the map draws the VM: the subnet of its primary NIC. Connectivity is decided per NIC, never from this.
+      const nic=primaryNic(r),ip=ipConfigs(nic)[0]?.properties,size=p.hardwareProfile?.vmSize,nics=(p.networkProfile?.networkInterfaces??[]).map((n:Raw)=>byId.get(n.id.toLowerCase())).filter(Boolean) as Raw[];
+      const addresses=nics.flatMap((n,k)=>ipConfigs(n).flatMap((c:Raw,m:number)=>[{ip:c.properties?.privateIPAddress,primary:k===0&&m===0},...(publicIpOf(c.properties?.publicIPAddress)?[{ip:publicIpOf(c.properties?.publicIPAddress)!,public:true}]:[])])).filter((a:Raw)=>a.ip);
+      add('compute',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,publicIp:publicIpOf(ip?.publicIPAddress),addresses,status:p.extended?.instanceView?.powerState?.code?.split('/').pop()??p.provisioningState??'미확인',specs:{'인스턴스':size??'미확인','OS':p.storageProfile?.osDisk?.osType??'미확인',...skuSpecs(azureSkus[size]),...diskSpec([p.storageProfile?.osDisk?.diskSizeGB,...(p.storageProfile?.dataDisks??[]).map((d:Raw)=>d.diskSizeGB)]),...(nics.length>1?{'NIC':`${nics.length}개`}:{})}});
+      (p.networkProfile?.networkInterfaces??[]).forEach((n:Raw,k:number)=>links.push(relation(id(r.id),id(n.id),'attachment',n.properties?.primary||(k===0&&!(p.networkProfile.networkInterfaces as Raw[]).some(x=>x.properties?.primary))?'기본 NIC':'NIC','virtualMachine.networkProfile.networkInterfaces',{ref:n.id})));
+      const disks=[...(p.storageProfile?.osDisk?.managedDisk?.id?[[p.storageProfile.osDisk.managedDisk.id,'OS 디스크']]:[]),...(p.storageProfile?.dataDisks??[]).filter((d:Raw)=>d.managedDisk?.id).map((d:Raw)=>[d.managedDisk.id,`데이터 디스크 LUN ${d.lun??'?'}`])] as [string,string][];
+      // Attached is what the Compute API says; whether the OS mounted it is not visible from here.
+      for(const [disk,label] of disks)links.push(relation(id(r.id),id(disk),'attachment',label,'virtualMachine.storageProfile.*.managedDisk.id',{ref:disk,note:'OS 내부 마운트 여부는 클라우드 API로 확인할 수 없습니다.'}));
+      // A system-assigned identity has no row of its own, so it is represented under the VM; user-assigned ones are rows of their own.
+      if(p.identity?.principalId||r.identity?.principalId){const principalId=(r.identity??p.identity).principalId;resources.push(base('azure',`${native}/identity`,`${r.name} (시스템 할당 ID)`,'identity','Microsoft.ManagedIdentity/systemAssigned',...common,{group:r.resourceGroup,specs:{'종류':'시스템 할당 관리 ID','principalId':principalId}}));links.push(relation(id(r.id),id(`${native}/identity`),'uses_identity','시스템 할당 ID','virtualMachine.identity.principalId',{ref:principalId}));}
+      for(const ua of Object.keys(r.identity?.userAssignedIdentities??{}))links.push(relation(id(r.id),id(ua),'uses_identity','사용자 할당 ID','virtualMachine.identity.userAssignedIdentities',{ref:ua}));
+    } else if(t==='microsoft.network/networkinterfaces'){
+      const configs=ipConfigs(r),first=configs[0]?.properties,owner=p.virtualMachine?.id??nicOwner.get(native);
+      const addresses=configs.flatMap((c:Raw,m:number)=>[{ip:c.properties?.privateIPAddress,primary:m===0},...(publicIpOf(c.properties?.publicIPAddress)?[{ip:publicIpOf(c.properties?.publicIPAddress)!,public:true}]:[])]).filter((a:Raw)=>a.ip);
+      add('nic',{parent:first?.subnet?.id?id(first.subnet.id):undefined,ip:first?.privateIPAddress,publicIp:publicIpOf(first?.publicIPAddress),addresses,status:p.provisioningState??'구성 수집됨',specs:{'종류':'Network interface','IP 전달':String(p.enableIPForwarding??false),...(owner?{'연결 VM':owner.split('/').pop()}:{'연결':'VM 없음'})}});
+      // Secondary IP configurations may sit in another subnet of the same network.
+      for(const c of configs.slice(1))if(c.properties?.subnet?.id&&c.properties.subnet.id.toLowerCase()!==first?.subnet?.id?.toLowerCase())links.push(relation(id(r.id),id(c.properties.subnet.id),'attachment',`보조 IP ${c.properties.privateIPAddress}`,'networkInterface.ipConfigurations.subnet.id',{ref:c.id}));
+      if(p.networkSecurityGroup?.id)links.push(relation(id(p.networkSecurityGroup.id),id(r.id),'policy','NIC NSG','networkInterface.networkSecurityGroup.id',{ref:p.networkSecurityGroup.id}));
+    } else if(t==='microsoft.compute/disks'){
+      add('disk',{status:p.diskState??p.provisioningState??'미확인',specs:{'종류':'Managed disk','크기':p.diskSizeGB?`${p.diskSizeGB} GiB`:'미확인','SKU':r.sku?.name??'미확인','상태':p.diskState??'미확인',...(r.managedBy?{'연결 VM':String(r.managedBy).split('/').pop()}:{})}});
+    } else if(t==='microsoft.managedidentity/userassignedidentities'){
+      add('identity',{specs:{'종류':'사용자 할당 관리 ID','principalId':p.principalId??'미확인','clientId':p.clientId??'미확인'}});
+    } else if(t==='microsoft.network/privateendpoints'){
+      // The endpoint is the address in the subnet; the service it fronts stays outside, joined by private_link.
+      const nicRow=p.networkInterfaces?.[0]?.id?byId.get(p.networkInterfaces[0].id.toLowerCase()):undefined,ips=[...(p.customDnsConfigs??[]).flatMap((d:Raw)=>d.ipAddresses??[]),...ipConfigs(nicRow).map((c:Raw)=>c.properties?.privateIPAddress)].filter((v,i,a)=>v&&a.indexOf(v)===i) as string[];
+      const conns=[...(p.privateLinkServiceConnections??[]),...(p.manualPrivateLinkServiceConnections??[])];
+      add('endpoint',{parent:p.subnet?.id?id(p.subnet.id):undefined,ip:ips[0],addresses:ips.map((ip,i)=>({ip,primary:i===0})),status:p.provisioningState??'구성 수집됨',specs:{'종류':'Private Endpoint','하위 리소스':conns.flatMap((c:Raw)=>c.properties?.groupIds??[]).join(', ')||'미확인','DNS 이름':(p.customDnsConfigs??[]).map((d:Raw)=>d.fqdn).filter(Boolean).join(', ')||'미수집'}});
+      for(const c of conns)if(c.properties?.privateLinkServiceId)links.push(relation(id(r.id),id(c.properties.privateLinkServiceId),'private_link',`Private Link ${c.properties?.groupIds?.join(', ')??''}`.trim(),'privateEndpoint.privateLinkServiceConnections.privateLinkServiceId',{ref:c.properties.privateLinkServiceId,note:c.properties?.privateLinkServiceConnectionState?.status?`연결 상태 ${c.properties.privateLinkServiceConnectionState.status}`:undefined}));
     } else if(t==='microsoft.network/networksecuritygroups')add('firewall',{rules:[...(p.securityRules??[]),...(p.defaultSecurityRules??[])].map((rule:Raw)=>{const q=rule.properties??{};return{direction:q.direction??'Unknown',action:q.access??'Unknown',protocol:q.protocol??'*',ports:q.destinationPortRange??q.destinationPortRanges?.join(', ')??'*',source:q.sourceAddressPrefix??q.sourceAddressPrefixes?.join(', ')??q.sourceApplicationSecurityGroups?.map((x:Raw)=>x.id).join(', ')??'미확인',destination:q.destinationAddressPrefix??q.destinationAddressPrefixes?.join(', ')??'미확인',priority:String(q.priority??'-')};})});
     else if(t==='microsoft.network/expressroutecircuits')add('gateway',{specs:{'종류':'ExpressRoute circuit','대역폭':`${p.serviceProviderProperties?.bandwidthInMbps??'?'} Mbps`,'공급자':p.serviceProviderProperties?.serviceProviderName??'미확인','피어링 위치':p.serviceProviderProperties?.peeringLocation??'미확인'},status:p.provisioningState??'미확인'});
     else if(t==='microsoft.network/virtualnetworkgateways'){
@@ -89,21 +120,19 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
     } else if(t==='microsoft.network/loadbalancers'){
       const front=p.frontendIPConfigurations?.[0]?.properties;
       add('loadbalancer',{parent:front?.subnet?.id?id(front.subnet.id):undefined,ip:front?.privateIPAddress,publicIp:front?.publicIPAddress?.id?byId.get(front.publicIPAddress.id.toLowerCase())?.properties?.ipAddress:undefined,status:p.provisioningState??'미확인',specs:{'종류':front?.subnet?'내부 Load Balancer':'공용 Load Balancer','SKU':r.sku?.name??'미확인'}});
-      for(const pool of p.backendAddressPools??[])for(const c of pool.properties?.backendIPConfigurations??[]){const vm=nicOwner.get(c.id.toLowerCase().split('/ipconfigurations/')[0]);if(vm)links.push(relation(id(r.id),id(vm),'attachment','백엔드 풀','loadBalancer.backendAddressPools.backendIPConfigurations'));}
+      // A backend pool names NIC IP configurations; the VM is joined through the NIC that holds that configuration.
+      for(const pool of p.backendAddressPools??[])for(const c of pool.properties?.backendIPConfigurations??[]){const nicId=c.id.toLowerCase().split('/ipconfigurations/')[0],vm=nicOwner.get(nicId);links.push(relation(id(r.id),id(vm??nicId),'forwards_to',`백엔드 풀 ${pool.name??''}`.trim(),'loadBalancer.backendAddressPools.backendIPConfigurations',{ref:c.id,note:vm?`NIC ${nicId.split('/').pop()} 경유`:undefined}));}
     } else if(t==='microsoft.network/applicationgateways'){
       add('loadbalancer',{parent:p.gatewayIPConfigurations?.[0]?.properties?.subnet?.id?id(p.gatewayIPConfigurations[0].properties.subnet.id):undefined,ip:p.frontendIPConfigurations?.[0]?.properties?.privateIPAddress,status:p.operationalState??p.provisioningState??'미확인',specs:{'종류':'Application Gateway','SKU':p.sku?.tier??'미확인'}});
-      for(const pool of p.backendAddressPools??[])for(const c of pool.properties?.backendIPConfigurations??[]){const vm=nicOwner.get(c.id.toLowerCase().split('/ipconfigurations/')[0]);if(vm)links.push(relation(id(r.id),id(vm),'attachment','백엔드 풀','applicationGateway.backendAddressPools.backendIPConfigurations'));}
+      for(const pool of p.backendAddressPools??[])for(const c of pool.properties?.backendIPConfigurations??[]){const nicId=c.id.toLowerCase().split('/ipconfigurations/')[0],vm=nicOwner.get(nicId);links.push(relation(id(r.id),id(vm??nicId),'forwards_to','백엔드 풀','applicationGateway.backendAddressPools.backendIPConfigurations',{ref:c.id}));}
     } else if(t==='microsoft.network/bastionhosts')add('appliance',{parent:p.ipConfigurations?.[0]?.properties?.subnet?.id?id(p.ipConfigurations[0].properties.subnet.id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'Azure Bastion'}});
     else if(azurePrivateServices[t]){
-      const pe=privateEndpoints.get(native),[kind,label]=azurePrivateServices[t];
-      add(kind,{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.provisioningState??'미확인',specs:{'종류':label,'연결':pe?'Private Endpoint':'공용 엔드포인트'}});
+      const [kind,label]=azurePrivateServices[t],pes=endpointsFor.get(native)??0;
+      add(kind,{status:p.provisioningState??p.state??'미확인',specs:{'종류':label,...(t==='microsoft.sql/servers'?{'버전':p.version??'미확인'}:{}),'Private Endpoint':pes?`${pes}개`:'없음','공용 네트워크 접근':p.publicNetworkAccess??'미수집',...(p.networkAcls?.defaultAction?{'기본 네트워크 규칙':p.networkAcls.defaultAction}:{})}});
     } else if(t==='microsoft.network/natgateways')add('nat',{parent:p.subnets?.[0]?.id?id(p.subnets[0].id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'NAT Gateway'}});
     else if(t==='microsoft.containerservice/managedclusters'){
       const pools=p.agentPoolProfiles??[],subnet=pools[0]?.vnetSubnetID;
       add('cluster',{parent:subnet?id(subnet):undefined,status:p.powerState?.code??p.provisioningState??'미확인',specs:{'종류':'AKS','버전':p.kubernetesVersion??'미확인','노드':String(pools.reduce((s:number,x:Raw)=>s+(x.count??0),0))}});
-    } else if(t==='microsoft.sql/servers'){
-      const pe=privateEndpoints.get(native);
-      add('database',{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.state??'미확인',specs:{'종류':'Azure SQL','버전':p.version??'미확인','연결':pe?'Private Endpoint':'공용 엔드포인트'}});
     }else if(!AZURE_CONSUMED.has(t))add('service',{status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
   }
   // Routes attach after the pass above so a UDR can reference a firewall from any row order.
@@ -112,8 +141,9 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
     const subnet=resources.find(r=>r.id===id(sub.id));if(!subnet)continue;
     for(const route of table.properties?.routes??[]){
       const q=route.properties??{},appliance=byAddress.get(q.nextHopIpAddress);
-      subnet.routes.push({destination:q.addressPrefix??'미확인',nextHop:appliance?.name??q.nextHopIpAddress??q.nextHopType??'미확인',via:q.nextHopType??'미확인'});
-      if(appliance)links.push(relation(subnet.id,appliance.id,'route',`UDR ${q.addressPrefix}`,'routeTable.routes.nextHopIpAddress'));
+      subnet.routes.push({destination:q.addressPrefix??'미확인',nextHop:appliance?.name??q.nextHopIpAddress??q.nextHopType??'미확인',via:q.nextHopType??'미확인',origin:'user',...(q.nextHopIpAddress?{nextHopIp:q.nextHopIpAddress}:{}),...(appliance?{target:appliance.id}:{})});
+      // The route names an address, not a device: matching it to the firewall that holds that address is Atlas's inference.
+      if(appliance)links.push(relation(subnet.id,appliance.id,'route',`UDR ${q.addressPrefix}`,'routeTable.routes.nextHopIpAddress',{basis:'inferred',ref:table.id,note:`다음 홉 IP ${q.nextHopIpAddress}가 ${appliance.name}의 사설 IP와 같아 연결했습니다.`}));
     }
   }
   return {resources,links,warnings:[],scopeLabels};
@@ -213,7 +243,7 @@ export function normalizeAzureIam(rows:Raw[],names:Map<string,string>=new Map())
   const roleNames=new Map(rows.filter(r=>r.type.toLowerCase().endsWith('roledefinitions')).map(r=>[guidOf(r.id),r.properties?.roleName]));
   return rows.filter(r=>r.type.toLowerCase().endsWith('roleassignments')).map(r=>{
     const p=r.properties??{},scope=String(p.scope??''),sub=scope.match(/\/subscriptions\/([^/]+)/i)?.[1],mg=scope.match(/managementGroups\/([^/]+)/i)?.[1],role=roleNames.get(guidOf(p.roleDefinitionId??''))??guidOf(p.roleDefinitionId??'미확인');
-    return{id:`azure:${r.id}`,provider:'azure',principal:names.get(String(p.principalId).toLowerCase())??p.principalId,principalType:azurePrincipalType(p.principalType),role,scope:sub??mg??'tenant',level:sub?(scope.toLowerCase().includes('/resourcegroups/')?'resource':'scope'):mg?'group':'org',privileged:isPrivileged(role),external:false,source:'Azure Resource Graph · authorizationresources'};
+    return{id:`azure:${r.id}`,provider:'azure',principal:names.get(String(p.principalId).toLowerCase())??p.principalId,principalId:p.principalId,resourceScope:scope.toLowerCase(),principalType:azurePrincipalType(p.principalType),role,scope:sub??mg??'tenant',level:sub?(scope.toLowerCase().includes('/resourcegroups/')?'resource':'scope'):mg?'group':'org',privileged:isPrivileged(role),external:false,source:'Azure Resource Graph · authorizationresources'};
   });
 }
 const DAY=86_400_000;

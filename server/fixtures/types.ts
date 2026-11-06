@@ -4,4 +4,6 @@ export type AwsAccount={account:string;label:string;region:string;api:Record<str
 export type OrgTree={id:string;name:string;scope?:string;children?:OrgTree[]};
 export type {Site} from '../onprem.js';
 import type {Site} from '../onprem.js';
-export type Scenario={azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};
+// assignments: role assignments beyond the per-subscription defaults, at any scope, for a principal ID the fixture also gives an identity.
+export type AzureAssignment={scope:string;principalId:string;principalType:string;role:string;name:string};
+export type Scenario={azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[]};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};

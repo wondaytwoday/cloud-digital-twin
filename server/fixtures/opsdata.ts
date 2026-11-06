@@ -21,8 +21,9 @@ export function costPoints(provider:string,scopes:string[],now:Date):CostPoint[]
   });
 }
 const guid=(text:string)=>{const h=String(seed(text)).padStart(12,'0');return `aaaaaaaa-0000-4000-8000-${h}`;};
-const ROLES:Record<string,string>={Owner:'8e3af657-a8ff-443c-a75c-2fe8c4bcb635',Contributor:'b24988ac-6180-42a0-ab88-20f7382dd24c',Reader:'acdd72a7-3385-48ef-bd42-f606fba81ae7'};
-export function azureIam(subscriptions:string[],names:Record<string,string>){
+// Built-in role definition IDs as Azure publishes them.
+const ROLES:Record<string,string>={Owner:'8e3af657-a8ff-443c-a75c-2fe8c4bcb635',Contributor:'b24988ac-6180-42a0-ab88-20f7382dd24c',Reader:'acdd72a7-3385-48ef-bd42-f606fba81ae7','Storage Blob Data Reader':'2a2b9908-6ea1-4ae2-8e65-a410df84e7d1','Key Vault Secrets User':'4633458b-17de-408a-b874-0445c86b69e6'};
+export function azureIam(subscriptions:string[],names:Record<string,string>,extra:import('./types.js').AzureAssignment[]=[]){
   const rows:Raw[]=[],directory:Record<string,string>={};
   const defs=Object.entries(ROLES).map(([roleName,id])=>({id:`/providers/Microsoft.Authorization/RoleDefinitions/${id}`,type:'microsoft.authorization/roledefinitions',properties:{roleName}}));
   const assign=(sub:string,principal:string,principalType:string,role:string)=>{const id=guid(principal);directory[id]=principal;rows.push({id:`/subscriptions/${sub}/providers/Microsoft.Authorization/roleAssignments/${guid(sub+principal+role)}`,type:'microsoft.authorization/roleassignments',subscriptionId:sub,properties:{principalId:id,principalType,scope:`/subscriptions/${sub}`,roleDefinitionId:`/subscriptions/${sub}/providers/Microsoft.Authorization/roleDefinitions/${ROLES[role]}`}});};
@@ -30,6 +31,7 @@ export function azureIam(subscriptions:string[],names:Record<string,string>){
     assign(sub,'platform-admins','Group','Contributor');assign(sub,'sp-cicd-deploy','ServicePrincipal',i%3===0?'Owner':'Contributor');assign(sub,'security-readers','Group','Reader');
     if(/dev|sandbox/i.test(names[sub]??''))assign(sub,'dev.lead@atlas.example','User','Owner');
   });
+  for(const a of extra){directory[a.principalId]=a.name;const sub=a.scope.match(/subscriptions\/([^/]+)/i)?.[1]??'';rows.push({id:`${a.scope}/providers/Microsoft.Authorization/roleAssignments/${guid(a.scope+a.principalId+a.role)}`,type:'microsoft.authorization/roleassignments',subscriptionId:sub,properties:{principalId:a.principalId,principalType:a.principalType,scope:a.scope,roleDefinitionId:`/subscriptions/${sub}/providers/Microsoft.Authorization/roleDefinitions/${ROLES[a.role]}`}});}
   return{rows:[...defs,...rows],directory};
 }
 const old=(now:Date,days:number)=>new Date(now.getTime()-days*86_400_000).toISOString();

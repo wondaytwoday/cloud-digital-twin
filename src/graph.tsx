@@ -31,7 +31,7 @@ export const ResourceNode=memo(function ResourceNode({data}:NodeProps<FlowNode>)
     <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{r.publicIp&&<span className="rc-public" title={`공인 IP ${r.publicIp}`}><Globe2 size={11}/></span>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
   </div>;
 });
-const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3};
+const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3,managed:Database};
 function Title({data,open}:{data:NodeData;open:boolean}){
   const it=data.item,Icon=it.variant&&variantIcon[it.variant],official=it.variant&&iconUrl(groupIcon[it.provider]?.[it.variant]);
   return <div className="frame-title">

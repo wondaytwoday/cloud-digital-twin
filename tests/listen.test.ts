@@ -34,10 +34,11 @@ test('behind a named proxy the audit trail records the client, not the proxy',as
   Object.assign(process.env,{DATA_MODE:'live',SNAPSHOT_DIR:root,ACCESS_TOKENS:JSON.stringify([{name:'ops',tokenSha256:createHash('sha256').update('t').digest('hex'),scopes:['*'],roles:['auditor']}])});delete process.env.ATLAS_LOOPBACK_ONLY;
   const server=app.listen(0);await new Promise(r=>server.once('listening',r));const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const login=(ip:string)=>fetch(`${base}/api/session`,{method:'POST',headers:{'Content-Type':'application/json','X-Forwarded-For':ip},body:JSON.stringify({token:'wrong'})});
-  const ips=async()=>(await (await fetch(`${base}/api/audit`,{headers:{Authorization:'Bearer t'}})).json()).events.filter((e:{action:string})=>e.action==='login_failed').map((e:{ip:string})=>e.ip);
+  // The audit line is appended after the response is sent, so reading waits until the expected number of lines is there.
+  const ips=async(count:number)=>{for(let i=0;i<50;i++){const list=(await (await fetch(`${base}/api/audit`,{headers:{Authorization:'Bearer t'}})).json()).events.filter((e:{action:string})=>e.action==='login_failed').map((e:{ip:string})=>e.ip);if(list.length>=count)return list;await new Promise(r=>setTimeout(r,20));}return [];};
   try{
-    await login('203.0.113.7');assert.ok(!(await ips()).includes('203.0.113.7'),'an untrusted header is ignored');
+    await login('203.0.113.7');assert.ok(!(await ips(1)).includes('203.0.113.7'),'an untrusted header is ignored');
     app.set('trust proxy','loopback');
-    await login('203.0.113.8');assert.ok((await ips()).includes('203.0.113.8'));
+    await login('203.0.113.8');assert.ok((await ips(2)).includes('203.0.113.8'));
   }finally{app.set('trust proxy',false);server.close();process.env=saved;}
 });

@@ -53,7 +53,7 @@ function gcpOrgAssets(tree:OrgTree,numbers:Map<string,string>){
 async function collectScenario(s:Scenario,now:Date){
   const parts:Normalized[]=[];
   if(s.azure){
-    const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
+    const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions,s.azure.assignments),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
     parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now),{graphToken:async()=>'demo-token',withActivity:false}));
   }
   for(const a of s.aws??[]){const merged={...a.api,...awsIamApi(a.account,a.label,now)};parts.push(await collectAwsAccount(awsTransport(merged),a.account,a.region,a.label));}

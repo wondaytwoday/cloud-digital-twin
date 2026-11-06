@@ -177,7 +177,8 @@ function Workspace(){
       const framed=!!n.item.variant&&!n.collapsed,emphasis=emphasisOf.get(n.id)??(focusMode&&!frameAncestors.has(n.id)?'dim':'normal');
       return{id:n.id,type:framed?'frame':n.item.variant?'summary':'resource',position:{x:n.x,y:n.y},width:n.width,height:n.height,measured:{width:n.width,height:n.height},zIndex:framed?n.depth:20,draggable:false,connectable:false,ariaLabel:`${n.item.label}${n.item.resource?` ${kindNames[n.item.resource.kind]}`:''}, Enter로 ${n.item.resource?'상세 열기':'펼치기'}`,data:{...n,emphasis,onToggle,scopeLabel:n.item.resource&&n.item.variant==='network'?snapshot?.scopeLabels[n.item.resource.scope]??n.item.resource.scope:undefined}};
     });
-    const edges:FlowEdge[]=topology.edges.map(b=>{
+    // Dependency relations (Private Link, LB backends, identities) appear only around what is in focus, so the map is never a web of every relation.
+    const edges:FlowEdge[]=topology.edges.filter(b=>!b.overlay||edgeState.has(b.id)).map(b=>{
       const emphasis=edgeState.get(b.id)??(focusMode?'dim':'normal');
       return{id:b.id,source:b.source,target:b.target,type:'routed',zIndex:10,selected:edge?.id===b.id,data:{bundle:b,emphasis,animate:flow&&playing&&b.hasFlow&&emphasis!=='dim',showLabel:emphasis!=='dim'&&(!b.trunk||emphasis==='focus')&&(b.kind==='hybrid'||b.kind==='peering'||b.links.filter(l=>l.kind!=='simulation').length>1||emphasis==='focus')}};
     });

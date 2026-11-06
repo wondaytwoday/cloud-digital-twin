@@ -4,19 +4,19 @@ import {mkdtemp} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {mockSnapshot} from '../server/mock.ts';
-import {age,isStale,resourceCounts,staleAfterHours} from '../shared/freshness.ts';
+import {age,isPrimary,isStale,resourceCounts,staleAfterHours} from '../shared/freshness.ts';
 import {buildScopeIndex} from '../shared/hierarchy.ts';
 import {FileSnapshotStore} from '../server/store.ts';
 import {emptyStatus,toSnapshot} from '../server/runner.ts';
 import {liveSnapshot} from '../server/app.ts';
 import {restrictSnapshot} from '../server/auth.ts';
 
-test('the dashboard and the scope panels count the same estate, and the gap is exactly subnets and policies',async()=>{
-  const s=await mockSnapshot('standard'),c=resourceCounts(s.resources);
-  // The 75 and 107 a reviewer saw side by side are these two numbers.
-  assert.equal(c.primary,75);assert.equal(c.all,107);assert.equal(c.all-c.primary,c.subnets+c.policies);
-  assert.equal(c.all,s.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').length,'scope panel total');
-  assert.equal(c.primary,s.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external'&&r.kind!=='subnet'&&r.kind!=='firewall').length,'dashboard KPI');
+test('the dashboard and the scope panels count the same estate, and the gap is exactly what the headline leaves out',async()=>{
+  const s=await mockSnapshot('standard'),c=resourceCounts(s.resources),inventory=s.resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external');
+  assert.equal(c.all,inventory.length,'scope panel total');
+  assert.equal(c.primary,inventory.filter(isPrimary).length,'dashboard KPI uses the same rule');
+  assert.equal(c.all-c.primary,c.subnets+c.policies+c.nics+c.kubernetes,'and nothing else is left out');
+  assert.ok(c.nics>0&&inventory.some(r=>r.kind==='disk'&&isPrimary(r)),'NICs are parts, disks are counted');
 });
 test('stale means several missed runs, set by the operator or derived from the schedule',()=>{
   assert.equal(staleAfterHours({}),3);assert.equal(staleAfterHours({ATLAS_COLLECT_MINUTES:'240'}),12);

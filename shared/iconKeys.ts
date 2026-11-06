@@ -4,6 +4,8 @@ const byType:Record<string,string>={
   'aws::ec2::instance':'aws/ec2','aws::ec2::vpc':'aws/vpc','aws::ec2::transitgateway':'aws/tgw','aws::ec2::vpnconnection':'aws/vpn','aws::ec2::vpngateway':'aws/vgw','aws::ec2::internetgateway':'aws/igw','aws::ec2::natgateway':'aws/nat','aws::eks::cluster':'aws/eks','aws::directconnect::directconnectgateway':'aws/dx',
   'compute.googleapis.com/instance':'gcp/compute','compute.googleapis.com/network':'gcp/vpc','compute.googleapis.com/firewall':'gcp/firewall','compute.googleapis.com/router':'gcp/router','compute.googleapis.com/interconnectattachment':'gcp/interconnect','compute.googleapis.com/forwardingrule':'gcp/lb','compute.googleapis.com/vpntunnel':'gcp/vpn','container.googleapis.com/cluster':'gcp/gke','sqladmin.googleapis.com/instance':'gcp/sql','redis.googleapis.com/instance':'gcp/memorystore',
 };
+// Kinds this build ships no official CSP icon for; the UI draws a generic glyph and the icon test accepts them.
+export const GLYPH_KINDS=new Set(['nic','disk','fileshare','bucket','endpoint','identity','node','namespace','workload','pod','k8sservice','ingress','serviceaccount','pvc','pv']);
 // Undefined means the CSP publishes no icon for it (AWS security groups, GCP subnets) and the UI draws a generic glyph.
 export function iconKey(r:Pick<Resource,'type'|'specs'>):string|undefined{
   const type=r.type.toLowerCase();
