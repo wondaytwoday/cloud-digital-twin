@@ -1,10 +1,18 @@
-import type { Activity } from '../shared/schema.js';
+import type { Activity, Coverage, Dataset } from '../shared/schema.js';
 import { ResourceSchema, type CostRow, type HierarchyNode, type IamAssignment, type Resource, type Link, type Provider } from '../shared/schema.js';
 import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 // Disk sizes arrive per disk and sometimes as strings; an instance with none reported gets no disk entry rather than a zero.
 const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Number).filter(v=>v>0);return n.length?{'디스크':`${n.reduce((a,b)=>a+b,0)} GiB`}:{};};
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];awsInventory?:{account:string;rows:Raw[]}};
+export type Gap=Exclude<Coverage,'ok'>;
+// gaps names the kinds of data that could not be read, set by the collector that knows how many scopes it tried.
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];gaps?:Partial<Record<Dataset,Gap>>;awsInventory?:{account:string;rows:Raw[]}}
+// Several reads of one kind of data: all failed is a failure, some failed is partial. Undefined entries are reads that worked.
+export function combineGaps(states:(Gap|undefined)[]):Gap|undefined{
+  const tried=states.length,failed=states.filter(s=>s==='failed').length;
+  if(tried&&failed===tried)return 'failed';
+  return states.some(s=>s==='failed'||s==='partial')?'partial':states.find(s=>s==='unconfigured');
+};
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
@@ -17,6 +25,13 @@ const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort()
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
 const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
+// Collectors already total their own reads, so merging parts keeps the worst they report.
+const GAP_RANK:Record<Gap,number>={unconfigured:1,partial:2,failed:3};
+function gapsOf(parts:Normalized[]):Pick<Normalized,'gaps'>{
+  const out:NonNullable<Normalized['gaps']>={};
+  for(const p of parts)for(const [k,v] of Object.entries(p.gaps??{}) as [Dataset,Gap|undefined][])if(v&&(!out[k]||GAP_RANK[v]>GAP_RANK[out[k]!]))out[k]=v;
+  return Object.keys(out).length?{gaps:out}:{};
+}
 export function finish(input:Normalized[]):Normalized {
   const parts=input.map(p=>p.awsInventory?{...p,resources:[...p.resources,...awsListed(p.awsInventory)]}:p);
   const resources=[...new Map(parts.flatMap(p=>p.resources).map(r=>[r.id,r])).values()];
@@ -41,7 +56,7 @@ export function finish(input:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
+  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()],...gapsOf(parts)};
 }
 export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
   const resources:Resource[]=[], links:Link[]=[];

@@ -2,7 +2,7 @@ import {abortableFetch,awsSend,collectAws,collectAzure,collectGcpAuto,discoverAz
 import type {Normalized} from './normalize.js';
 import {FileSnapshotStore,processAlive,type SnapshotStore} from './store.js';
 import {existsSync} from 'node:fs';
-import {validateSnapshot} from '../shared/schema.js';
+import {validateSnapshot,type Coverage,type Dataset} from '../shared/schema.js';
 import {newStages,type CollectionStatus,type ProviderId,type ProviderState,type ProviderStatus,type Report,type Stage} from '../shared/collect.js';
 export type {CollectionStatus,ProviderId,ProviderState,ProviderStatus};
 export type ProviderDriver={detect:(signal?:AbortSignal)=>Promise<string>;scope?:(signal?:AbortSignal)=>Promise<string>;collect:(options:CollectOptions&{report?:Report;signal?:AbortSignal})=>Promise<Normalized>};
@@ -78,7 +78,9 @@ const realDrivers:CollectorDrivers={
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers,nextLimits:Partial<CollectorLimits>={})=>{drivers=next;limits={...DEFAULT_LIMITS,...nextLimits};};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
+// What was read and what was not, per kind of data. Cost skipped by its own schedule keeps the state of the run that last read it.
+export const coverageOf=(result:Normalized,keptCost?:Coverage):Partial<Record<Dataset,Coverage>>=>{const g=result.gaps??{},cost=g.cost??keptCost??(result.cost?'ok':undefined);return{iam:g.iam??'ok',activity:g.activity??'ok',...(cost?{cost}:{})};};
+export const toSnapshot=(result:Normalized,costAt?:string,keptCost?:Coverage)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,coverage:coverageOf(result,keptCost),resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 // A process killed mid-run leaves its last status behind. Without this check the portal would show it running forever.
@@ -135,7 +137,7 @@ async function collect(store:SnapshotStore,log:(line:string)=>void):Promise<Coll
       if(!withCost)result.cost=previous?.cost;
       const costAt=withCost?at():previous?.costAt;
       if(!result.resources.length&&result.incomplete?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');
-      report('save');await store.save(p,toSnapshot(result,costAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
+      report('save');await store.save(p,toSnapshot(result,costAt,withCost?undefined:previous?.coverage?.cost));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
       const missing=result.incomplete?.length??0;
       settle({...status.providers[p],state:missing?'partial':'ok',at:at(),resources:result.resources.length,message:missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:undefined,stages:settleStages(status.providers[p].stages,'done')});
       log(`${p}: 자원 ${result.resources.length}개 저장${missing?` (일부 누락 ${missing})`:''}`);

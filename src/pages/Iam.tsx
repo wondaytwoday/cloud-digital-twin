@@ -4,6 +4,7 @@ import type {IamAssignment,Snapshot} from '../../shared/schema';
 import type {Finding} from '../../shared/findings';
 import {iamInScope,type Focus} from '../../shared/hierarchy';
 import {ProviderMark} from '../graph';
+import {CoverageNotice} from '../coverage';
 import {Kpi} from '../charts';
 import {Columns,Donut,HBars,ShareBar,PROVIDER_COLOR,PROVIDER_LABEL} from '@/ui/viz';
 import {FindingList} from './Findings';
@@ -17,7 +18,7 @@ export function IamPage({snapshot,focus,list,openFinding}:{snapshot:Snapshot;foc
   const q=query.trim().toLowerCase();
   const shown=principals.filter(p=>(type==='all'||p.type===type)&&(only==='all'||(only==='privileged'?p.privileged:p.external))&&(!q||`${p.name} ${p.items.map(i=>i.role).join(' ')}`.toLowerCase().includes(q)));
   const iamFindings=list.filter(f=>f.category==='iam'),selected=principals.find(p=>p.key===open);
-  return <div className={`page ${selected?'with-drawer':''}`}><header className="page-head"><div><h1>IAM</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. ':''}역할 할당을 CSP별로 모아 봅니다.{focus.scopes?' 상위 조직과 관리 그룹에서 내려오는 할당도 포함합니다.':''}</p></div></header>
+  return <div className={`page ${selected?'with-drawer':''}`}><header className="page-head"><div><h1>IAM</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. ':''}역할 할당을 CSP별로 모아 봅니다.{focus.scopes?' 상위 조직과 관리 그룹에서 내려오는 할당도 포함합니다.':''}</p></div></header><CoverageNotice snapshot={snapshot} dataset="iam" provider={focus.provider}/>
     <section className="kpi-row" aria-label="IAM 지표">
       <Kpi label="주체" value={String(principals.length)} hint={`할당 ${principals.reduce((n,p)=>n+p.items.length,0)}건`}/>
       <Kpi label="특권 주체" value={String(principals.filter(p=>p.privileged).length)} hint="Owner, 관리자 등" onClick={()=>setOnly('privileged')}/>

@@ -18,7 +18,13 @@ export const ResourceSchema = z.object({
 export type Resource = z.infer<typeof ResourceSchema>;
 export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.string(),kind:z.enum(['attachment','policy','peering','route','simulation']),transit:z.boolean().optional(),label:z.string(), evidence:z.string(),protocol:z.string().optional(),ports:z.string().optional(),rate:z.string().optional()});
 export type Link = z.infer<typeof LinkSchema>;
-export const ConnectionSchema = z.object({provider:Provider,status:z.enum(['demo','collected','partial','missing','failed','unauthenticated','running']),api:z.string(),scopes:z.number(),collectedAt:z.string().optional(),message:z.string().optional(),stale:z.boolean().optional()});
+// Beyond inventory, each kind of data is read separately and can fail on its own; zero rows from a failed read must not look like zero findings.
+export const Dataset = z.enum(['iam','activity','cost']);
+export type Dataset = z.infer<typeof Dataset>;
+export const Coverage = z.enum(['ok','partial','failed','unconfigured']);
+export type Coverage = z.infer<typeof Coverage>;
+export const CoverageMapSchema = z.partialRecord(Dataset, Coverage);
+export const ConnectionSchema = z.object({provider:Provider,status:z.enum(['demo','collected','partial','missing','failed','unauthenticated','running']),api:z.string(),scopes:z.number(),collectedAt:z.string().optional(),message:z.string().optional(),stale:z.boolean().optional(),datasets:CoverageMapSchema.optional()});
 export type Connection = z.infer<typeof ConnectionSchema>;
 export const HierarchyNodeSchema = z.object({id:z.string(),parent:z.string().optional(),name:z.string(),provider:Provider,kind:z.enum(['tenant','managementGroup','subscription','organization','ou','account','folder','project']),nativeId:z.string(),scope:z.string().optional()});
 export type HierarchyNode = z.infer<typeof HierarchyNodeSchema>;
@@ -35,7 +41,7 @@ export type Activity = z.infer<typeof ActivitySchema>;
 export const AuditEventSchema = z.object({id:z.string(),at:z.string(),actor:z.string(),action:z.enum(['login','login_failed','logout','denied','view','open','collect','export']),target:z.string().optional(),detail:z.string().optional(),ip:z.string().optional(),agent:z.string().optional(),demo:z.boolean().optional()});
 export type AuditEvent = z.infer<typeof AuditEventSchema>;
 export const FxSchema = z.object({base:z.string().regex(/^[A-Z]{3}$/),rates:z.record(z.string(),z.number().positive()),source:z.string()});
-export const SnapshotSchema = z.object({version:z.literal(1),fx:FxSchema.optional(),activity:z.array(ActivitySchema).default([]),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([]),incomplete:z.array(z.string()).default([]),cost:z.array(CostRowSchema).default([]),costAt:z.string().optional(),iam:z.array(IamAssignmentSchema).default([]),changes:z.object({since:z.string(),items:z.array(ChangeSchema)}).optional()});
+export const SnapshotSchema = z.object({version:z.literal(1),fx:FxSchema.optional(),activity:z.array(ActivitySchema).default([]),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([]),incomplete:z.array(z.string()).default([]),cost:z.array(CostRowSchema).default([]),costAt:z.string().optional(),iam:z.array(IamAssignmentSchema).default([]),coverage:CoverageMapSchema.optional(),changes:z.object({since:z.string(),items:z.array(ChangeSchema)}).optional()});
 export type Snapshot = z.infer<typeof SnapshotSchema>;
 export function validateSnapshot(input: unknown): Snapshot {
   const s=SnapshotSchema.parse(input), ids=new Set(s.resources.map(r=>r.id));

@@ -65,7 +65,7 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   const connections=snapshot.connections.flatMap(c=>{
     const own=[...allowed].filter(s=>providerOf.get(s)===c.provider);if(!own.length)return [];
     const status=c.status==='partial'&&!own.some(s=>incomplete.includes(s))?'collected':c.status;
-    return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{}),...(c.stale!==undefined?{stale:c.stale}:{})}];
+    return [{provider:c.provider,status,api:c.api,scopes:own.length,...(c.collectedAt?{collectedAt:c.collectedAt}:{}),...(c.stale!==undefined?{stale:c.stale}:{}),...(c.datasets?{datasets:c.datasets}:{})}];
   });
   const restricted:{[K in keyof Required<Snapshot>]:Snapshot[K]}={
     version:snapshot.version,mode:snapshot.mode,scenario:snapshot.scenario,collectedAt:snapshot.collectedAt,costAt:snapshot.costAt,fx:snapshot.fx,
@@ -73,6 +73,8 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
     scopes:snapshot.scopes.filter(mine),scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>mine(k))),incomplete,
     cost:snapshot.cost.filter(c=>mine(c.scope)),activity:snapshot.activity.filter(a=>mine(a.scope)),iam:snapshot.iam.filter(a=>mine(a.scope)),
     changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>mine(c.scope))}:undefined,
+    // Per kind of data and per cloud: it names no scope, and hiding it would make a failed read look like zero rows.
+    coverage:snapshot.coverage,
     // Collector warnings quote other scopes by ID and name, so none are passed on.
     warnings:[],connections,
   };

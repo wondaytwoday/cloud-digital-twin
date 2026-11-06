@@ -1,4 +1,5 @@
 import {useEffect,useMemo,useState} from 'react';
+import {CoverageNotice} from '../coverage';
 import {AlertTriangle,ArrowUpRight,Download,RefreshCw} from 'lucide-react';
 import type {Activity,AuditEvent,Snapshot} from '../../shared/schema';
 import {inScope,type Focus} from '../../shared/hierarchy';
@@ -69,8 +70,9 @@ function CloudLog({snapshot,focus,days,openResource,onCsv}:{snapshot:Snapshot;fo
   const providers=['azure','aws','gcp'].filter(p=>all.some(a=>a.provider===p)),daily=useMemo(()=>perDay(all,a=>a.at,a=>a.provider,providers,Math.min(days,30)),[all,days,providers.join()]);
   const sensitive=all.filter(a=>SENSITIVE.test(a.operation)),people=[...new Set(all.map(a=>a.actor))].sort(),actors=new Set(all.map(a=>a.actor));
   const exportCsv=()=>onCsv(csv([['time','provider','actor','actor_type','operation','kind','target','scope','outcome','ip','source'],...shown.map(a=>[a.at,a.provider,a.actor,a.actorType,a.operation,a.kind,a.targetName,snapshot.scopeLabels[a.scope]??a.scope,a.outcome,a.ip??'',a.source])]),'cloud-atlas-cloud-activity.csv');
-  if(!snapshot.activity.length)return <div className="panel empty-panel"><p>아직 수집한 클라우드 변경 기록이 없습니다.</p><p className="muted small">Azure Activity Log, AWS CloudTrail, GCP Admin Activity 감사 로그에서 최근 7일의 생성·변경·삭제를 읽습니다. Azure는 Reader, AWS는 cloudtrail:LookupEvents, GCP는 roles/logging.viewer 권한이 필요합니다.</p></div>;
-  return <>
+  const notice=<CoverageNotice snapshot={snapshot} dataset="activity" provider={focus.provider}/>;
+  if(!snapshot.activity.length)return <>{notice}<div className="panel empty-panel"><p>아직 수집한 클라우드 변경 기록이 없습니다.</p><p className="muted small">Azure Activity Log, AWS CloudTrail, GCP Admin Activity 감사 로그에서 최근 7일의 생성·변경·삭제를 읽습니다. Azure는 Reader, AWS는 cloudtrail:LookupEvents, GCP는 roles/logging.viewer 권한이 필요합니다.</p></div></>;
+  return <>{notice}
     {sensitive.length>0&&<div className="notice warn page-notice"><AlertTriangle size={15}/><p>방화벽·보안 그룹·권한처럼 접근 경로를 바꾸는 변경이 {sensitive.length}건 있습니다. 아래 필터에서 "민감한 변경"으로 모아 볼 수 있습니다.</p></div>}
     <section className="kpi-row" aria-label="클라우드 변경 지표"><Kpi label="변경 기록" value={String(all.length)} hint={`최근 ${days}일 · 최대 7일 수집`}/><Kpi label="삭제" value={String(all.filter(a=>a.kind==='delete').length)} tone={all.some(a=>a.kind==='delete')?'warn':undefined}/><Kpi label="민감한 변경" value={String(sensitive.length)} tone={sensitive.length?'warn':undefined} onClick={()=>setKind('sensitive')}/><Kpi label="실패한 시도" value={String(all.filter(a=>a.outcome==='failed').length)} onClick={()=>setKind('failed')}/><Kpi label="변경한 주체" value={String(actors.size)} hint={`사람 ${new Set(all.filter(a=>a.actorType==='user').map(a=>a.actor)).size} · 서비스 ${new Set(all.filter(a=>a.actorType==='service').map(a=>a.actor)).size}`}/></section>
     <div className="dash-grid">

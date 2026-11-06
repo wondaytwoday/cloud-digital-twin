@@ -9,6 +9,7 @@ import {CATEGORIES,categoryOf,fleetTotals} from '../../shared/capacity';
 import type {Finding,Severity} from '../../shared/findings';
 import {iamInScope,inScope,type Focus} from '../../shared/hierarchy';
 import {age,countDefinition,resourceCounts} from '../../shared/freshness';
+import {coverageGaps,gapHint} from '../coverage';
 import type {Connection} from '../../shared/schema';
 import {ProviderMark} from '../graph';
 import {CostTrend,Kpi} from '../charts';
@@ -57,6 +58,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const gaps=snapshot.incomplete.filter(x=>inScope(focus,snapshot.hierarchy.find(n=>n.scope===x)?.provider??resources.find(r=>r.scope===x)?.provider??focus.provider,x)).length;
   const conns=snapshot.connections.filter(c=>c.provider!=='onprem'&&(focus.provider==='all'||c.provider===focus.provider)),issues=snapshot.mode==='live'?freshnessIssues(conns):[];
   const times=new Set(conns.map(c=>c.collectedAt).filter(Boolean));
+  const iamGaps=coverageGaps(snapshot,'iam',focus.provider),activityGaps=coverageGaps(snapshot,'activity',focus.provider),costGaps=coverageGaps(snapshot,'cost',focus.provider);
   const byCloud=present.map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries(CATEGORIES.map(c=>[c.id,resources.filter(r=>r.provider===p&&r.kind!=='subnet'&&categoryOf(r.kind)===c.id).length]))}));
   const dailyActivity=week.map(d=>({x:d.slice(5).replace('-','/'),...Object.fromEntries(present.map(p=>[p,activity.filter(a=>a.provider===p&&a.at.startsWith(d)).length]))}));
   const logins=portal?week.map(d=>new Set(portal.filter(e=>e.at.startsWith(d)&&(e.action==='login'||e.action==='view')).map(e=>e.actor)).size):[];
@@ -66,11 +68,11 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
     <section className="kpi-row" aria-label="주요 지표">
       <Kpi label="리소스" value={real.length.toLocaleString('ko-KR')} hint={[warnCount?`이상 ${warnCount}개`:`범위 ${new Set(resources.map(r=>r.scope)).size}개`,gaps?`범위 ${gaps}개 일부 누락`:`서브넷·정책 포함 ${counts.all.toLocaleString('ko-KR')}`].join(' · ')} tone={warnCount?'bad':gaps?'warn':undefined} title={`서브넷과 보안 정책을 뺀 수입니다. ${countDefinition(counts)}${gaps?` 범위 ${gaps}개는 일부만 읽어 실제보다 적을 수 있습니다.`:''}`} onClick={()=>go('inventory')}/>
       <Kpi label="VM" value={String(fleet.count)} hint={`실행 ${fleet.running} · vCPU ${fleet.vcpu} · ${gib(fleet.memoryGiB)}`} onClick={()=>go('inventory')}/>
-      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} onClick={()=>go('cost')}/>
+      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={costGaps.length?gapHint(costGaps):delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} tone={costGaps.length?'warn':undefined} onClick={()=>go('cost')}/>
       <Kpi label="조치 필요" value={String(urgent)} hint={`전체 ${list.length}건 · 긴급·높음`} tone={urgent?'bad':undefined} onClick={()=>go('findings')}/>
       <Kpi label="공인 노출 후보" value={String(exposed.length)} hint={`넓은 인바운드 ${wide}개`} tone={exposed.length?'warn':undefined} onClick={()=>go('security')}/>
-      <Kpi label="특권 주체" value={String(privileged)} hint={`외부 ${external} · 전체 ${principals.size}`} tone={external?'warn':undefined} onClick={()=>go('iam')}/>
-      <Kpi label="클라우드 변경" value={String(activity.length)} hint={`최근 7일 · 삭제 ${activity.filter(a=>a.kind==='delete').length}`} onClick={()=>go('audit')}/>
+      <Kpi label="특권 주체" value={String(privileged)} hint={iamGaps.length?gapHint(iamGaps):`외부 ${external} · 전체 ${principals.size}`} tone={external||iamGaps.length?'warn':undefined} onClick={()=>go('iam')}/>
+      <Kpi label="클라우드 변경" value={String(activity.length)} hint={activityGaps.length?gapHint(activityGaps):`최근 7일 · 삭제 ${activity.filter(a=>a.kind==='delete').length}`} tone={activityGaps.length?'warn':undefined} onClick={()=>go('audit')}/>
     </section>
     <div className="dash-grid">
       <Card title="클라우드별 리소스" sub="분류별" to="inventory" go={go} className="span-2"><Columns xKey="cloud" height={190} data={byCloud} series={CATEGORIES.map(c=>({key:c.id,label:c.label,color:CATEGORY_COLOR[c.id]}))}/></Card>

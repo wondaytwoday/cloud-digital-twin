@@ -1,4 +1,5 @@
 import {useMemo} from 'react';
+import {CoverageNotice} from '../coverage';
 import {Download,Info} from 'lucide-react';
 import type {Snapshot} from '../../shared/schema';
 import {billingCurrencies,convertTo,costSpikes,money,summarizeCost} from '../../shared/cost';
@@ -16,12 +17,12 @@ export function CostPage({snapshot,focus,onScope,onCsv}:{snapshot:Snapshot;focus
   const lastTotal=s.services.reduce((n,x)=>n+x.amount,0),headline=s.projected??s.currentTotal,delta=s.previousTotal?(headline-s.previousTotal)/s.previousTotal:null;
   // The export keeps each row's own amount and currency beside the converted one, so nothing is lost to a rate.
   const exportCsv=()=>onCsv(['provider,scope,scope_name,service,month,amount,currency,original_amount,original_currency',...rows.map(r=>{const c=convertTo([r],currency,fx).rows[0];return [r.provider,r.scope,`"${label(r.scope).replace(/"/g,'""')}"`,`"${r.service.replace(/"/g,'""')}"`,r.month,c?.amount??'',c?currency:'',r.amount,r.currency].join(',');})].join('\n'),`cloud-atlas-cost-${currency}.csv`);
-  if(!snapshot.cost.length)return <div className="page"><header className="page-head"><div><h1>비용</h1></div></header><div className="panel empty-panel"><p>아직 수집한 비용 데이터가 없습니다.</p><p className="muted small">{SOURCES}을 읽습니다. 필요한 권한은 클라우드 연결 가이드에 있습니다.</p></div></div>;
+  if(!snapshot.cost.length)return <div className="page"><header className="page-head"><div><h1>비용</h1></div></header><CoverageNotice snapshot={snapshot} dataset="cost" provider={focus.provider}/><div className="panel empty-panel"><p>아직 수집한 비용 데이터가 없습니다.</p><p className="muted small">{SOURCES}을 읽습니다. 필요한 권한은 클라우드 연결 가이드에 있습니다.</p></div></div>;
   const providerShare=Object.entries(s.providerTotals).map(([p,t])=>({key:p,label:NAMES[p]??p,value:s.projected!==null?t.projected??t.current:t.current,color:PROVIDER_COLOR[p]}));
   return <div className="page"><header className="page-head"><div><h1>비용</h1><p>{snapshot.mode==='mock'?'예시 금액입니다. ':''}{snapshot.costAt?`비용 수집 ${new Date(snapshot.costAt).toLocaleString('ko-KR')}`:''}</p></div>
     <div className="page-actions"><div className="segmented" role="group" aria-label="표시 통화">{(['KRW','USD'] as CostCurrency[]).map(c=><button key={c} className={currency===c?'active':''} aria-pressed={currency===c} onClick={()=>cur.setCurrency(c)}>{c==='KRW'?'원화 ₩':'달러 $'}</button>)}</div>
       <label className="fx-field">1 USD =<input type="number" min="1" step="any" inputMode="decimal" aria-label="환율 (1 USD당 원)" placeholder={cur.rate?String(cur.rate):'환율'} value={cur.typed} onChange={e=>cur.setRate(e.target.value)}/>원{cur.source&&<small>{cur.source}</small>}</label>
-      <button className="button" onClick={exportCsv}><Download size={14}/>CSV</button></div></header>
+      <button className="button" onClick={exportCsv}><Download size={14}/>CSV</button></div></header><CoverageNotice snapshot={snapshot} dataset="cost" provider={focus.provider}/>
     <p className="muted small page-notice">청구 통화: {billed.map(b=>`${NAMES[b.provider]??b.provider} ${b.currencies.join('·')}`).join(' / ')}{billed.some(b=>b.provider==='aws')?' · AWS Cost Explorer는 항상 USD로 반환합니다.':''} 모든 금액을 {currency==='KRW'?'원화':'달러'}로 바꿔 보여주며 두 통화를 섞어 더하지 않습니다.</p>
     {s.converted.length>0&&cur.rate&&<div className="notice page-notice"><Info size={15}/><p>{s.converted.join(', ')} 금액을 1 USD = {cur.rate.toLocaleString('ko-KR')}원({cur.source})으로 환산했습니다. 청구서 환율과 다를 수 있습니다.</p></div>}
     {s.dropped.length>0&&<div className="notice warn page-notice"><Info size={15}/><p>환율이 없어 {s.dropped.map(d=>`${d.providers.map(p=>NAMES[p]??p).join('·')}의 ${d.currency} 비용 ${d.count}건`).join(', ')}을 이 보기에서 뺐습니다. 위에 환율을 입력하거나 .env에 <code>ATLAS_FX_RATES</code>를 넣으면 포함됩니다.</p></div>}

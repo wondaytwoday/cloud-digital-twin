@@ -1,4 +1,4 @@
-import { finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
+import { combineGaps,finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
 import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/schema.js';
 import {noReport,type Report} from '../shared/collect.js';
 // signal stops a run that timed out: every request after it fails at once instead of reaching the cloud.
@@ -94,16 +94,16 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
   part.warnings.push(...warnings);part.incomplete=subscriptions.filter(x=>!readable.includes(x));
   if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);
   try{part.hierarchy=await azureHierarchy(token,request,[...tenantIds][0]);}catch(e){part.warnings.push(`Azure: 관리 그룹을 읽지 못해 구독을 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
-  report('iam',{detail:'역할 할당 조회'});
+  report('iam',{detail:'역할 할당 조회'});const gaps:NonNullable<Normalized['gaps']>={};
   try{
     const rows=await azurePages(readable,token,request,AZURE_IAM),ids=[...new Set(rows.filter(r=>r.type.toLowerCase().endsWith('roleassignments')).map(r=>String(r.properties?.principalId).toLowerCase()))];
     let names=new Map<string,string>();
     try{names=await azureDisplayNames(ids,options.graphToken,request);}catch{part.warnings.push('Azure: Microsoft Graph 조회 권한이 없어 IAM 주체를 ID로 표시합니다.');}
     part.iam=normalizeAzureIam(rows,names);report('iam',{state:'done',detail:`할당 ${count(part.iam.length)}건`});
-  }catch(e){part.warnings.push(`Azure: 역할 할당을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('iam',{state:'failed',detail:'권한을 확인하세요'});}
-  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`Azure: 변경 기록(Activity Log)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('activity',{state:'failed',detail:'Reader 권한을 확인하세요'});}}else report('activity',{state:'skipped'});
-  if(options.withCost!==false){try{const {rows,failed}=await azureCost(readable,token,request,undefined,(done,total)=>report('cost',{detail:'Cost Management 조회',done,total}));part.cost=rows;if(failed.length)part.warnings.push(`Azure: 구독 ${failed.length}개의 비용을 읽지 못했습니다. Cost Management Reader 권한을 확인하세요.`);report('cost',failed.length?{state:'failed',detail:`구독 ${failed.length}개 실패, 권한을 확인하세요`}:{state:'done',detail:`${count(rows.length)}행`});}catch(e){part.warnings.push(`Azure: 비용을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('cost',{state:'failed',detail:'권한을 확인하세요'});}}
-  const result=finish([part]);result.warnings.push('Azure: 보이는 지원 자원만 수집. 구독 내부 리소스별 접근 제한과 Resource Graph 반영 지연은 별도 확인 필요.');return result;
+  }catch(e){part.warnings.push(`Azure: 역할 할당을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('iam',{state:'failed',detail:'권한을 확인하세요'});gaps.iam='failed';}
+  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`Azure: 변경 기록(Activity Log)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('activity',{state:'failed',detail:'Reader 권한을 확인하세요'});gaps.activity='failed';}}else report('activity',{state:'skipped'});
+  if(options.withCost!==false){try{const {rows,failed}=await azureCost(readable,token,request,undefined,(done,total)=>report('cost',{detail:'Cost Management 조회',done,total}));part.cost=rows;if(failed.length)part.warnings.push(`Azure: 구독 ${failed.length}개의 비용을 읽지 못했습니다. Cost Management Reader 권한을 확인하세요.`);report('cost',failed.length?{state:'failed',detail:`구독 ${failed.length}개 실패, 권한을 확인하세요`}:{state:'done',detail:`${count(rows.length)}행`});if(failed.length)gaps.cost=failed.length>=readable.length?'failed':'partial';}catch(e){part.warnings.push(`Azure: 비용을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('cost',{state:'failed',detail:'권한을 확인하세요'});gaps.cost='failed';}}
+  part.gaps=gaps;const result=finish([part]);result.warnings.push('Azure: 보이는 지원 자원만 수집. 구독 내부 리소스별 접근 제한과 Resource Graph 반영 지연은 별도 확인 필요.');return result;
 }
 // Everything the signed-in identity can see, so nobody has to type subscription IDs.
 // Sign-in passing says nothing about roles or the network path to ARM, so each failure here names its own fix.
@@ -248,7 +248,7 @@ export const parseAccounts=(value:string|undefined)=>(value??'').split(',').map(
 // With ATLAS_AWS_ROLE_NAME the signed-in identity only jumps: it reads the org and assumes a read role in each account, and needs no read rights of its own. Without it, the signed-in account is read directly.
 export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:CollectOptions={}):Promise<Normalized>{
   const [ec2,sts,elb,rds,dx,eks,org,iam,ce,rex,trail]=await Promise.all([import('@aws-sdk/client-ec2'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-elastic-load-balancing-v2'),import('@aws-sdk/client-rds'),import('@aws-sdk/client-direct-connect'),import('@aws-sdk/client-eks'),import('@aws-sdk/client-organizations'),import('@aws-sdk/client-iam'),import('@aws-sdk/client-cost-explorer'),import('@aws-sdk/client-resource-explorer-2'),import('@aws-sdk/client-cloudtrail')]);
-  const parts:Normalized[]=[],home=AWS_HOME_REGION(),warnings:string[]=[],incomplete:string[]=[],report=options.report??noReport,signal=options.signal;let hierarchy:HierarchyNode[]|undefined,identities=1,finishedIdentities=0,regionsDone=0;
+  const parts:Normalized[]=[],home=AWS_HOME_REGION(),warnings:string[]=[],incomplete:string[]=[],report=options.report??noReport,signal=options.signal;let hierarchy:HierarchyNode[]|undefined,identities=1,finishedIdentities=0,regionsDone=0;const iamReads:('failed'|undefined)[]=[],activityReads:('failed'|undefined)[]=[];let costGap:'failed'|undefined;
   const single=async(module:any,Client:string,region:string,credentials:any,operation:string,input:any)=>{const client=new module[Client]({region,maxAttempts:3,credentials});try{return await awsSend(client,new module[`${operation}Command`](input),signal);}finally{client.destroy();}};
   const account=async(credentials:any)=>{const {Account}=await single(sts,'STSClient',home,credentials,'GetCallerIdentity',{});if(!Account)throw new Error('AWS 계정 ID를 확인할 수 없습니다.');return Account as string;};
   const readOrg=async(credentials:any)=>{if(hierarchy)return;const client=new org.OrganizationsClient({region:'us-east-1',maxAttempts:3,credentials});try{hierarchy=await awsHierarchy((_s,operation,input={})=>awsSend(client,new (org as any)[`${operation}Command`](input),signal));}catch{/* member account: reported below if nothing could read the org */}client.destroy();};
@@ -264,11 +264,11 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
     }));
     report('iam',{detail:who,done:finishedIdentities,total:identities});
     const {iam:assignments,warning}=await collectAwsIam((_s,operation,input={})=>single(iam,'IAMClient','us-east-1',credentials,operation,input),id);
-    finishedIdentities++;report('iam',{done:finishedIdentities,total:identities});report('resources',{detail:`${who} · 나머지 서비스 목록`});
+    finishedIdentities++;iamReads.push(warning?'failed':undefined);report('iam',{done:finishedIdentities,total:identities});report('resources',{detail:`${who} · 나머지 서비스 목록`});
     const inventory=await collectAwsInventory((_s,operation,input={})=>single(rex,'ResourceExplorer2Client',home,credentials,operation,input));
     // IAM and other global services log to us-east-1, so it is always read alongside the collected regions.
     const activity:Activity[]=[],activityWarnings:string[]=[];
-    if(options.withActivity!==false){report('activity',{detail:`${who} · CloudTrail`});for(const region of [...new Set([...targets,'us-east-1'])]){try{activity.push(...await collectAwsActivity((_s,operation,input={})=>single(trail,'CloudTrailClient',region,credentials,operation,input),id,region));}catch(e){activityWarnings.push(`AWS 계정 ${who} ${region}: 변경 기록(CloudTrail)을 읽지 못했습니다 (${(e as Error)?.name}).`);}}}
+    if(options.withActivity!==false){report('activity',{detail:`${who} · CloudTrail`});for(const region of [...new Set([...targets,'us-east-1'])]){try{activity.push(...await collectAwsActivity((_s,operation,input={})=>single(trail,'CloudTrailClient',region,credentials,operation,input),id,region));activityReads.push(undefined);}catch(e){activityReads.push('failed');activityWarnings.push(`AWS 계정 ${who} ${region}: 변경 기록(CloudTrail)을 읽지 못했습니다 (${(e as Error)?.name}).`);}}}
     parts.push({resources:[],links:[],warnings:[...(warning?[warning]:[]),...(inventory.warning?[inventory.warning]:[]),...activityWarnings.slice(0,3)],scopeLabels:{},iam:assignments,activity,awsInventory:{account:id,rows:inventory.rows}} as Normalized);
   };
   const assume=async(role:AwsRole,required=true)=>{
@@ -294,8 +294,9 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
   report('activity',options.withActivity===false?{state:'skipped'}:{state:'done',detail:`${count(parts.reduce((n,p)=>n+(p.activity?.length??0),0))}건`});
   if(!hierarchy&&!listed.length)warnings.push('AWS: Organizations를 읽지 못해 계정을 평면으로 표시합니다. 관리 계정 또는 위임 관리자 권한이 필요합니다.');
   let cost:CostRow[]|undefined;
-  if(options.withCost!==false){report('cost',{detail:'Cost Explorer 조회'});try{cost=await collectAwsCost((_s,operation,input={})=>single(ce,'CostExplorerClient','us-east-1',undefined,operation,input));report('cost',{state:'done',detail:`${count(cost.length)}행`});}catch(e){warnings.push(`AWS: 비용을 읽지 못했습니다 (${(e as Error)?.name}). 조직 전체 비용은 관리 계정의 ce:GetCostAndUsage 권한이 필요합니다.`);report('cost',{state:'failed',detail:'ce:GetCostAndUsage 권한을 확인하세요'});}}
-  return finish([...parts,{resources:[],links:[],warnings,scopeLabels:{},hierarchy,incomplete,cost}]);
+  if(options.withCost!==false){report('cost',{detail:'Cost Explorer 조회'});try{cost=await collectAwsCost((_s,operation,input={})=>single(ce,'CostExplorerClient','us-east-1',undefined,operation,input));report('cost',{state:'done',detail:`${count(cost.length)}행`});}catch(e){costGap='failed';warnings.push(`AWS: 비용을 읽지 못했습니다 (${(e as Error)?.name}). 조직 전체 비용은 관리 계정의 ce:GetCostAndUsage 권한이 필요합니다.`);report('cost',{state:'failed',detail:'ce:GetCostAndUsage 권한을 확인하세요'});}}
+  const gaps={iam:combineGaps(iamReads),activity:combineGaps(activityReads),cost:costGap};
+  return finish([...parts,{resources:[],links:[],warnings,scopeLabels:{},hierarchy,incomplete,cost,gaps}]);
 }
 // REST fallback avoids protobuf Struct conversion ambiguity for resource.data.
 export type GcpRequest=(url:string,init?:{method:string;data:unknown})=>Promise<any>;
@@ -355,12 +356,12 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
   if(!parent.startsWith('projects/'))try{part.hierarchy=await gcpHierarchy(parent,request,projectNumbers,org);}catch(e){part.warnings.push(`GCP: 조직 계층을 읽지 못해 프로젝트를 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
   report('iam',{detail:parent});
   try{part.iam=normalizeGcpIam(await gcpPages(parent,request,GCP_HIERARCHY_TYPES,'IAM_POLICY'),projectNumbers,parent.startsWith('projects/')?parent.split('/')[1]:undefined,org.domain);}
-  catch(e){part.warnings.push(`GCP: IAM 정책을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);}
+  catch(e){part.warnings.push(`GCP: IAM 정책을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);(part.gaps??={}).iam='failed';}
   if(options.withActivity!==false){
     // An organization's own log holds only org-level changes; each project keeps its own.
     const names=parent.startsWith('projects/')?[parent]:[parent,...(part.hierarchy??[]).filter(n=>n.kind==='project').map(n=>`projects/${n.nativeId}`)];
     report('activity',{detail:'감사 로그 조회'});
-    try{part.activity=await gcpActivity(names,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`GCP: 변경 기록(감사 로그)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}). roles/logging.viewer가 필요합니다.`);report('activity',{state:'failed',detail:'logging.viewer 권한을 확인하세요'});}
+    try{part.activity=await gcpActivity(names,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`GCP: 변경 기록(감사 로그)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}). roles/logging.viewer가 필요합니다.`);report('activity',{state:'failed',detail:'logging.viewer 권한을 확인하세요'});(part.gaps??={}).activity='failed';}
   }
   const result=finish([part]);result.warnings.push('GCP: Asset Inventory의 최종 일관성 데이터. Cloud Router 관계는 구성 참조이며 패킷 경유 경로가 아닙니다.');return result;
 }
@@ -404,9 +405,11 @@ export async function collectGcpAuto(request:GcpRequest,options:CollectOptions={
     if(parts.length){report('scopes',{detail:'폴더 계층 조회'});const tree=await gcpAncestry(records,request,orgNames);hierarchy=tree.nodes;warnings.push(...tree.warnings);}}
   if(!parts.length)throw new Error(warnings[0]??'GCP: 이 계정으로 볼 수 있는 조직이나 프로젝트가 없습니다.');
   report('resources',{state:'done',detail:`범위 ${parts.length}개`});report('iam',{state:'done'});
+  // Each organization or project read its own IAM and logs; the totals say whether all, some or none of them worked.
+  const gaps:NonNullable<Normalized['gaps']>={iam:combineGaps(parts.map(p=>p.gaps?.iam)),activity:combineGaps(parts.map(p=>p.gaps?.activity))};for(const p of parts)delete p.gaps;
   let cost:CostRow[]|undefined;const table=process.env.ATLAS_GCP_BILLING_TABLE;
-  if(options.withCost!==false){if(table){report('cost',{detail:'BigQuery 조회'});try{cost=await collectGcpCost(request,table);report('cost',{state:'done',detail:`${count(cost.length)}행`});}catch(e){warnings.push(`GCP: 비용을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,120)}).`);report('cost',{state:'failed',detail:'결제 내보내기 권한을 확인하세요'});}}else{warnings.push('GCP: 비용은 BigQuery 결제 내보내기로만 읽을 수 있습니다. 테이블을 ATLAS_GCP_BILLING_TABLE에 지정하세요.');report('cost',{state:'skipped',detail:'ATLAS_GCP_BILLING_TABLE 미설정'});}}
-  return finish([...parts,{resources:[],links:[],warnings,scopeLabels:{},incomplete,cost,...(hierarchy?{hierarchy}:{})}]);
+  if(options.withCost!==false){if(table){report('cost',{detail:'BigQuery 조회'});try{cost=await collectGcpCost(request,table);report('cost',{state:'done',detail:`${count(cost.length)}행`});}catch(e){gaps.cost='failed';warnings.push(`GCP: 비용을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,120)}).`);report('cost',{state:'failed',detail:'결제 내보내기 권한을 확인하세요'});}}else{gaps.cost='unconfigured';warnings.push('GCP: 비용은 BigQuery 결제 내보내기로만 읽을 수 있습니다. 테이블을 ATLAS_GCP_BILLING_TABLE에 지정하세요.');report('cost',{state:'skipped',detail:'ATLAS_GCP_BILLING_TABLE 미설정'});}}
+  return finish([...parts,{resources:[],links:[],warnings,scopeLabels:{},incomplete,cost,gaps,...(hierarchy?{hierarchy}:{})}]);
 }
 export async function collectGcp(parent:string,options:CollectOptions={}):Promise<Normalized>{
   const {GoogleAuth}=await import('google-auth-library');const auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']});const client=await auth.getClient();
