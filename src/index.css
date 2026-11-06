@@ -50,4 +50,4 @@
   --text-2xl: 22px; --text-2xl--line-height: 28px;
 }
 :root { --chart-1: #1e40af; --chart-2: #0f7a68; --chart-3: #a85f0c; --chart-4: #6a55b0; --chart-5: #b4412f; }
-@layer app { .shad *, .shad *::before, .shad *::after { border-style: solid; border-width: 0; border-color: var(--line); } }
+@layer app { .shad *, .shad *::before, .shad *::after { border-style: solid; border-width: 0; border-color: var(--line); } .shad ul, .shad ol { list-style: none; margin: 0; padding: 0; } }

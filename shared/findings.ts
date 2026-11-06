@@ -31,8 +31,7 @@ export function findings(s:Snapshot,now=new Date(),focus:Focus=ALL_FOCUS):Findin
     if(a.principalType==='user'&&a.privileged&&a.mfa===false)out.push({id:`mfa:${a.id}`,severity:'high',category:'iam',title:`${a.principal} 특권 사용자 MFA 없음`,detail:`${a.role} · ${label(a.scope)}`,provider:a.provider,scope:a.scope,target:{view:'iam'}});
     if(a.keyAgeDays!==undefined&&a.keyAgeDays>KEY_MAX_DAYS&&a.privileged)out.push({id:`key:${a.id}`,severity:'medium',category:'iam',title:`${a.principal} 오래된 액세스 키`,detail:`${a.keyAgeDays}일 경과 · ${label(a.scope)}`,provider:a.provider,scope:a.scope,target:{view:'iam'}});
   }
-  const currency=new Set(s.cost.map(c=>c.currency)).size===1?s.cost[0]?.currency??null:null;
-  for(const x of costSpikes(s.cost.filter(c=>inScope(focus,c.provider,c.scope)),now).slice(0,8))out.push({id:`spike:${x.provider}:${x.scope}:${x.service}`,severity:'medium',category:'cost',title:`${label(x.scope)} ${x.service} 비용 증가`,detail:`${money(x.previous,currency)} → ${money(x.amount,currency)} (+${Math.round(x.change*100)}%)`,provider:x.provider,scope:x.scope,target:{view:'cost'}});
+  for(const x of costSpikes(s.cost.filter(c=>inScope(focus,c.provider,c.scope)),now,undefined,undefined,s.fx).slice(0,8))out.push({id:`spike:${x.provider}:${x.scope}:${x.service}`,severity:'medium',category:'cost',title:`${label(x.scope)} ${x.service} 비용 증가`,detail:`${money(x.previous,x.currency)} → ${money(x.amount,x.currency)} (+${Math.round(x.change*100)}%)`,provider:x.provider,scope:x.scope,target:{view:'cost'}});
   // The same issue across twenty accounts is one thing to fix, not twenty lines to read.
   const grouped=new Map<string,Finding&{scopes:string[]}>();
   for(const f of out){const key=f.category==='iam'?`${f.severity}|${f.title}`:f.id,seen=grouped.get(key);if(!seen)grouped.set(key,{...f,scopes:f.scope?[f.scope]:[]});else if(f.scope&&!seen.scopes.includes(f.scope))seen.scopes.push(f.scope);}

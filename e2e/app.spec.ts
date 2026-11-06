@@ -88,6 +88,27 @@ test('resources is its own page: no map tabs or scope tree, charts per category'
   expect(await page.getByRole('meter').count()).toBeGreaterThan(5);
   await page.getByRole('button',{name:/^api-prod-01/}).click();await expect(page).toHaveURL(/view=map/);
 });
+test('cost shows one currency at a time and converts with the rate',async({page})=>{
+  await page.goto('/?scenario=standard&view=cost');await page.waitForSelector('.kpi-row');
+  await page.getByRole('button',{name:'달러 $'}).click();await expect(page.locator('.kpi strong').first()).toContainText('$');
+  await page.getByRole('button',{name:'원화 ₩'}).click();await expect(page.locator('.kpi strong').first()).toContainText('₩');
+  const before=await page.locator('.kpi strong').first().textContent();
+  await page.getByLabel('환율 (1 USD당 원)').fill('2760');await expect(page.locator('.kpi strong').first()).not.toHaveText(before!);
+  await expect(page.getByText('직접 입력').first()).toBeVisible();
+});
+test('access log shows portal use and cloud changes',async({page})=>{
+  await page.goto('/?scenario=standard&view=audit');await expect(page.getByRole('heading',{name:'접근 로그'})).toBeVisible();
+  await expect(page.getByText('로그인 실패가 몰린 구간')).toBeVisible();
+  await page.getByLabel('행동').selectOption('login_failed');expect(await page.locator('tbody tr').count()).toBeGreaterThan(4);
+  await page.getByRole('tab',{name:'클라우드 변경'}).click();await expect(page.getByText('변경 기록').first()).toBeVisible();
+  await page.getByLabel('변경 종류').selectOption('sensitive');await expect(page.locator('tbody tr').first()).toContainText('민감');
+  await page.locator('tbody .table-link').first().click();await expect(page).toHaveURL(/view=map/);
+});
+test('the dashboard summarises every area with links into each',async({page})=>{
+  await page.goto('/?scenario=standard');await expect(page.getByRole('heading',{name:'통합 대시보드'})).toBeVisible();
+  for(const t of ['클라우드별 리소스','월별 비용','우선 조치','보안','네트워크','VM 용량','클라우드 변경 기록','포털 접근'])await expect(page.getByRole('heading',{name:new RegExp('^'+t)})).toBeVisible();
+  await page.getByRole('heading',{name:/^VM 용량/}).locator('xpath=../..').getByRole('button',{name:'자세히'}).click();await expect(page).toHaveURL(/view=inventory/);
+});
 test('exports produce files',async({page})=>{
   await openMap(page);
   for(const [label,ext] of [['draw.io','.drawio'],['지도 PNG','.png'],['지도 SVG','.svg'],['스냅샷 JSON','.json']] as const){
@@ -110,7 +131,7 @@ test.describe('first visit',()=>{
     await expect(guide).toContainText('목데이터 모드');await expect(guide).toContainText('npm run check');
     for(const [tab,text] of [['Microsoft Azure','Cost Management Reader'],['Amazon Web Services','AtlasCollector'],['Google Cloud','ATLAS_GCP_BILLING_TABLE']]){await guide.getByRole('tab',{name:tab}).click();await expect(guide).toContainText(text);}
     await guide.getByRole('button',{name:'목데이터로 둘러보기'}).click();await expect(guide).toHaveCount(0);
-    await expect(page.getByRole('heading',{name:'운영 대시보드'})).toBeVisible();await expect(page.locator('.kpi-row')).toContainText('이번 달 예상 비용');
+    await expect(page.getByRole('heading',{name:'통합 대시보드'})).toBeVisible();await expect(page.locator('.kpi-row')).toContainText('이번 달 예상 비용');
     await page.getByRole('button',{name:'토폴로지',exact:true}).click();await page.waitForSelector('.react-flow__node');
     await page.reload();await page.waitForSelector('.react-flow__node');await expect(guide).toHaveCount(0);
     await page.getByRole('button',{name:'클라우드 연결'}).click();await expect(guide).toBeVisible();await page.keyboard.press('Escape');await expect(guide).toHaveCount(0);
@@ -127,7 +148,7 @@ test('cost page filters and exports what is shown',async({page})=>{
   await page.goto('/?scenario=standard&view=cost');await page.waitForSelector('.bars');
   await page.getByRole('group',{name:'클라우드 필터'}).getByRole('button',{name:'AWS'}).click();await expect(page.locator('.chart-legend li')).toHaveCount(1);
   await page.getByRole('button',{name:'표 보기'}).click();await expect(page.locator('.cost-trend table tbody tr')).toHaveCount(6);
-  const [file]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'CSV'}).click()]);expect(file.suggestedFilename()).toBe('cloud-atlas-cost.csv');
+  const [file]=await Promise.all([page.waitForEvent('download'),page.getByRole('button',{name:'CSV'}).click()]);expect(file.suggestedFilename()).toBe('cloud-atlas-cost-KRW.csv');
 });
 test('IAM page lists principals across clouds and opens assignments',async({page})=>{
   await page.goto('/?scenario=standard&view=iam');await page.waitForSelector('.data-table');
@@ -150,10 +171,10 @@ test('non-network services open in the inventory, not an empty map',async({page}
 });
 test('a scope chosen on one page applies everywhere and survives back',async({page})=>{
   await page.goto('/?scenario=enterprise');await page.waitForSelector('.kpi-row');
-  const total=Number(await page.locator('.kpi',{hasText:'수집 자원'}).locator('strong').textContent());
+  const total=Number(await page.locator('.kpi',{hasText:/^리소스/}).locator('strong').textContent());
   await page.locator('.scope-picker summary').click();await page.locator('.scope-pop .scope-open',{hasText:'Corp KR'}).click();
   await expect(page.locator('.scope-pop')).toBeHidden();await expect(page.locator('.scope-picker summary')).toContainText('Corp KR');expect(page.url()).toContain('scope=');
-  await expect.poll(async()=>Number(await page.locator('.kpi',{hasText:'수집 자원'}).locator('strong').textContent())).toBeLessThan(total);
+  await expect.poll(async()=>Number(await page.locator('.kpi',{hasText:/^리소스/}).locator('strong').textContent())).toBeLessThan(total);
   for(const name of ['조치 항목','변경 이력','네트워크','노출·방화벽','IAM','비용']){await page.getByRole('button',{name,exact:true}).click();await expect(page.locator('.scope-picker summary')).toContainText('Corp KR');}
   await page.getByRole('button',{name:'토폴로지',exact:true}).click();await settled(page);await expect(page.locator('.map-tab.active')).toContainText('Corp KR');
   await page.getByRole('button',{name:'대시보드',exact:true}).click();await page.getByRole('button',{name:'필터 해제'}).click();

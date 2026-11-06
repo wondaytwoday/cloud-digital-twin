@@ -8,6 +8,7 @@ import { applySites } from './onprem.js';
 import { diffResources } from '../shared/diff.js';
 import { ResourceSchema, validateSnapshot, type Connection, type Link, type Resource } from '../shared/schema.js';
 import type { ScenarioId } from '../shared/scenarios.js';
+import { demoActivity } from './fixtures/activity.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
@@ -53,7 +54,7 @@ async function collectScenario(s:Scenario,now:Date){
   const parts:Normalized[]=[];
   if(s.azure){
     const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
-    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now),{graphToken:async()=>'demo-token'}));
+    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now),{graphToken:async()=>'demo-token',withActivity:false}));
   }
   for(const a of s.aws??[]){const merged={...a.api,...awsIamApi(a.account,a.label,now)};parts.push(await collectAwsAccount(awsTransport(merged),a.account,a.region,a.label));}
   const accounts=[...new Map((s.aws??[]).map(a=>[a.account,a])).values()];
@@ -72,7 +73,7 @@ async function collectScenario(s:Scenario,now:Date){
     const projects=[...new Set(s.gcp.assets.map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];
     const numbers=new Map<string,string>(),policies=gcpPolicies(projects,s.gcp.tree?{id:s.gcp.tree.id,domain:s.gcp.tree.name}:null,numbers);
     const assets=[...s.gcp.assets,...projects.flatMap(gcpServices),...(s.gcp.tree?gcpOrgAssets(s.gcp.tree,numbers):[])],request=gcpTransport(assets,policies,now);
-    parts.push(await collectGcpWith(s.gcp.parent,request),{resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectGcpCost(request,'demo.billing.export',now)});
+    parts.push(await collectGcpWith(s.gcp.parent,request,{withActivity:false}),{resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectGcpCost(request,'demo.billing.export',now)});
   }
   return finish(parts);
 }
@@ -88,7 +89,7 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
   const now=Date.now();
-  return validateSnapshot({version:1,mode:'mock',scenario:id,changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
+  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
 }
 // A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
 function demoChanges(resources:Resource[],now:number){

@@ -1,9 +1,10 @@
+import type { Activity } from '../shared/schema.js';
 import { ResourceSchema, type CostRow, type HierarchyNode, type IamAssignment, type Resource, type Link, type Provider } from '../shared/schema.js';
 import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 // Disk sizes arrive per disk and sometimes as strings; an instance with none reported gets no disk entry rather than a zero.
 const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Number).filter(v=>v>0);return n.length?{'디스크':`${n.reduce((a,b)=>a+b,0)} GiB`}:{};};
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];awsInventory?:{account:string;rows:Raw[]}};
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];awsInventory?:{account:string;rows:Raw[]}};
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
@@ -40,7 +41,7 @@ export function finish(input:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
+  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
 }
 export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
   const resources:Resource[]=[], links:Link[]=[];

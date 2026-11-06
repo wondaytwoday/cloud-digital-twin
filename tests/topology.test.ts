@@ -10,7 +10,7 @@ import type {AddressInfo} from 'node:net';
 import {adjacency,exposures,findPath,impactOf,ingressIds,health,reachable} from '../shared/topology.ts';
 import {finish,normalizeAws} from '../server/normalize.ts';
 import {accountRoles,azureCost,collectAwsAccount,collectAwsCost,collectAwsIam,collectAwsInventory,collectAzureWith,collectGcpAuto,collectGcpCost,costWindow,discoverAzureSubscriptions,parseAccounts} from '../server/collectors.ts';
-import {costSpikes,summarizeCost} from '../shared/cost.ts';
+import {billingCurrencies,convertTo,costSpikes,parseFx,summarizeCost} from '../shared/cost.ts';
 import {cidrOverlaps,hybridLinks,parseCidr,portMatches} from '../shared/network.ts';
 import {findings} from '../shared/findings.ts';
 import {normalizeAwsIam,normalizeAzureIam,normalizeGcpIam} from '../server/normalize.ts';
@@ -166,7 +166,7 @@ test('route tables reach subnets and networks on every provider',async()=>{
 });
 test('history keeps the previous snapshot and diff reports what changed',async()=>{
   const root=await mkdtemp(path.join(tmpdir(),'atlas-')),store=new FileSnapshotStore(root),base=await mockSnapshot('single-vm');
-  const live=(resources:typeof base.resources,collectedAt:string)=>({...base,mode:'live' as const,scenario:undefined,links:[],changes:undefined,collectedAt,resources:resources.map(r=>({...r,metrics:undefined,iam:[]}))});
+  const live=(resources:typeof base.resources,collectedAt:string)=>({...base,mode:'live' as const,scenario:undefined,links:[],changes:undefined,activity:[],collectedAt,resources:resources.map(r=>({...r,metrics:undefined,iam:[]}))});
   const first=live(base.resources,'2026-01-01T00:00:00.000Z');await store.save('aws',first);assert.equal(await store.previous('aws'),null);
   const next=base.resources.filter(r=>r.name!=='igw-main').map(r=>r.name==='web-server'?{...r,status:'stopped'}:r);
   await store.save('aws',live(next,'2026-01-02T00:00:00.000Z'));
@@ -249,6 +249,25 @@ test('GCP falls back to projects when the organization cannot be read',async()=>
   const result=await collectGcpAuto(request);
   assert.deepEqual(result.resources.map(r=>r.name),['n']);assert.deepEqual(result.incomplete,['p2']);
 });
+test('per-project GCP collection still groups projects under their folders',async()=>{
+  const request=async(url:string,init?:{method:string})=>{
+    if(url.includes('organizations:search'))return {organizations:[]};
+    if(url.includes(':getAncestry')){const p=url.match(/projects\/([^:]+):/)![1];if(p==='p3')throw new Error('403');return {ancestor:[{resourceId:{type:'project',id:p}},{resourceId:{type:'folder',id:p==='p1'?'11':'12'}},{resourceId:{type:'folder',id:'10'}},{resourceId:{type:'organization',id:'1'}}]};}
+    if(url.includes('folders:search'))return {folders:[{name:'folders/10',displayName:'Production',parent:'organizations/1'},{name:'folders/11',displayName:'Apps',parent:'folders/10'}]};
+    if(url.includes('/v3/folders/12'))return {name:'folders/12',displayName:'Data',parent:'folders/10'};
+    if(url.includes('/v3/organizations/1'))throw new Error('403');
+    if(url.includes('/v1/projects?'))return {projects:[{projectId:'p1',name:'App One'},{projectId:'p2'},{projectId:'p3',parent:{type:'folder',id:'11'}}]};
+    void init;return {assets:[]};
+  };
+  const result=await collectGcpAuto(request as any),by=new Map(result.hierarchy!.map(n=>[n.id,n]));
+  assert.equal(by.get('gcp:folders/11')?.name,'Apps');assert.equal(by.get('gcp:folders/11')?.parent,'gcp:folders/10');
+  assert.equal(by.get('gcp:folders/12')?.name,'Data');assert.equal(by.get('gcp:folders/10')?.parent,'gcp:organizations/1');
+  assert.equal(by.get('gcp:organizations/1')?.name,'조직 1');
+  const project=(id:string)=>result.hierarchy!.find(n=>n.kind==='project'&&n.nativeId===id)!;
+  assert.equal(project('p1').parent,'gcp:folders/11');assert.equal(project('p1').name,'App One');assert.equal(project('p2').parent,'gcp:folders/12');
+  assert.equal(project('p3').parent,'gcp:folders/11','a project without ancestry keeps its direct parent');
+  assert.ok(result.warnings.some(w=>/Browser/.test(w)),'missing names say which role fixes them');
+});
 test('listed accounts become read roles',()=>{
   assert.deepEqual(accountRoles(parseAccounts('two=222,333'),'AtlasReader'),[{label:'two',roleArn:'arn:aws:iam::222:role/AtlasReader'},{label:'333',roleArn:'arn:aws:iam::333:role/AtlasReader'}]);
 });
@@ -304,6 +323,31 @@ test('cost: a partial month is projected, not compared raw',()=>{
 test('cost: mixed currencies are never added into one headline',()=>{
   const s=summarizeCost([row('2026-10',100),row('2026-10',100,{currency:'KRW',provider:'gcp'})],NOW);
   assert.equal(s.mixed,true);assert.equal(s.currency,null);
+});
+test('cost: mixed currencies are totalled per currency until a rate is set, then in one',()=>{
+  const rows=[row('2026-10',100),row('2026-10',150_000,{currency:'KRW',provider:'azure'}),row('2026-11',50),row('2026-11',70_000,{currency:'KRW',provider:'azure'})];
+  const raw=summarizeCost(rows,NOW);
+  assert.deepEqual(raw.currencyTotals,[{currency:'KRW',current:70_000,previous:150_000},{currency:'USD',current:50,previous:100}]);
+  const fx=parseFx({ATLAS_COST_CURRENCY:'krw',ATLAS_FX_RATES:'USD=1400, bad, EUR=-1'})!;
+  assert.deepEqual(fx,{base:'KRW',rates:{USD:1400},source:'ATLAS_FX_RATES'});
+  const one=summarizeCost(rows,NOW,fx);
+  assert.equal(one.mixed,false);assert.equal(one.currency,'KRW');assert.deepEqual(one.converted,['USD']);
+  assert.equal(one.currentTotal,70_000+50*1400);assert.equal(one.previousTotal,150_000+100*1400);
+  assert.equal(parseFx({}),undefined,'no rates, no conversion');
+  assert.deepEqual(billingCurrencies(rows),[{provider:'aws',currencies:['USD']},{provider:'azure',currencies:['KRW']}]);
+});
+test('cost: the chosen currency is the only one shown, either way round',()=>{
+  const rows=[row('2026-10',100),row('2026-10',140_000,{currency:'KRW',provider:'azure'}),row('2026-10',5,{currency:'EUR',provider:'gcp'})];
+  const fx={base:'KRW',rates:{USD:1400},source:'t'};
+  const krw=summarizeCost(rows,NOW,fx,'KRW'),usd=summarizeCost(rows,NOW,fx,'USD');
+  assert.equal(krw.currency,'KRW');assert.equal(krw.mixed,false);assert.equal(krw.currentTotal,280_000);
+  assert.equal(usd.currency,'USD');assert.equal(usd.currentTotal,200);
+  assert.deepEqual(krw.dropped,[{currency:'EUR',providers:['gcp'],count:1}],'a currency without a rate is left out and reported');
+  assert.equal(convertTo(rows,'USD').rows.length,1,'no rates: only rows already in USD');
+});
+test('cost spikes use a floor that fits the currency',()=>{
+  const krw=[row('2026-09',1000,{currency:'KRW'}),row('2026-10',2000,{currency:'KRW'}),row('2026-09',1_000_000,{currency:'KRW',service:'big'}),row('2026-10',2_000_000,{currency:'KRW',service:'big'})];
+  assert.deepEqual(costSpikes(krw,NOW).map(x=>[x.service,x.currency]),[['big','KRW']],'a 1,000 KRW rise is noise');
 });
 test('cost spikes ignore the partial current month and small noise',()=>{
   const rows=[row('2026-09',1000),row('2026-10',1800),row('2026-11',100),row('2026-09',10,{service:'small'}),row('2026-10',40,{service:'small'})];
@@ -432,8 +476,8 @@ test('runner: progress names the current stage, skips cost by policy, and settle
   configureCollector({azure:{detect:async()=>'a',collect},aws:none,gcp:{detect:async()=>'g',collect:async()=>{throw new Error('boom');}}});
   const status=await runCollection(store,()=>{}),stages=(p:'azure'|'aws'|'gcp')=>Object.fromEntries(status.providers[p].stages!.map(s=>[s.id,s.state]));
   assert.ok(seen.includes('auth:done'));assert.equal(status.pid,process.pid);assert.ok(status.startedAt);
-  assert.deepEqual(stages('azure'),{auth:'done',scopes:'done',resources:'done',iam:'done',cost:'done',save:'done'});
-  assert.deepEqual(stages('aws'),{auth:'failed',scopes:'skipped',resources:'skipped',iam:'skipped',cost:'skipped',save:'skipped'});
+  assert.deepEqual(stages('azure'),{auth:'done',scopes:'done',resources:'done',iam:'done',activity:'done',cost:'done',save:'done'});
+  assert.deepEqual(stages('aws'),{auth:'failed',scopes:'skipped',resources:'skipped',iam:'skipped',activity:'skipped',cost:'skipped',save:'skipped'});
   assert.match(status.providers.aws.message!,/자격 증명을 찾지 못했습니다/);assert.equal(status.providers.gcp.state,'failed');
   assert.equal(providerProgress(status.providers.aws.stages),1,'a skipped cloud does not hold the bar back');assert.equal(overallProgress(status)>.9,true);
   configureCollector({azure:{detect:async()=>'a',collect:()=>fakeResult('web-tier')},aws:none,gcp:none});

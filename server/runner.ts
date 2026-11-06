@@ -67,7 +67,7 @@ const realDrivers:CollectorDrivers={
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
+export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};

@@ -140,6 +140,9 @@ npm run test:e2e
 | `src/graph.tsx` | 지도 노드와 선 렌더링 |
 | `src/App.tsx` | 화면 전환, 탭, URL, 강조 표시 |
 | `src/pages/` | 대시보드, 조치 항목, 변경 이력, 리소스, 네트워크, 노출·방화벽, IAM, 비용 화면 |
+| `src/pages/Audit.tsx`, `server/audit.ts` | 보안 › 접근 로그. 포털 접근(로그인·실패·거부·조회·열람·수집·내보내기)은 서버가 `data/audit/YYYY-MM.jsonl`에 남기고 전체 범위 사용자만 `/api/audit`로 읽습니다. 클라우드 변경은 Azure Activity Log, CloudTrail LookupEvents, GCP Admin Activity 감사 로그에서 최근 7일의 쓰기·삭제·작업을 수집합니다. 목 모드는 예시 기록과 메모리 기록만 쓰고 IP를 남기지 않습니다 |
+| `src/currency.ts`, `shared/cost.ts` | 비용 표시 통화(원화·달러). 고른 통화로 모두 환산하고 두 통화를 섞어 더하지 않습니다. 환율은 화면 입력 → `ATLAS_FX_RATES` → 목 모드 예시 환율 순. 환율이 없는 통화는 빼고 몇 건을 뺐는지 알립니다 |
+| `src/ui/viz.tsx` | 모든 페이지가 쓰는 도넛·막대·열·스파크라인·비율 막대 |
 | `src/pages/Resources.tsx`, `shared/capacity.ts` | 리소스 페이지. 분류별 차트, VM vCPU·메모리·디스크·GPU 용량과 사용률. 사용률은 목데이터에만 있고 실제 수집은 모니터링 연동 전까지 할당 용량만 보입니다 |
 | `src/ui/`, `components.json`, `src/index.css` | shadcn/ui 컴포넌트(Card, Chart, Tabs, Table, Badge). 토큰은 기존 팔레트에 연결했고, Tailwind는 `src/ui`와 리소스 페이지만 스캔하며 프리플라이트 없이 CSS 레이어로 기존 스타일 아래에 둡니다 |
 | `src/ScopeBar.tsx` | 모든 화면에 적용되는 클라우드·관리 범위 필터 |

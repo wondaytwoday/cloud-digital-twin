@@ -1,6 +1,6 @@
 import React,{useState,useEffect,useMemo,useRef,useCallback,lazy,Suspense} from 'react';
 import {ReactFlow,ReactFlowProvider,Background,MiniMap,useReactFlow,useNodesInitialized,useStore,Panel,BackgroundVariant,type NodeMouseHandler} from '@xyflow/react';
-import {Waypoints,Search,Plug,RefreshCw,Download,Pause,Play,Plus,Minus,Scan,ShieldCheck,Network,X,Check,Route,Table2,LayoutDashboard,Wallet,KeyRound,Share2,Globe,AlertTriangle,CircleOff,ChevronRight,PanelLeft,PanelLeftClose,Layers3,ListChecks,History,ShieldAlert,FileJson,Image,FileCode2,LogOut} from 'lucide-react';
+import {Waypoints,Search,Plug,RefreshCw,Download,Pause,Play,Plus,Minus,Scan,ShieldCheck,Network,X,Check,Route,Table2,LayoutDashboard,Wallet,KeyRound,Share2,Globe,AlertTriangle,CircleOff,ChevronRight,PanelLeft,PanelLeftClose,Layers3,ListChecks,History,ShieldAlert,ScrollText,FileJson,Image,FileCode2,LogOut} from 'lucide-react';
 import {validateSnapshot,type Snapshot,type Resource} from '../shared/schema';
 import {isScenario,scenarios,type ScenarioId} from '../shared/scenarios';
 import {ancestors,findPath,health,impactOf,ingressIds,reachable} from '../shared/topology';
@@ -17,6 +17,7 @@ import {NetworkPage} from './pages/Network';
 import {SecurityPage} from './pages/Security';
 import {ChangesPage} from './pages/Changes';
 import {FindingsPage} from './pages/Findings';
+import {AuditPage} from './pages/Audit';
 // Charts are the heaviest dependency and only this page uses them, so it loads on first visit.
 const ResourcesPage=lazy(()=>import('./pages/Resources').then(m=>({default:m.ResourcesPage})));
 import {ScopeBar,ScopePanel} from './ScopeBar';
@@ -25,10 +26,10 @@ import {Onboarding,type CollectState} from './Onboarding';
 import {CollectProgress,ProgressBar,percent} from './CollectProgress';
 import {ScopeIcon} from './ScopeTree';
 import {downloadDrawio,downloadJson,downloadPng,downloadSvg} from './exporters';
-type View='dashboard'|'findings'|'changes'|'scopes'|'map'|'inventory'|'network'|'security'|'iam'|'cost';
-const VIEWS:View[]=['dashboard','findings','changes','scopes','map','inventory','network','security','iam','cost'];
+type View='dashboard'|'findings'|'changes'|'scopes'|'map'|'inventory'|'network'|'security'|'iam'|'audit'|'cost';
+const VIEWS:View[]=['dashboard','findings','changes','scopes','map','inventory','network','security','iam','audit','cost'];
 // These pages read the selection from the scope bar. Only the map shows it as tabs and a tree instead.
-const SCOPE_BAR_VIEWS:View[]=['dashboard','findings','changes','inventory','network','security','iam','cost'];
+const SCOPE_BAR_VIEWS:View[]=['dashboard','findings','changes','inventory','network','security','iam','audit','cost'];
 const GUIDE_KEY='atlas.guide.seen';
 // Storage can be missing or blocked; then the guide just shows again next visit.
 const guideSeen=()=>{try{return localStorage.getItem(GUIDE_KEY)==='1';}catch{return false;}};
@@ -42,7 +43,7 @@ type Route={scenario:ScenarioId;view:View;tab:string};
 const readRoute=():Route=>{const q=new URLSearchParams(location.search),s=q.get('scenario'),v=q.get('view');return{scenario:isScenario(s)?s:'standard',view:VIEWS.includes(v as View)?v as View:'dashboard',tab:q.get('scope')??ALL};};
 const routeUrl=({scenario,view,tab}:Route)=>{const q=new URLSearchParams({scenario});if(view!=='dashboard')q.set('view',view);if(tab!==ALL)q.set('scope',tab);return `${location.pathname}?${q}`;};
 const tabLabel=(index:ScopeIndex|null,tab:string)=>tab===ALL?'전체 지도':tab.startsWith('provider:')?shortProvider[tab.slice(9)]:index?.nodes.get(tab)?.name??tab;
-const NAV=[['개요',[['dashboard',LayoutDashboard,'대시보드'],['findings',ListChecks,'조치 항목'],['changes',History,'변경 이력']]],['인프라',[['map',Share2,'토폴로지'],['inventory',Table2,'리소스'],['network',Globe,'네트워크']]],['보안',[['security',ShieldAlert,'노출·방화벽'],['iam',KeyRound,'IAM']]],['비용',[['cost',Wallet,'비용']]]] as const;
+const NAV=[['개요',[['dashboard',LayoutDashboard,'대시보드'],['findings',ListChecks,'조치 항목'],['changes',History,'변경 이력']]],['인프라',[['map',Share2,'토폴로지'],['inventory',Table2,'리소스'],['network',Globe,'네트워크']]],['보안',[['security',ShieldAlert,'노출·방화벽'],['iam',KeyRound,'IAM'],['audit',ScrollText,'접근 로그']]],['비용',[['cost',Wallet,'비용']]]] as const;
 function Login({onDone}:{onDone:()=>void}){
   const [token,setToken]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   const submit=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setError('');try{const r=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});if(!r.ok){setError((await r.json()).error??'로그인에 실패했습니다.');return;}onDone();}catch{setError('서버에 연결하지 못했습니다.');}finally{setBusy(false);}};
@@ -61,6 +62,9 @@ function Workspace(){
   const [onboarding,setOnboarding]=useState(false),[collect,setCollect]=useState<CollectState|null>(null),finishedAt=useRef<string|undefined>(undefined);
   const collectRunning=useRef(false);collectRunning.current=!!collect?.running;
   const inFlight=useRef<AbortController|null>(null),canvasRef=useRef<HTMLDivElement>(null);
+  // What was opened goes to the portal audit log. Losing a record must never break the page, so failures are ignored.
+  const track=useCallback((action:'view'|'open'|'export',target:string,detail?:string)=>{fetch('/api/audit/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,target,detail}),keepalive:true}).catch(()=>{});},[]);
+  useEffect(()=>{track('view',initial.view);},[track,initial.view]);
   // Only the newest request may land, otherwise a slow scenario overwrites the one the user just picked.
   const load=useCallback(async()=>{
     inFlight.current?.abort();const controller=new AbortController();inFlight.current=controller;
@@ -128,7 +132,7 @@ function Workspace(){
     setTabs(cur=>{const kept=cur.filter(t=>t===ALL||t!==active);return kept.includes(tab)?kept:[...kept,tab];});showTab(snapshot,index,tab,active);go({tab});
   },[snapshot,index,active,showTab,go]);
   const closeTab=(tab:string)=>{setTabs(cur=>cur.filter(t=>t!==tab));tabViews.current.delete(tab);if(tab===active&&snapshot&&index){const remaining=tabs.filter(t=>t!==tab),next=remaining[remaining.length-1]??ALL;showTab(snapshot,index,next);go({tab:next},true);}};
-  const changeView=(v:View)=>{setView(v);if(v!=='map')clearModes();pendingFit.current={};go({view:v});};
+  const changeView=(v:View)=>{track('view',v);setView(v);if(v!=='map')clearModes();pendingFit.current={};go({view:v});};
   useEffect(()=>{
     const onPop=()=>{const r=readRoute();setView(r.view);if(r.scenario!==scenario){setScenario(r.scenario);setTabs(r.tab===ALL?[ALL]:[ALL,r.tab]);setActive(r.tab);return;}
       if(r.tab!==active&&snapshot&&index){setTabs(cur=>cur.includes(r.tab)?cur:[...cur,r.tab]);showTab(snapshot,index,r.tab,active);}else pendingFit.current={};};
@@ -237,11 +241,12 @@ function Workspace(){
   const onNodeDoubleClick:NodeMouseHandler<FlowNode>=(_,n)=>{if(n.data.expandable&&n.data.item.resource)stableToggle.current(n.id);};
   const changeScenario=(id:ScenarioId)=>{setScenario(id);setTabs([ALL]);setActive(ALL);clearModes();setQuery('');setTopology(EMPTY);history.pushState(null,'',routeUrl({scenario:id,view,tab:ALL}));};
   const fileBase=`cloud-atlas-${snapshot?.scenario??snapshot?.mode??'map'}`;
-  const runExport=async(run:()=>void|Promise<void>)=>{(document.activeElement as HTMLElement|null)?.closest('details')?.removeAttribute('open');try{await run();setToast('파일을 내보냈습니다.');}catch(e){console.error(e);setToast('내보내기에 실패했습니다.');}};
+  const runExport=async(run:()=>void|Promise<void>)=>{track('export',view,'지도·스냅샷 내보내기');(document.activeElement as HTMLElement|null)?.closest('details')?.removeAttribute('open');try{await run();setToast('파일을 내보냈습니다.');}catch(e){console.error(e);setToast('내보내기에 실패했습니다.');}};
   const q=query.trim().toLowerCase();
   const matches=useMemo(()=>q&&snapshot?snapshot.resources.filter(r=>`${r.name} ${r.ip??''} ${r.cidr??''} ${r.type} ${snapshot.scopeLabels[r.scope]??''}`.toLowerCase().includes(q)):[],[snapshot,q]);
   const scopeMatches=useMemo(()=>q&&snapshot?snapshot.hierarchy.filter(n=>`${n.name} ${n.nativeId}`.toLowerCase().includes(q)).slice(0,5):[],[snapshot,q]);
   const resource=selected?byId.get(selected):undefined;
+  useEffect(()=>{if(resource)track('open',resource.name);},[resource,track]);
   const edgeKinds=new Set(topology.edges.map(e=>e.kind)),hasFlows=!!snapshot?.links.some(l=>l.kind==='simulation'),live=snapshot?.mode==='live';
   const crumbs=index&&active!==ALL?(active.startsWith('provider:')?[{id:active,name:providerNames[active.slice(9)]}]:[{id:`provider:${index.nodes.get(active)?.provider}`,name:providerNames[index.nodes.get(active)?.provider??'']},...index.pathTo(active)]):[];
   const stats=useMemo(()=>{const real=snapshot?.resources.filter(r=>r.kind!=='firewall'&&r.kind!=='subnet')??[];return{stopped:real.filter(r=>health(r.status)==='stopped').length,warn:real.filter(r=>health(r.status)==='warn').length};},[snapshot]);
@@ -252,10 +257,10 @@ function Workspace(){
   const list=useMemo(()=>snapshot?findings(snapshot,undefined,focus):[],[snapshot,focus]);
   const openFinding=(f:Finding)=>{if(!f.target)return;if(f.target.view==='map'&&f.target.id){selectById(f.target.id);return;}changeView(f.target.view);};
   const goTo=(v:View)=>changeView(v);
-  const saveCsv=(content:string,name:string)=>{const url=URL.createObjectURL(new Blob(['\ufeff'+content],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);setToast('CSV를 내보냈습니다.');};
+  const saveCsv=(content:string,name:string)=>{track('export',view,name);const url=URL.createObjectURL(new Blob(['\ufeff'+content],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);setToast('CSV를 내보냈습니다.');};
   const problems=collect?Object.values(collect.providers).filter(p=>p.state==='failed'||p.state==='unauthenticated'||p.state==='partial').length:0;
   const closeGuide=()=>{markGuideSeen();setDialog(false);setFirstGuide(false);};
-  const body=needsLogin?<Login onDone={load}/>:onboarding?<Onboarding state={collect} onCollect={startCollect} onGuide={()=>setDialog(true)}/>:error?<div className="load-state" role="alert"><AlertTriangle size={30}/><h2>데이터를 불러오지 못했습니다</h2><p>{error}</p><button className="button" onClick={load}>다시 시도</button></div>:!snapshot||!index?<div className="skeleton" role="status"><RefreshCw className="spin"/>인프라 데이터를 불러오는 중입니다.</div>:SCOPE_BAR_VIEWS.includes(view)?<><ScopeBar snapshot={snapshot} index={index} active={active} focus={focus} label={active===ALL?'전체 범위':tabLabel(index,active)} onPick={selectScope} onHome={()=>changeView('scopes')}/><div className="page-host">{view==='dashboard'?<Dashboard snapshot={snapshot} focus={focus} list={list} go={goTo} openFinding={openFinding}/>:view==='findings'?<FindingsPage list={list} mock={snapshot.mode==='mock'} openFinding={openFinding}/>:view==='changes'?<ChangesPage snapshot={snapshot} focus={focus} openResource={selectById}/>:view==='cost'?<CostPage snapshot={snapshot} focus={focus} onScope={selectScope} onCsv={saveCsv}/>:view==='iam'?<IamPage snapshot={snapshot} focus={focus} list={list} openFinding={openFinding}/>:view==='inventory'?<Suspense fallback={<div className="skeleton" role="status"><RefreshCw className="spin"/>리소스 화면을 불러오는 중입니다.</div>}><ResourcesPage snapshot={snapshot} focus={focus} query={query} onOpen={focusResource}/></Suspense>:view==='security'?<SecurityPage snapshot={snapshot} focus={focus} openResource={selectById}/>:<NetworkPage snapshot={snapshot} focus={focus} openResource={selectById}/>}</div></>:view==='scopes'?<ScopeHome snapshot={snapshot} index={index} onOpen={openTab} onConnect={()=>setDialog(true)} onSelectResource={selectById}/>:<div className="work">{sidebar}<main className="stage">
+  const body=needsLogin?<Login onDone={load}/>:onboarding?<Onboarding state={collect} onCollect={startCollect} onGuide={()=>setDialog(true)}/>:error?<div className="load-state" role="alert"><AlertTriangle size={30}/><h2>데이터를 불러오지 못했습니다</h2><p>{error}</p><button className="button" onClick={load}>다시 시도</button></div>:!snapshot||!index?<div className="skeleton" role="status"><RefreshCw className="spin"/>인프라 데이터를 불러오는 중입니다.</div>:SCOPE_BAR_VIEWS.includes(view)?<><ScopeBar snapshot={snapshot} index={index} active={active} focus={focus} label={active===ALL?'전체 범위':tabLabel(index,active)} onPick={selectScope} onHome={()=>changeView('scopes')}/><div className="page-host">{view==='dashboard'?<Dashboard snapshot={snapshot} focus={focus} list={list} go={goTo} openFinding={openFinding}/>:view==='findings'?<FindingsPage list={list} mock={snapshot.mode==='mock'} openFinding={openFinding}/>:view==='changes'?<ChangesPage snapshot={snapshot} focus={focus} openResource={selectById}/>:view==='cost'?<CostPage snapshot={snapshot} focus={focus} onScope={selectScope} onCsv={saveCsv}/>:view==='iam'?<IamPage snapshot={snapshot} focus={focus} list={list} openFinding={openFinding}/>:view==='inventory'?<Suspense fallback={<div className="skeleton" role="status"><RefreshCw className="spin"/>리소스 화면을 불러오는 중입니다.</div>}><ResourcesPage snapshot={snapshot} focus={focus} query={query} onOpen={focusResource}/></Suspense>:view==='audit'?<AuditPage snapshot={snapshot} focus={focus} openResource={selectById} onCsv={saveCsv}/>:view==='security'?<SecurityPage snapshot={snapshot} focus={focus} openResource={selectById}/>:<NetworkPage snapshot={snapshot} focus={focus} openResource={selectById}/>}</div></>:view==='scopes'?<ScopeHome snapshot={snapshot} index={index} onOpen={openTab} onConnect={()=>setDialog(true)} onSelectResource={selectById}/>:<div className="work">{sidebar}<main className="stage">
       <div className="map-tabs" role="tablist" aria-label="열린 범위">{!sideOpen&&<button className="icon-button side-toggle-hide" onClick={()=>setSideOpen(true)} aria-label="범위 패널 펼치기"><PanelLeft size={16}/></button>}{tabs.map(t=>{const node=index.nodes.get(t);return <div key={t} className={`map-tab ${t===active?'active':''}`}><button role="tab" aria-selected={t===active} onClick={()=>{if(t!==active)openTab(t)}} title={tabLabel(index,t)}>{t===ALL?<Layers3 size={14}/>:t.startsWith('provider:')?<ProviderMark provider={t.slice(9)}/>:node&&<ScopeIcon node={node} size={15}/>}<span>{tabLabel(index,t)}</span></button>{t!==ALL&&<button className="tab-close" onClick={()=>closeTab(t)} aria-label={`${tabLabel(index,t)} 탭 닫기`}><X size={13}/></button>}</div>})}</div>
       <div className="map-bar"><nav className="crumbs" aria-label="현재 범위"><button onClick={()=>changeView('scopes')}>관리 범위</button>{crumbs.length===0&&<><ChevronRight size={13}/><span aria-current="page" className="crumb-now">전체 지도</span></>}{crumbs.map((c,i)=><span key={c.id} style={{display:'contents'}}><ChevronRight size={13}/><button aria-current={i===crumbs.length-1?'page':undefined} onClick={()=>openTab(c.id)}>{c.name}</button></span>)}</nav>{view==='map'&&topology.nodes.length>0&&toolbar}</div>
       <div ref={canvasRef} className={`canvas ${farOut?'lod-far':''} ${picking?'is-picking':''}`} onKeyDown={onCanvasKey}><ReactFlow nodes={decorated.nodes} edges={decorated.edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick} onEdgeClick={(_,e)=>{setEdge(e.data!.bundle);setSelected(null);setImpact(null);setTrace(null);}} onPaneClick={()=>{if(!picking)clearModes();}} minZoom={.03} maxZoom={1.8} nodesConnectable={false} nodesDraggable={false} edgesReconnectable={false} elevateNodesOnSelect={false} elevateEdgesOnSelect={false} zoomOnDoubleClick={false} onlyRenderVisibleElements={decorated.nodes.length>200} deleteKeyCode={null} proOptions={{hideAttribution:true}}>
