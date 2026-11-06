@@ -7,7 +7,9 @@ import {ancestors,findPath,health,impactOf,ingressIds,reachable} from '../shared
 import {buildScopeIndex,focusFor,hierarchyNouns,inScope,type Focus,type ScopeIndex} from '../shared/hierarchy';
 import {ResourceNode,FrameNode,SummaryNode,RoutedEdge,ProviderMark,ResourceIcon,kindNames,type Emphasis,type FlowNode,type FlowEdge} from './graph';
 import {computeTopology,defaultExpanded,providerNames,regionId,startingLevel,type Bundle,type Topology} from './layout';
-import {EdgeDetail,ImpactPanel,PathPanel,ResourceDetail} from './Detail';
+import {EdgeDetail,ImpactPanel,ResourceDetail} from './Detail';
+import {FlowPanel,type FlowState} from './FlowPanel';
+import {analyzeFlow} from '../shared/flow';
 import {ScopeHome} from './ScopeHome';
 import {ConnectGuide} from './ConnectGuide';
 import {Dashboard} from './pages/Dashboard';
@@ -54,7 +56,7 @@ function Workspace(){
   const [scenario,setScenario]=useState<ScenarioId>(initial.scenario),[view,setView]=useState<View>(initial.view),[tabs,setTabs]=useState<string[]>(initial.tab===ALL?[ALL]:[ALL,initial.tab]),[active,setActive]=useState(initial.tab);
   const [snapshot,setSnapshot]=useState<Snapshot|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[layingOut,setLayingOut]=useState(false);
   const [level,setLevel]=useState(0),[expanded,setExpanded]=useState<Set<string>>(new Set()),[policy,setPolicy]=useState(false),[flow,setFlow]=useState(true),[playing,setPlaying]=useState(true);
-  const [selected,setSelected]=useState<string|null>(null),[edge,setEdge]=useState<Bundle|null>(null),[trace,setTrace]=useState<{from:string;to:string}|null>(null),[impact,setImpact]=useState<string|null>(null);
+  const [selected,setSelected]=useState<string|null>(null),[edge,setEdge]=useState<Bundle|null>(null),[trace,setTrace]=useState<FlowState|null>(null),[impact,setImpact]=useState<string|null>(null);
   const [query,setQuery]=useState(''),[dialog,setDialog]=useState(false),[firstGuide,setFirstGuide]=useState(false),[toast,setToast]=useState(''),[topology,setTopology]=useState<Topology>(EMPTY),[fitTick,setFitTick]=useState(0),[sideOpen,setSideOpen]=useState(true);
   const farOut=useStore(s=>s.transform[2]<.5),rf=useReactFlow(),nodesReady=useNodesInitialized(),pendingFit=useRef<{ids?:string[];anchor?:{id:string;x:number;y:number}}|null>({}),searchRef=useRef<HTMLInputElement>(null);
   const tabViews=useRef(new Map<string,{expanded:Set<string>;level:number}>());
@@ -151,7 +153,9 @@ function Workspace(){
     };
     addEventListener('keydown',onKey);return()=>removeEventListener('keydown',onKey);
   },[dialog,clearModes]);
-  const path=useMemo(()=>trace?findPath(model,trace.from,[trace.to]):[],[model,trace]);
+  // The path shown is the analysed one: route hops and devices, never containment.
+  const flowResult=useMemo(()=>snapshot&&trace?analyzeFlow(snapshot,trace):null,[snapshot,trace]);
+  const path=useMemo(()=>flowResult?flowResult.path.map(h=>h.id).filter((x):x is string=>!!x):[],[flowResult]);
   const impactResult=useMemo(()=>snapshot&&impact?impactOf(snapshot.resources,snapshot.links,impact):null,[snapshot,impact]);
   // Keeps the toggled container under the pointer so the rest of the map reflows around a fixed point.
   function toggle(id:string){
@@ -219,16 +223,16 @@ function Workspace(){
   const startTrace=(id:string)=>{
     if(!snapshot)return;
     const nearest=findPath(model,id,ingressIds(snapshot.resources)),others=[...reachable(model,[id])].filter(x=>x!==id&&byId.get(x)?.kind!=='subnet'),to=nearest[nearest.length-1]??others[others.length-1]??id;
-    setImpact(null);setEdge(null);setPicking(null);setActiveHop(null);setTrace({from:id,to});leaveScopeForAnalysis();
-    const hops=findPath(model,id,[to]);reveal(hops);pendingFit.current={ids:hops};
+    setImpact(null);setEdge(null);setPicking(null);setActiveHop(null);const next={from:id,to,protocol:'tcp' as const,port:443};setTrace(next);leaveScopeForAnalysis();
+    const hops=analyzeFlow(snapshot,next).path.map(h=>h.id).filter((x):x is string=>!!x);reveal(hops);pendingFit.current={ids:hops};
   };
-  const changeTrace=(from:string,to:string)=>{setTrace({from,to});setActiveHop(null);const hops=findPath(model,from,[to]);reveal(hops);pendingFit.current={ids:hops};};
+  const changeTrace=(next:FlowState)=>{setTrace(next);setActiveHop(null);if(!snapshot)return;const hops=analyzeFlow(snapshot,next).path.map(h=>h.id).filter((x):x is string=>!!x);reveal(hops);pendingFit.current={ids:hops};};
   const focusHop=(id:string)=>{setActiveHop(id);reveal([id]);pendingFit.current={ids:[id]};setFitTick(t=>t+1);};
   const startImpact=(id:string)=>{setTrace(null);setEdge(null);setImpact(id);leaveScopeForAnalysis();pendingFit.current={};setFitTick(t=>t+1);};
   const activate=(n:FlowNode)=>{
     const r=n.data.item.resource;
     if(!r){if(n.data.expandable)stableToggle.current(n.id);return;}
-    if(picking&&trace&&r.kind!=='firewall'){changeTrace(picking==='from'?r.id:trace.from,picking==='to'?r.id:trace.to);setPicking(null);return;}
+    if(picking&&trace&&r.kind!=='firewall'){changeTrace({...trace,from:picking==='from'?r.id:trace.from,to:picking==='to'?r.id:trace.to});setPicking(null);return;}
     setEdge(null);setImpact(null);setTrace(null);setSelected(r.id);
   };
   // Keyboard parity for the map: React Flow focuses nodes but only fires click handlers for the mouse.
@@ -252,7 +256,7 @@ function Workspace(){
   const crumbs=index&&active!==ALL?(active.startsWith('provider:')?[{id:active,name:providerNames[active.slice(9)]}]:[{id:`provider:${index.nodes.get(active)?.provider}`,name:providerNames[index.nodes.get(active)?.provider??'']},...index.pathTo(active)]):[];
   const stats=useMemo(()=>{const real=snapshot?.resources.filter(r=>r.kind!=='firewall'&&r.kind!=='subnet')??[];return{stopped:real.filter(r=>health(r.status)==='stopped').length,warn:real.filter(r=>health(r.status)==='warn').length};},[snapshot]);
   const scopePath=resource&&index?index.pathTo(`${resource.provider}:scope:${resource.scope}`):[];
-  const panel=!snapshot||view!=='map'?null:trace?<PathPanel snapshot={snapshot} from={trace.from} to={trace.to} path={path} activeHop={activeHop} picking={picking} onPick={setPicking} onChange={changeTrace} onSelect={focusHop} onClose={()=>{setTrace(null);setPicking(null);setActiveHop(null);}}/>:impact&&impactResult?<ImpactPanel snapshot={snapshot} id={impact} lost={impactResult.lost} onSelect={selectById} onClose={()=>setImpact(null)}/>:edge?<EdgeDetail bundle={edge} snapshot={snapshot} onSelect={id=>{setEdge(null);setSelected(id)}} onClose={()=>setEdge(null)}/>:resource?<ResourceDetail resource={resource} snapshot={snapshot} onSelect={selectById} onClose={()=>setSelected(null)} onTrace={startTrace} onImpact={startImpact} canImpact={ingressIds(snapshot.resources).length>0} scopePath={scopePath} onOpenScope={openTab}/>:null;
+  const panel=!snapshot||view!=='map'?null:trace&&flowResult?<FlowPanel snapshot={snapshot} state={trace} result={flowResult} activeHop={activeHop} picking={picking} onPick={setPicking} onChange={changeTrace} onSelect={focusHop} onClose={()=>{setTrace(null);setPicking(null);setActiveHop(null);}}/>:impact&&impactResult?<ImpactPanel snapshot={snapshot} id={impact} lost={impactResult.lost} onSelect={selectById} onClose={()=>setImpact(null)}/>:edge?<EdgeDetail bundle={edge} snapshot={snapshot} onSelect={id=>{setEdge(null);setSelected(id)}} onClose={()=>setEdge(null)}/>:resource?<ResourceDetail resource={resource} snapshot={snapshot} onSelect={selectById} onClose={()=>setSelected(null)} onTrace={startTrace} onImpact={startImpact} canImpact={ingressIds(snapshot.resources).length>0} scopePath={scopePath} onOpenScope={openTab}/>:null;
   const sidebar=index&&snapshot&&sideOpen&&<aside className="sidebar side-toggle-hide" aria-label="관리 범위 탐색"><div className="side-head">관리 범위<button className="icon-button" onClick={()=>setSideOpen(false)} aria-label="범위 패널 접기"><PanelLeftClose size={16}/></button></div><div className="side-scroll"><ScopePanel snapshot={snapshot} index={index} active={active} allLabel="전체 지도" onPick={openTab}/></div></aside>;
   const toolbar=snapshot&&<div className="bar-tools"><span className="bar-label">상세</span><div className="segmented" role="group" aria-label="상세 수준">{LEVELS.map((l,i)=><button key={l} className={level===i?'active':''} aria-pressed={level===i} onClick={()=>applyLevel(snapshot,i)}>{l}</button>)}</div><span className="tool-sep"/><button className={`tool ${policy?'on':''}`} aria-pressed={policy} onClick={()=>setPolicy(!policy)} title="NSG·보안 그룹·방화벽 규칙을 적용 관계로 표시"><ShieldCheck size={14}/>정책</button>{hasFlows&&<button className={`tool ${flow?'on':''}`} aria-pressed={flow} disabled={live} title={live?'실제 로그 연동 전입니다.':'시연용 트래픽 표시'} onClick={()=>setFlow(!flow)}><Waypoints size={14}/>트래픽</button>}{flow&&hasFlows&&<button className="tool icon" onClick={()=>setPlaying(!playing)} aria-label={playing?'트래픽 일시정지':'트래픽 재생'}>{playing?<Pause size={12}/>:<Play size={12}/>}</button>}<span className="tool-sep"/><button className={`tool ${trace?'on':''}`} aria-pressed={!!trace} onClick={()=>{if(trace)setTrace(null);else{const start=selected&&byId.get(selected)?.kind!=='firewall'?selected:snapshot.resources.find(r=>r.kind==='compute'&&health(r.status)==='ok'&&inFocus(r))?.id??snapshot.resources.find(r=>r.kind==='compute')?.id??snapshot.resources[0].id;startTrace(start);}}}><Route size={14}/>경로 추적</button><details className="legend-pop menu-pop"><summary>범례</summary><div className="legend">{edgeKinds.has('hybrid')&&<span><i className="line hybrid"/>전용선·VPN</span>}{edgeKinds.has('peering')&&<span><i className="line peering"/>피어링</span>}{edgeKinds.has('attachment')&&<span><i className="line attachment"/>연결</span>}{policy&&<span><i className="line policy"/>정책 적용</span>}{flow&&hasFlows&&<span><i className="line flow"/>시연 트래픽</span>}{stats.warn>0&&<span><AlertTriangle size={12} className="ico-warn"/>이상</span>}{stats.stopped>0&&<span><CircleOff size={12}/>중지</span>}</div></details>{layingOut&&<span className="tool-busy" role="status"><RefreshCw size={13} className="spin"/>배치 중</span>}</div>;
   const list=useMemo(()=>snapshot?findings(snapshot,undefined,focus):[],[snapshot,focus]);

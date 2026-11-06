@@ -63,8 +63,8 @@ export function Attention({snapshot,onSelect}:{snapshot:Snapshot;onSelect:(id:st
     {wide.length>0&&<><h2>넓은 인바운드 규칙 <span className="count">{wide.length}</span></h2>{wide.map(r=><button key={r.id} className="relation-row" onClick={()=>onSelect(r.id)}><ShieldCheck size={15}/><span>{r.name}<small>{scopeName(snapshot,r.scope)}</small></span><ArrowUpRight size={13}/></button>)}</>}
     {!!snapshot.warnings.length&&<details className="warnings"><summary>수집 범위 메모 {snapshot.warnings.length}건</summary>{snapshot.warnings.map((w,i)=><p key={i}>{w}</p>)}</details>}</>;
 }
-type Picking='from'|'to'|null;
-function ResourcePicker({label,value,options,onChange,picking,onPick}:{label:string;value:string;options:Resource[];onChange:(id:string)=>void;picking:boolean;onPick:()=>void}){
+export type Picking='from'|'to'|null;
+export function ResourcePicker({label,value,options,onChange,picking,onPick}:{label:string;value:string;options:Resource[];onChange:(id:string)=>void;picking:boolean;onPick:()=>void}){
   const current=options.find(o=>o.id===value),[text,setText]=useState(''),[open,setOpen]=useState(false),[cursor,setCursor]=useState(0),root=useRef<HTMLDivElement>(null);
   const shown=useMemo(()=>{const q=text.trim().toLowerCase();return (q?options.filter(o=>`${o.name} ${o.ip??''}`.toLowerCase().includes(q)):options).slice(0,40);},[text,options]);
   useEffect(()=>{setCursor(0)},[text,open]);
