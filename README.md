@@ -119,6 +119,8 @@ npm run collect -- --provider aws --regions ap-northeast-2
 |---|---|
 | `DATA_MODE` | `mock`(기본) 또는 `live` |
 | `PORT` | 서버 포트. 지정하면 그 포트로만 실행 (기본 4317, 사용 중이면 다음 포트) |
+| `ATLAS_HOST` | 바인딩 주소. 기본 `127.0.0.1`. `0.0.0.0` 등 공유 주소에서 실제 데이터를 제공하려면 `ACCESS_TOKENS`가 필수이며, 없으면 서버가 시작하지 않음 |
+| `ATLAS_TRUST_PROXY` | 리버스 프록시 뒤에서 `X-Forwarded-For`를 믿을 프록시 주소(`loopback`, `10.0.0.5`) 또는 홉 수(`1`). 모든 프록시 신뢰(`true`)는 거부 |
 | `SNAPSHOT_DIR` | 스냅샷과 이력 저장 위치 (기본 `data/`) |
 | `ACCESS_TOKENS` | 접근 토큰 목록. 형식은 아래 참고 |
 | `ATLAS_COLLECT_MINUTES` | 자동 수집 주기(분). 기본 60, 0이면 끔 |
@@ -136,7 +138,7 @@ npm run collect -- --provider aws --regions ap-northeast-2
 
 ## 접근 제어
 
-실제 데이터 모드는 기본적으로 닫혀 있습니다. `npm run live`처럼 127.0.0.1에만 열 때를 제외하면, `ACCESS_TOKENS`가 없을 때 데이터를 제공하지 않습니다.
+실제 데이터 모드는 기본적으로 닫혀 있습니다. 팀이 함께 쓰는 공유 서버는 `ATLAS_HOST`로 주소를 열고 `ACCESS_TOKENS`를 반드시 지정합니다. TLS는 리버스 프록시(nginx, 사내 L7 등)에서 처리하고 `ATLAS_TRUST_PROXY`에 그 프록시를 지정해야 접근 기록과 로그인 시도 제한이 실제 사용자 주소를 기준으로 동작합니다. `npm run live`처럼 127.0.0.1에만 열 때를 제외하면, `ACCESS_TOKENS`가 없을 때 데이터를 제공하지 않습니다.
 
 ```bash
 ACCESS_TOKENS='[{"name":"ops","tokenSha256":"<토큰의 sha256>","scopes":["*"],"roles":["operator","auditor"]},{"name":"감사","tokenSha256":"<토큰의 sha256>","scopes":["*"]},{"name":"team-a","tokenSha256":"<토큰의 sha256>","scopes":["<구독 또는 계정 ID>"]}]'

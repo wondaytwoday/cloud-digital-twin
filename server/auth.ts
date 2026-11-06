@@ -10,7 +10,7 @@ export type Role=keyof typeof ROLES;
 const AccessEntry=z.object({name:z.string(),tokenSha256:z.string().regex(/^[a-f0-9]{64}$/),scopes:z.array(z.string()).min(1),roles:z.array(z.enum(Object.keys(ROLES) as [Role,...Role[]])).default([])});
 export type AccessEntry=z.infer<typeof AccessEntry>;
 const sha256=(v:string)=>createHash('sha256').update(v).digest('hex');
-export const accessEntries=():AccessEntry[]=>z.array(AccessEntry).parse(JSON.parse(process.env.ACCESS_TOKENS??'[]'));
+export const accessEntries=(env:NodeJS.ProcessEnv=process.env):AccessEntry[]=>z.array(AccessEntry).parse(JSON.parse(env.ACCESS_TOKENS?.trim()||'[]'));
 export function findEntry(token:string|undefined){
   if(!token)return undefined;
   const digest=Buffer.from(sha256(token));

@@ -4,8 +4,13 @@ import path from 'node:path';
 import app from './app.js';
 import {collectorEnabled,needsCollection,runCollection} from './runner.js';
 import {FileSnapshotStore} from './store.js';
-// This listener binds to loopback below, which is what lets live mode run without configured access tokens.
-process.env.ATLAS_LOOPBACK_ONLY='1';
+import {bindPlan} from './listen.js';
+const plan=bindPlan(process.env);
+if(plan.error){console.error(plan.error);process.exit(1);}
+// Only a loopback listener may run live mode without access tokens; a shared one has already been refused above unless tokens are set.
+if(plan.loopbackOnly)process.env.ATLAS_LOOPBACK_ONLY='1';else delete process.env.ATLAS_LOOPBACK_ONLY;
+// Behind a reverse proxy, client addresses come from X-Forwarded-For, but only from the proxies named here.
+if(plan.trustProxy!==undefined)app.set('trust proxy',plan.trustProxy);
 const CSP="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'";
 const port=Number(process.env.PORT??4317),envFound=['AZURE_CLIENT_ID','AWS_ACCESS_KEY_ID','AWS_PROFILE','GOOGLE_APPLICATION_CREDENTIALS'].filter(k=>process.env[k]);
 if(process.env.NODE_ENV==='production'){app.use((_req,res,next)=>{res.set('Content-Security-Policy',CSP);next();});app.use(express.static('dist'));app.get('/{*path}',(_req,res)=>res.sendFile(path.resolve('dist/index.html')));}
@@ -17,10 +22,10 @@ const startCollector=async()=>{
   if(needsCollection(await store.readStatus(),minutes))run();
   if(minutes>0)setInterval(run,minutes*60_000).unref();
 };
-const listen=(at:number,tries:number)=>{app.listen(at,'127.0.0.1',e=>{
+const listen=(at:number,tries:number)=>{app.listen(at,plan.host,e=>{
   if((e as NodeJS.ErrnoException|undefined)?.code==='EADDRINUSE'&&tries>0){console.log(`포트 ${at}은 다른 프로그램이 쓰고 있어 다음 포트를 시도합니다.`);listen(at+1,tries-1);return;}
   if(e){console.error(`서버를 시작하지 못했습니다 (포트 ${at}): ${e.message}`);process.exit(1);}
-  console.log(`Cloud Atlas: http://127.0.0.1:${at} · ${process.env.DATA_MODE??'mock'} · localhost only`);
+  console.log(`Cloud Atlas: http://${plan.host.includes(':')?`[${plan.host}]`:plan.host}:${at} · ${process.env.DATA_MODE??'mock'} · ${plan.loopbackOnly?'localhost only':'공유 주소, 접근 토큰 필요'}`);
   if(process.env.DATA_MODE!=='live')console.log(`목데이터 모드입니다. 자격 증명을 넣어도 수집하지 않습니다. 실제 수집은 npm run live 로 실행하세요.${envFound.length?` (${envFound.join(', ')} 감지됨)`:''}`);
   startCollector();
 });};
