@@ -10,6 +10,8 @@
     "test": "tsx --test tests/*.test.ts",
     "collect": "tsx server/collect.ts",
     "check": "tsx server/collect.ts --check",
+    "backup": "tsx server/backup-cli.ts backup",
+    "restore": "tsx server/backup-cli.ts restore",
     "live": "npm run build && NODE_ENV=production DATA_MODE=live ATLAS_COLLECTOR=1 tsx server/index.ts",
     "test:e2e": "playwright test"
   },

@@ -17,7 +17,12 @@ export interface SnapshotStore{
 export const processAlive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
 // A lock from another host cannot be checked by PID, so it is trusted until it is clearly older than any run could take.
 const FOREIGN_LOCK_HOURS=2;
-const HISTORY_LIMIT=30;
+// History is kept by age, so a month of runs is there for a review whatever the schedule. The newest few always stay,
+// so a long pause between runs still leaves a previous snapshot to compare against.
+const DEFAULT_HISTORY_DAYS=30,ALWAYS_KEEP=2;
+const historyDays=()=>Number(process.env.ATLAS_HISTORY_DAYS)>0?Number(process.env.ATLAS_HISTORY_DAYS):DEFAULT_HISTORY_DAYS;
+// History files are named after collectedAt with ':' and '.' made file-safe; this reads the time back. Unrecognised names are never pruned.
+export const historyTime=(name:string)=>{const m=name.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.json$/);return m?Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`):NaN;};
 // Flushed before it counts as written, so a crash right after a rename cannot leave an empty file in its place.
 async function writeDurable(file:string,data:string){const handle=await open(file,'w',0o600);try{await handle.writeFile(data);await handle.sync();}finally{await handle.close();}}
 // The file operations a save depends on, injectable so tests can fail each step on purpose.
@@ -71,6 +76,6 @@ export class FileSnapshotStore implements SnapshotStore{
       await Promise.all([tmp,...(archived?[archived]:[])].map(f=>this.fs.rm(f,{force:true}).catch(()=>{})));throw e;
     }
     // Pruning is housekeeping: a failure here leaves one extra file, never a missing snapshot.
-    try{for(const old of (await this.history(provider)).slice(0,-HISTORY_LIMIT))await this.fs.rm(path.join(dir,old));}catch(e){console.error(`${provider}: 오래된 이력을 지우지 못했습니다.`,e instanceof Error?e.message:'');}
+    try{const files=await this.history(provider),cutoff=Date.now()-historyDays()*86_400_000;for(const old of files.slice(0,-ALWAYS_KEEP))if(historyTime(old)<cutoff)await this.fs.rm(path.join(dir,old));}catch(e){console.error(`${provider}: 오래된 이력을 지우지 못했습니다.`,e instanceof Error?e.message:'');}
   }
 }

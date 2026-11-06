@@ -128,6 +128,7 @@ npm run collect -- --provider aws --regions ap-northeast-2
 | `ATLAS_AWS_ACCOUNTS` | Organizations를 읽지 못할 때의 계정 목록 (`이름=ID,이름=ID`) |
 | `ATLAS_GCP_BILLING_TABLE` | BigQuery 결제 내보내기 테이블 (`프로젝트.데이터셋.테이블`) |
 | `ATLAS_COST_HOURS` | 비용 조회 주기(시간). 기본 24 |
+| `ATLAS_HISTORY_DAYS` | 스냅샷 이력 보존 기간(일). 기본 30. 기간과 상관없이 최근 이력 2개는 항상 남김 |
 | `ATLAS_STALE_HOURS` | 이 시간보다 오래된 클라우드 데이터를 '오래됨'으로 표시. 기본은 수집 주기의 3배(최소 3시간), 자동 수집을 끄면 24 |
 
 사내망 경계는 CSP API로 복원할 수 없어 `data/onprem.json`에 직접 등록합니다.
@@ -167,5 +168,27 @@ ACCESS_TOKENS='[{"name":"ops","tokenSha256":"<토큰의 sha256>","scopes":["*"],
 스냅샷은 새 파일을 완전히 쓴 뒤 한 번의 이름 바꾸기로 교체하므로, 저장 중 실패하거나 프로세스가 종료돼도 마지막 정상 스냅샷이 유지됩니다. 같은 데이터 폴더에서는 한 프로세스만 수집합니다(`collect.lock`). 서버의 자동 수집과 `npm run collect`가 겹치면 나중 것이 시작하지 않습니다. 이 잠금은 한 호스트 기준이며 여러 서버가 같은 폴더를 공유하는 구성은 지원하지 않습니다. 수집이 15분 제한을 넘기면 진행 중인 클라우드 요청을 취소하고, 그 작업이 끝나기 전에는 해당 클라우드를 다시 수집하지 않습니다.
 
 `server/store.ts`의 `SnapshotStore`가 저장소 경계입니다. 지금은 파일 구현만 있어 실제 데이터를 Vercel처럼 파일을 저장할 수 없는 환경에 올리려면 데이터베이스 구현을 추가해야 합니다.
+
+### 백업과 복구
+
+데이터 폴더(`SNAPSHOT_DIR`)에는 스냅샷과 이력, 접근 기록, 수집 상태, `onprem.json`이 있습니다. 이 폴더를 통째로 백업합니다.
+
+```bash
+npm run backup -- /backup/cloud-atlas
+```
+
+```bash
+npm run restore -- --check /backup/cloud-atlas/cloud-atlas-<시각>
+```
+
+```bash
+npm run restore -- /backup/cloud-atlas/cloud-atlas-<시각>
+```
+
+- 백업은 수집 잠금을 잡은 상태에서 만들어 수집 도중의 파일이 섞이지 않습니다. 각 파일의 SHA-256을 `manifest.json`에 기록하며, 데이터 폴더 안에는 만들 수 없습니다.
+- 복구는 모든 파일의 체크섬과 스냅샷 형식을 먼저 확인합니다. 하나라도 맞지 않으면 아무것도 바꾸지 않습니다.
+- 기존 폴더는 지우지 않고 `<폴더>.before-restore-<시각>`으로 옮겨 둡니다. 백업 이후에 쌓인 접근 기록은 여기서 꺼낼 수 있습니다.
+- 복구 전에 서버를 멈추고, 복구한 뒤 다시 시작하세요.
+- 백업 주기는 허용할 데이터 손실(RPO)에 맞춰 cron 등으로 실행합니다. 복구 시간(RTO)은 `--check`와 복구를 정기적으로 연습해 측정하세요.
 
 다른 서비스에 이 설계를 적용하려면 [docs/HANDOFF.md](docs/HANDOFF.md)를 보세요.
