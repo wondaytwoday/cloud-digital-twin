@@ -1,7 +1,10 @@
 import { finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
 import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/schema.js';
 import {noReport,type Report} from '../shared/collect.js';
-export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report};
+// signal stops a run that timed out: every request after it fails at once instead of reaching the cloud.
+export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal};
+export const abortableFetch=(signal?:AbortSignal,base:typeof fetch=fetch):typeof fetch=>!signal?base:(async(input,init)=>{signal.throwIfAborted();return base(input,{...init,signal:init?.signal?AbortSignal.any([init.signal,signal]):signal});}) as typeof fetch;
+export const awsSend=async(client:{send:(command:any,options?:any)=>Promise<any>},command:unknown,signal?:AbortSignal)=>{signal?.throwIfAborted();return client.send(command,signal?{abortSignal:signal}:undefined);};
 // Change records cover a week: long enough to answer "who touched this", short enough to read in one pass.
 const ACTIVITY_DAYS=7,ACTIVITY_CAP=2000;
 const activitySince=(now=new Date())=>new Date(now.getTime()-ACTIVITY_DAYS*86_400_000);
@@ -129,10 +132,11 @@ function azureListMessage(status:number,error?:{code?:string;message?:string}){
   return `Azure 구독 목록 조회 실패 (${status}${detail?` ${detail}`:''})`;
 }
 export async function collectAzure(subscriptions:string[]=[],options:CollectOptions={}):Promise<Normalized>{
-  const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),token=async()=>(await credential.getToken('https://management.azure.com/.default')).token;
+  const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),signal=options.signal,request=abortableFetch(signal);
+  const tokenFor=(scope:string)=>async()=>{signal?.throwIfAborted();return (await credential.getToken(scope,{abortSignal:signal})).token;},token=tokenFor('https://management.azure.com/.default');
   options.report?.('scopes',{detail:'구독 목록 조회'});
-  const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token);
-  return collectAzureWith(targets,token,fetch,{...options,graphToken:async()=>(await credential.getToken('https://graph.microsoft.com/.default')).token});
+  const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token,request);
+  return collectAzureWith(targets,token,request,{...options,graphToken:tokenFor('https://graph.microsoft.com/.default')});
 }
 // Management events from CloudTrail's free 90-day history; read-only calls are filtered out at the source.
 export async function collectAwsActivity(call:AwsCaller,account:string,region:string,now=new Date()):Promise<Activity[]>{
@@ -244,10 +248,10 @@ export const parseAccounts=(value:string|undefined)=>(value??'').split(',').map(
 // With ATLAS_AWS_ROLE_NAME the signed-in identity only jumps: it reads the org and assumes a read role in each account, and needs no read rights of its own. Without it, the signed-in account is read directly.
 export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:CollectOptions={}):Promise<Normalized>{
   const [ec2,sts,elb,rds,dx,eks,org,iam,ce,rex,trail]=await Promise.all([import('@aws-sdk/client-ec2'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-elastic-load-balancing-v2'),import('@aws-sdk/client-rds'),import('@aws-sdk/client-direct-connect'),import('@aws-sdk/client-eks'),import('@aws-sdk/client-organizations'),import('@aws-sdk/client-iam'),import('@aws-sdk/client-cost-explorer'),import('@aws-sdk/client-resource-explorer-2'),import('@aws-sdk/client-cloudtrail')]);
-  const parts:Normalized[]=[],home=AWS_HOME_REGION(),warnings:string[]=[],incomplete:string[]=[],report=options.report??noReport;let hierarchy:HierarchyNode[]|undefined,identities=1,finishedIdentities=0,regionsDone=0;
-  const single=async(module:any,Client:string,region:string,credentials:any,operation:string,input:any)=>{const client=new module[Client]({region,maxAttempts:3,credentials});try{return await client.send(new module[`${operation}Command`](input));}finally{client.destroy();}};
+  const parts:Normalized[]=[],home=AWS_HOME_REGION(),warnings:string[]=[],incomplete:string[]=[],report=options.report??noReport,signal=options.signal;let hierarchy:HierarchyNode[]|undefined,identities=1,finishedIdentities=0,regionsDone=0;
+  const single=async(module:any,Client:string,region:string,credentials:any,operation:string,input:any)=>{const client=new module[Client]({region,maxAttempts:3,credentials});try{return await awsSend(client,new module[`${operation}Command`](input),signal);}finally{client.destroy();}};
   const account=async(credentials:any)=>{const {Account}=await single(sts,'STSClient',home,credentials,'GetCallerIdentity',{});if(!Account)throw new Error('AWS 계정 ID를 확인할 수 없습니다.');return Account as string;};
-  const readOrg=async(credentials:any)=>{if(hierarchy)return;const client=new org.OrganizationsClient({region:'us-east-1',maxAttempts:3,credentials});try{hierarchy=await awsHierarchy((_s,operation,input={})=>client.send(new (org as any)[`${operation}Command`](input)) as Promise<any>);}catch{/* member account: reported below if nothing could read the org */}client.destroy();};
+  const readOrg=async(credentials:any)=>{if(hierarchy)return;const client=new org.OrganizationsClient({region:'us-east-1',maxAttempts:3,credentials});try{hierarchy=await awsHierarchy((_s,operation,input={})=>awsSend(client,new (org as any)[`${operation}Command`](input),signal));}catch{/* member account: reported below if nothing could read the org */}client.destroy();};
   const collectIdentity=async(credentials:any,id:string,label?:string)=>{
     let targets=regions;
     if(!targets.length)targets=((await single(ec2,'EC2Client',home,credentials,'DescribeRegions',{AllRegions:false})).Regions??[]).map((r:any)=>r.RegionName).filter(Boolean);
@@ -255,7 +259,7 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
     parts.push(...await mapLimit(targets,4,async region=>{
       report('resources',{detail:`${who} · ${region}`,done:regionsDone,total:regionTotal});
       const options={region,maxAttempts:3,credentials},clients={ec2:new ec2.EC2Client(options),elb:new elb.ElasticLoadBalancingV2Client(options),rds:new rds.RDSClient(options),dx:new dx.DirectConnectClient(options),eks:new eks.EKSClient(options)},modules:Record<string,any>={ec2,elb,rds,dx,eks};
-      const call:AwsCaller=(service,operation,input={})=>(clients as any)[service].send(new modules[service][`${operation}Command`](input));
+      const call:AwsCaller=(service,operation,input={})=>awsSend((clients as any)[service],new modules[service][`${operation}Command`](input),signal);
       try{return await collectAwsAccount(call,id,region,label);}finally{regionsDone++;for(const client of Object.values(clients))client.destroy();}
     }));
     report('iam',{detail:who,done:finishedIdentities,total:identities});
@@ -295,6 +299,7 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
 }
 // REST fallback avoids protobuf Struct conversion ambiguity for resource.data.
 export type GcpRequest=(url:string,init?:{method:string;data:unknown})=>Promise<any>;
+export const gcpRequester=(client:{request:(options:any)=>Promise<{data:any}>},signal?:AbortSignal):GcpRequest=>async(url,init)=>{signal?.throwIfAborted();const response=await client.request({url,timeout:60_000,retryConfig:{retry:3},...(signal?{signal}:{}),...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;};
 export async function gcpPages(parent:string,request:GcpRequest,types:string[]=[],contentType='RESOURCE',onRows:(total:number)=>void=()=>{}){
   const assets:Record<string,any>[]=[],seen=new Set<string>();let next:string|undefined,readTime:string|undefined;
   do{const q=new URLSearchParams({contentType,pageSize:'1000'});types.forEach(t=>q.append('assetTypes',t));if(next)q.set('pageToken',next);if(readTime)q.set('readTime',readTime);
@@ -405,5 +410,5 @@ export async function collectGcpAuto(request:GcpRequest,options:CollectOptions={
 }
 export async function collectGcp(parent:string,options:CollectOptions={}):Promise<Normalized>{
   const {GoogleAuth}=await import('google-auth-library');const auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']});const client=await auth.getClient();
-  return collectGcpWith(parent,async(url,init)=>{const response=await client.request({url,timeout:60_000,retryConfig:{retry:3},...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;},options);
+  return collectGcpWith(parent,gcpRequester(client,options.signal),options);
 }

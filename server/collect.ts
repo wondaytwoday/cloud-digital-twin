@@ -25,8 +25,12 @@ try{
     if(p==='gcp'&&!/^(projects|folders|organizations)\/[a-zA-Z0-9-]+$/.test(values.parent??''))throw new Error('--parent projects/<id> 또는 folders/<id>, organizations/<id> 필요');
     const roles=list(values.roles).map(x=>{const [label,roleArn]=x.split('=');if(!label||!roleArn?.startsWith('arn:aws:iam::'))throw new Error('--roles는 이름=역할ARN 형식이어야 합니다.');return{label,roleArn};});
     console.log(`${p}: 지정한 범위에서 지원 자원을 읽습니다. 실패하면 기존 스냅샷을 유지합니다.`);
-    const snapshot=toSnapshot(p==='azure'?await collectAzure(subs):p==='aws'?await collectAws(regions,roles):await collectGcp(values.parent!),new Date().toISOString());
-    await new FileSnapshotStore().save(p,snapshot);
-    console.log(`저장: ${p} · ${snapshot.resources.length}개 자원 / ${snapshot.links.length}개 구성 관계`);
+    const store=new FileSnapshotStore(),release=await store.lock();
+    if(!release)throw new Error('다른 프로세스가 이 데이터 폴더에서 수집 중입니다. 끝난 뒤 다시 실행하세요.');
+    try{
+      const snapshot=toSnapshot(p==='azure'?await collectAzure(subs):p==='aws'?await collectAws(regions,roles):await collectGcp(values.parent!),new Date().toISOString());
+      await store.save(p,snapshot);
+      console.log(`저장: ${p} · ${snapshot.resources.length}개 자원 / ${snapshot.links.length}개 구성 관계`);
+    }finally{await release();}
   }
 }catch(e){console.error(e instanceof Error?e.message:'수집 실패');process.exitCode=1;}

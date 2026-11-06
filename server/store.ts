@@ -1,6 +1,7 @@
 import {copyFile,mkdir,open,readdir,readFile,rename,rm} from 'node:fs/promises';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
+import {hostname} from 'node:os';
 import {validateSnapshot,type Snapshot} from '../shared/schema.js';
 import type {CollectionStatus} from './runner.js';
 // The seam for a real database: everything else only sees this interface.
@@ -10,7 +11,12 @@ export interface SnapshotStore{
   save(provider:string,snapshot:Snapshot):Promise<void>;
   readStatus():Promise<CollectionStatus|null>;
   writeStatus(status:CollectionStatus):Promise<void>;
+  // Resolves to a release function, or null while another process holds the lock.
+  lock?():Promise<(()=>Promise<void>)|null>;
 }
+export const processAlive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
+// A lock from another host cannot be checked by PID, so it is trusted until it is clearly older than any run could take.
+const FOREIGN_LOCK_HOURS=2;
 const HISTORY_LIMIT=30;
 // Flushed before it counts as written, so a crash right after a rename cannot leave an empty file in its place.
 async function writeDurable(file:string,data:string){const handle=await open(file,'w',0o600);try{await handle.writeFile(data);await handle.sync();}finally{await handle.close();}}
@@ -25,6 +31,22 @@ export class FileSnapshotStore implements SnapshotStore{
   async previous(provider:string){const files=await this.history(provider),last=files[files.length-1];return last?this.read(path.join(this.root,'history',provider,last)):null;}
   async readStatus(){try{return JSON.parse(await this.fs.readFile(path.join(this.root,'status.json'),'utf8')) as CollectionStatus;}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return null;throw e;}}
   async writeStatus(status:CollectionStatus){await this.fs.mkdir(this.root,{recursive:true,mode:0o700});const file=path.join(this.root,'status.json'),tmp=`${file}.${randomUUID()}.tmp`;try{await this.fs.writeFile(tmp,JSON.stringify(status));await this.fs.rename(tmp,file);}catch(e){await this.fs.rm(tmp,{force:true}).catch(()=>{});throw e;}}
+  // One collecting process per data folder on this host, so the server's timer and `npm run collect` never write the same files at once.
+  // This is not a distributed lock: two hosts sharing a network folder are only kept apart by the age rule above.
+  async lock(){
+    await mkdir(this.root,{recursive:true,mode:0o700});
+    const file=path.join(this.root,'collect.lock'),me={pid:process.pid,host:hostname(),at:new Date().toISOString(),id:randomUUID()};
+    for(let attempt=0;attempt<2;attempt++){
+      try{const handle=await open(file,'wx',0o600);try{await handle.writeFile(JSON.stringify(me));}finally{await handle.close();}
+        return async()=>{try{if(JSON.parse(await readFile(file,'utf8')).id===me.id)await rm(file,{force:true});}catch{/* already gone */}};}
+      catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
+      let held:{pid?:number;host?:string;at?:string}={};try{held=JSON.parse(await readFile(file,'utf8'));}catch{/* unreadable: treated as stale */}
+      const live=held.host===me.host?processAlive(held.pid):Date.now()-Date.parse(held.at??'')<FOREIGN_LOCK_HOURS*3_600_000;
+      if(live)return null;
+      await rm(file,{force:true});
+    }
+    return null;
+  }
   // The current file is only ever replaced by one rename of a complete, flushed copy. Until that rename, every step can fail and the last good snapshot is still what readers get.
   async save(provider:string,snapshot:Snapshot){
     const current=path.join(this.root,`${provider}.json`),dir=path.join(this.root,'history',provider),tmp=`${current}.${randomUUID()}.tmp`;

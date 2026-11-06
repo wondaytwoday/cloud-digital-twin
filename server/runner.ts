@@ -1,18 +1,29 @@
-import {collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,type CollectOptions} from './collectors.js';
+import {abortableFetch,awsSend,collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,gcpRequester,type CollectOptions} from './collectors.js';
 import type {Normalized} from './normalize.js';
-import {FileSnapshotStore,type SnapshotStore} from './store.js';
+import {FileSnapshotStore,processAlive,type SnapshotStore} from './store.js';
 import {existsSync} from 'node:fs';
 import {validateSnapshot} from '../shared/schema.js';
 import {newStages,type CollectionStatus,type ProviderId,type ProviderState,type ProviderStatus,type Report,type Stage} from '../shared/collect.js';
 export type {CollectionStatus,ProviderId,ProviderState,ProviderStatus};
-export type ProviderDriver={detect:()=>Promise<string>;scope?:()=>Promise<string>;collect:(options:CollectOptions&{report?:Report})=>Promise<Normalized>};
+export type ProviderDriver={detect:(signal?:AbortSignal)=>Promise<string>;scope?:(signal?:AbortSignal)=>Promise<string>;collect:(options:CollectOptions&{report?:Report;signal?:AbortSignal})=>Promise<Normalized>};
 export type CollectorDrivers=Record<ProviderId,ProviderDriver>;
 export const PROVIDERS:ProviderId[]=['azure','aws','gcp'];
 // Cost APIs bill per request or per byte scanned, so they run far less often than inventory.
 const COST_HOURS=()=>Number(process.env.ATLAS_COST_HOURS??24);
-const DETECT_TIMEOUT=30_000,COLLECT_TIMEOUT=15*60_000;
+export type CollectorLimits={detectMs:number;collectMs:number};
+const DEFAULT_LIMITS:CollectorLimits={detectMs:30_000,collectMs:15*60_000};
+let limits=DEFAULT_LIMITS;
 export const emptyStatus=():CollectionStatus=>({running:false,providers:{azure:{state:'idle'},aws:{state:'idle'},gcp:{state:'idle'}}});
-const withTimeout=<T>(work:Promise<T>,ms:number,what:string)=>{let timer:NodeJS.Timeout;return Promise.race([work,new Promise<never>((_,fail)=>{timer=setTimeout(()=>fail(new Error(`${what} 시간 초과`)),ms);})]).finally(()=>clearTimeout(timer));};
+// A timeout that only stops waiting leaves the cloud calls running, overlapping the next run. This one also tells the work to stop,
+// and hands the work itself to track, so a run can tell whether what it gave up on has really ended.
+const withDeadline=<T>(work:(signal:AbortSignal)=>Promise<T>,ms:number,what:string,track:(running:Promise<unknown>)=>void=()=>{})=>{
+  const controller=new AbortController(),running=work(controller.signal);track(running);let timer:NodeJS.Timeout;
+  return Promise.race([running,new Promise<never>((_,fail)=>{timer=setTimeout(()=>{const e=new Error(`${what} 시간 초과`);controller.abort(e);fail(e);},ms);})]).finally(()=>clearTimeout(timer));
+};
+// Work per cloud that has not settled yet, including work a run gave up on at its deadline.
+const inflight=new Map<ProviderId,Promise<void>>();
+const trackFor=(p:ProviderId)=>(running:Promise<unknown>)=>{const settled:Promise<void>=running.then(()=>{},()=>{}).finally(()=>{if(inflight.get(p)===settled)inflight.delete(p);});inflight.set(p,settled);};
+export const settledInflight=()=>Promise.all([...inflight.values()]);
 // SDK errors can run to pages and quote request details; the portal only needs the first line.
 const shortMessage=(e:unknown)=>(e instanceof Error?e.message:String(e)).split('\n')[0].slice(0,200);
 const AUTH_ERROR=/expired|credential|not logged|az login|sso login|invalid_grant|unauthorized_client|InvalidClientTokenId|could not load|grant is invalid|SignatureDoesNotMatch|AADSTS/i;
@@ -50,31 +61,30 @@ const explainFailure=(message:string)=>/quota project|local Application Default 
 
 const realDrivers:CollectorDrivers={
   azure:{
-    detect:async()=>{const {DefaultAzureCredential}=await import('@azure/identity');await new DefaultAzureCredential().getToken('https://management.azure.com/.default');return 'Azure 자격 증명';},
+    detect:async signal=>{const {DefaultAzureCredential}=await import('@azure/identity');await new DefaultAzureCredential().getToken('https://management.azure.com/.default',{abortSignal:signal});return 'Azure 자격 증명';},
     // Sign-in alone proves nothing about roles, so the check also lists what the identity can see.
-    scope:async()=>{const {DefaultAzureCredential}=await import('@azure/identity'),credential=new DefaultAzureCredential();return `구독 ${(await discoverAzureSubscriptions(async()=>(await credential.getToken('https://management.azure.com/.default')).token)).length}개`;},
+    scope:async signal=>{const {DefaultAzureCredential}=await import('@azure/identity'),credential=new DefaultAzureCredential();return `구독 ${(await discoverAzureSubscriptions(async()=>(await credential.getToken('https://management.azure.com/.default',{abortSignal:signal})).token,abortableFetch(signal))).length}개`;},
     collect:options=>collectAzure([],options),
   },
   aws:{
-    detect:async()=>{const sts=await import('@aws-sdk/client-sts'),client=new sts.STSClient({region:process.env.AWS_REGION??process.env.AWS_DEFAULT_REGION??'us-east-1',maxAttempts:2});try{const {Account}=await client.send(new sts.GetCallerIdentityCommand({}));return `계정 ${Account}`;}finally{client.destroy();}},
+    detect:async signal=>{const sts=await import('@aws-sdk/client-sts'),client=new sts.STSClient({region:process.env.AWS_REGION??process.env.AWS_DEFAULT_REGION??'us-east-1',maxAttempts:2});try{const {Account}=await awsSend(client,new sts.GetCallerIdentityCommand({}),signal);return `계정 ${Account}`;}finally{client.destroy();}},
     collect:options=>collectAws([],[],options),
   },
   gcp:{
     detect:async()=>{const {GoogleAuth}=await import('google-auth-library'),auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}),client=await auth.getClient();await client.getAccessToken();return 'Application Default Credentials';},
-    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(async(url,init)=>{const response=await client.request({url,timeout:60_000,retryConfig:{retry:3},...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;},options);},
+    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(gcpRequester(client,options.signal),options);},
   },
 };
 let drivers=realDrivers;
-export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
+export const configureCollector=(next:CollectorDrivers=realDrivers,nextLimits:Partial<CollectorLimits>={})=>{drivers=next;limits={...DEFAULT_LIMITS,...nextLimits};};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
 export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
-const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
 // A process killed mid-run leaves its last status behind. Without this check the portal would show it running forever.
 export async function readCollectionStatus(store:SnapshotStore=new FileSnapshotStore()):Promise<CollectionStatus>{
   const saved=liveStatus()??await store.readStatus();if(!saved)return emptyStatus();
-  if(!saved.running||saved===live||alive(saved.pid))return saved;
+  if(!saved.running||saved===live||processAlive(saved.pid))return saved;
   const providers={...saved.providers};
   for(const p of PROVIDERS)if(providers[p]?.state==='running')providers[p]={...providers[p],state:'failed',message:'수집이 끝나기 전에 서버가 종료됐습니다. 다시 수집하세요.',stages:settleStages(providers[p].stages,'failed')};
   return{...saved,running:false,providers};
@@ -84,48 +94,57 @@ export const needsCollection=(status:CollectionStatus|null,minutes:number,now=Da
 const settleStages=(stages:Stage[]=[],outcome:'done'|'failed')=>stages.map(s=>s.state==='running'?{...s,state:outcome}:s.state==='pending'?{...s,state:outcome==='done'?'done' as const:'skipped' as const}:s);
 export async function checkCredentials(){return Promise.all(PROVIDERS.map(async p=>{
   let login:string;
-  try{login=await withTimeout(drivers[p].detect(),DETECT_TIMEOUT,'로그인 확인');}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}
+  try{login=await withDeadline(drivers[p].detect,limits.detectMs,'로그인 확인');}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}
   const scope=drivers[p].scope;if(!scope)return{provider:p,ok:true,detail:login};
-  try{return{provider:p,ok:true,detail:`${login} · ${await withTimeout(scope(),DETECT_TIMEOUT,'범위 확인')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
+  try{return{provider:p,ok:true,detail:`${login} · ${await withDeadline(scope,limits.detectMs,'범위 확인')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
 }));}
 // One run at a time. Providers run independently, so one cloud's failure neither blocks the others nor replaces its last good snapshot.
 export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{}):Promise<CollectionStatus>{
   if(current)return current;
   current=(async()=>{
-    const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
-    for(const p of PROVIDERS)status.providers[p]={...status.providers[p],state:'running',message:undefined,stages:newStages(p)};
-    // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
-    let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
-    const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
-    await store.writeStatus(status);
-    await Promise.all(PROVIDERS.map(async p=>{
-      const at=()=>new Date().toISOString(),driver=drivers[p];
-      const report:Report=(id,patch={})=>{const stage=status.providers[p].stages?.find(s=>s.id===id);if(!stage||(stage.state==='done'&&!patch.state))return;const before=stage.state;Object.assign(stage,{state:'running',...patch});if(stage.state!==before){log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);persist(true);}else persist();};
-      try{
-        report('auth');
-        const identity=await withTimeout(driver.detect(),DETECT_TIMEOUT,'로그인 확인');
-        status.providers[p]={...status.providers[p],state:'running',identity};
-      report('auth',{state:'done',detail:identity});
-      }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});status.providers[p]={state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
-      try{
-        const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
-        if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
-        const result=await withTimeout(driver.collect({withCost,report}),COLLECT_TIMEOUT,'수집');
-        if(!withCost)result.cost=previous?.cost;
-        const costAt=withCost?at():previous?.costAt;
-        if(!result.resources.length&&result.incomplete?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');
-        report('save');await store.save(p,toSnapshot(result,costAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
-        const missing=result.incomplete?.length??0;
-        status.providers[p]={...status.providers[p],state:missing?'partial':'ok',at:at(),resources:result.resources.length,message:missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:undefined,stages:settleStages(status.providers[p].stages,'done')};
-        log(`${p}: 자원 ${result.resources.length}개 저장${missing?` (일부 누락 ${missing})`:''}`);
-      }catch(e){
-        const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),message=auth?explainAuth(p,e):explainFailure(raw);
-        status.providers[p]={...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);
-      }
-      await persist(true);
-    }));
-    status.running=false;status.finishedAt=new Date().toISOString();await writing;await store.writeStatus(status);
-    return status;
+    const release=await store.lock?.();
+    // Another process is collecting into the same folder; its own status file already says so.
+    if(release===null){log('다른 프로세스가 이 데이터 폴더에서 수집 중이라 시작하지 않습니다.');return readCollectionStatus(store);}
+    try{return await collect(store,log);}finally{await release?.();}
   })().finally(()=>{current=undefined;});
   return current;
+}
+async function collect(store:SnapshotStore,log:(line:string)=>void):Promise<CollectionStatus>{
+  const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
+  for(const p of PROVIDERS)status.providers[p]={...status.providers[p],state:'running',message:undefined,stages:newStages(p)};
+  // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
+  let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
+  const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
+  await store.writeStatus(status);
+  await Promise.all(PROVIDERS.map(async p=>{
+    const at=()=>new Date().toISOString(),driver=drivers[p],track=trackFor(p);
+    // Once this cloud's outcome is recorded, late progress from work that missed its deadline is ignored: it would flip settled stages back to running and rewrite the status file.
+    let open=true;const settle=(next:ProviderStatus)=>{open=false;status.providers[p]=next;};
+    if(inflight.has(p)){settle({...status.providers[p],state:'failed',at:at(),message:'이전 수집이 시간 초과 후 아직 끝나지 않아 이번에는 건너뜁니다. 기존 스냅샷을 유지합니다.',stages:settleStages(status.providers[p].stages,'failed')});log(`${p}: 이전 작업이 남아 있어 건너뜁니다.`);await persist(true);return;}
+    const report:Report=(id,patch={})=>{if(!open)return;const stage=status.providers[p].stages?.find(s=>s.id===id);if(!stage||(stage.state==='done'&&!patch.state))return;const before=stage.state;Object.assign(stage,{state:'running',...patch});if(stage.state!==before){log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);persist(true);}else persist();};
+    try{
+      report('auth');
+      const identity=await withDeadline(driver.detect,limits.detectMs,'로그인 확인',track);
+      status.providers[p]={...status.providers[p],state:'running',identity};
+      report('auth',{state:'done',detail:identity});
+    }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});settle({state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')});log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
+    try{
+      const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
+      if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
+      const result=await withDeadline(signal=>driver.collect({withCost,report,signal}),limits.collectMs,'수집',track);
+      if(!withCost)result.cost=previous?.cost;
+      const costAt=withCost?at():previous?.costAt;
+      if(!result.resources.length&&result.incomplete?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');
+      report('save');await store.save(p,toSnapshot(result,costAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
+      const missing=result.incomplete?.length??0;
+      settle({...status.providers[p],state:missing?'partial':'ok',at:at(),resources:result.resources.length,message:missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:undefined,stages:settleStages(status.providers[p].stages,'done')});
+      log(`${p}: 자원 ${result.resources.length}개 저장${missing?` (일부 누락 ${missing})`:''}`);
+    }catch(e){
+      const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),message=auth?explainAuth(p,e):explainFailure(raw);
+      settle({...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')});log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);
+    }
+    await persist(true);
+  }));
+  status.running=false;status.finishedAt=new Date().toISOString();await writing;await store.writeStatus(status);
+  return status;
 }
