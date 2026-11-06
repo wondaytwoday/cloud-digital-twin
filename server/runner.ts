@@ -131,7 +131,8 @@ async function collect(store:SnapshotStore,log:(line:string)=>void):Promise<Coll
       report('auth',{state:'done',detail:identity});
     }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});settle({state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')});log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
     try{
-      const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
+      // A damaged current file must not block the run that replaces it; only last run's cost is lost.
+      const previous=await store.latest(p).catch(()=>{log(`${p}: 저장된 스냅샷을 읽지 못해 이전 비용 없이 새로 수집합니다.`);return null;}),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
       if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
       const result=await withDeadline(signal=>driver.collect({withCost,report,signal}),limits.collectMs,'수집',track);
       if(!withCost)result.cost=previous?.cost;

@@ -25,29 +25,33 @@ app.get('/api/ready',async(_req,res)=>{
   if(process.env.DATA_MODE!=='live'){res.json({ready:true,mode:'mock'});return;}
   const store=new FileSnapshotStore(),storage=await store.probe(),trail=auditWriteState(),probe=await probeAudit();
   const audit={ok:probe.ok&&!trail.failing,...(probe.ok?{}:{detail:probe.detail}),...(trail.failing?{detail:`최근 기록 실패 ${trail.failures}회 (${trail.lastError})`}:{})};
-  let stale=0,missing=0;
-  try{const hours=staleAfterHours(process.env);for(const p of ['azure','aws','gcp']){const s=await store.latest(p);if(!s)missing++;else if(isStale(s.collectedAt,hours))stale++;}}catch{/* unreadable snapshots are the topology route's error to report */}
+  let stale=0,missing=0,unreadable=0;const hours=staleAfterHours(process.env);
+  for(const p of ['azure','aws','gcp']){const s=await store.latest(p).catch(()=>{unreadable++;return undefined;});if(s===null)missing++;else if(s&&isStale(s.collectedAt,hours))stale++;}
   const ready=storage.ok&&audit.ok;
-  res.status(ready?200:503).json({ready,mode:'live',checks:{storage,audit,data:{stale,missing}}});
+  res.status(ready?200:503).json({ready,mode:'live',checks:{storage,audit,data:{stale,missing,unreadable}}});
 });
 sessionRoutes(app);
 export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
-  const snapshots:Snapshot[]=[],warnings:string[]=[],changes:Change[]=[],status=await store.readStatus();let since:string|undefined;
+  const snapshots:Snapshot[]=[],warnings:string[]=[],changes:Change[]=[],unreadable=new Set<string>(),status=await store.readStatus().catch(()=>null);let since:string|undefined;
+  // One cloud's damaged file costs that cloud, not the portal: the others are still shown, and this one says how to recover.
+  const read=async(p:string)=>{try{const s=await store.latest(p);if(s&&(s.mode!=='live'||s.resources.some(r=>r.provider!==p)))throw new Error('다른 클라우드의 자원이 섞여 있음');return s;}
+    catch(e){console.error(`${p}: 저장된 스냅샷을 읽지 못했습니다.`,e instanceof Error?e.message.split('\n')[0]:'');unreadable.add(p);return null;}};
   for(const p of ['azure','aws','gcp']){
-    const s=await store.latest(p);
-    if(!s){warnings.push(`${p}: 아직 수집한 스냅샷이 없습니다.`);continue;}
-    if(s.mode!=='live'||s.resources.some(r=>r.provider!==p))throw new Error(`${p}: invalid provider snapshot`);
+    const s=await read(p);
+    if(!s){warnings.push(unreadable.has(p)?`${p}: 저장된 스냅샷을 읽지 못했습니다.`:`${p}: 아직 수집한 스냅샷이 없습니다.`);continue;}
     snapshots.push(s);warnings.push(`${p}: 마지막 수집 ${s.collectedAt}`);
-    const before=await store.previous(p);
+    // A damaged previous snapshot only costs the change list.
+    const before=await store.previous(p).catch(()=>null);
     // A scope that could not be fully read says nothing about what changed in it, so its gaps are not reported as deletions or additions.
     if(before){const after=new Set(s.incomplete),earlier=new Set(before.incomplete);changes.push(...diffResources(before.resources,s.resources).filter(c=>!(c.kind==='removed'&&after.has(c.scope))&&!(c.kind==='added'&&earlier.has(c.scope))));if(!since||before.collectedAt<since)since=before.collectedAt;}
   }
-  if(!snapshots.length)return null;
+  if(!snapshots.length){if(unreadable.size)throw new Error(`저장된 스냅샷을 읽지 못했습니다: ${[...unreadable].join(', ')}`);return null;}
   const resources=snapshots.flatMap(s=>s.resources),links=snapshots.flatMap(s=>s.links),scopeLabels=Object.assign({},...snapshots.map(s=>s.scopeLabels)),allWarnings=[...warnings,...snapshots.flatMap(s=>s.warnings)];
   applySites(await readSites(),resources,links,allWarnings,scopeLabels);
   return validateSnapshot({version:1,mode:'live',collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),cost:snapshots.flatMap(s=>s.cost),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
     const s=snapshots.find(x=>x.resources.some(r=>r.provider===p)),run=status?.providers[p],state:Record<ProviderState,string>={idle:s?'collected':'missing',running:'running',ok:'collected',partial:'partial',failed:'failed',unauthenticated:'unauthenticated'};
     // Stale is judged on the snapshot shown, not the last attempt: a run that keeps failing leaves old data on screen, which is exactly what must be flagged.
+    if(unreadable.has(p))return{provider:p,status:'failed' as const,api:'수집 스냅샷',scopes:0,message:'저장된 스냅샷 파일을 읽지 못했습니다. 다시 수집하거나 npm run restore로 백업에서 복구하세요.'};
     return{provider:p,status:run?state[run.state]:s?'collected':'missing',api:'수집 스냅샷',scopes:s?.scopes.length??0,collectedAt:s?.collectedAt,message:run?.message,...(s?{stale:isStale(s.collectedAt,staleAfterHours(process.env))}:{}),...(s?.coverage?{datasets:s.coverage}:{})};
   })});
 }

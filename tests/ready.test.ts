@@ -22,7 +22,7 @@ test.beforeEach(()=>resetAuditMemory());
 test('readiness passes when snapshots and the audit trail can both be written',async()=>{
   await withServer({DATA_MODE:'live',SNAPSHOT_DIR:await mkdtemp(path.join(tmpdir(),'atlas-')),ACCESS_TOKENS:tokens},async base=>{
     const r=await fetch(`${base}/api/ready`);assert.equal(r.status,200);
-    const body=await r.json();assert.equal(body.ready,true);assert.deepEqual(body.checks.data,{stale:0,missing:3},'nothing collected yet is reported, not failed');
+    const body=await r.json();assert.equal(body.ready,true);assert.deepEqual(body.checks.data,{stale:0,missing:3,unreadable:0},'nothing collected yet is reported, not failed');
   });
 });
 test('a folder that cannot be written fails readiness, without revealing where it is',async()=>{
