@@ -11,7 +11,7 @@ export function applySites(sites:Site[],resources:Resource[],links:Link[],warnin
     for(const c of site.connects){
       const target=resources.find(r=>r.name===c.name&&r.provider!=='onprem');
       if(!target){warnings.push(`${site.name}: 연결 대상 ${c.name}을(를) 수집 결과에서 찾지 못했습니다.`);continue;}
-      links.push({id:`attachment:${dc.id}:${target.id}`,source:dc.id,target:target.id,kind:'attachment',label:c.label,evidence:'수동 등록 — CSP API만으로 사내망 쪽을 복원할 수 없습니다.'});
+      links.push({id:`attachment:${dc.id}:${target.id}`,source:dc.id,target:target.id,kind:'attachment',label:c.label,evidence:'수동 등록 — CSP API만으로 사내망 쪽을 복원할 수 없습니다.',basis:'declared',ref:'data/onprem.json'});
     }
   }
 }
