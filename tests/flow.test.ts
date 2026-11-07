@@ -131,3 +131,25 @@ test('AWS: routing through a Transit Gateway is undecided while its route tables
   const r=analyzeFlow(await demo,{from:await id('checkout-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
   assert.equal(r.status,'unknown');assert.ok(kinds(r).includes('gateway'));assert.ok(r.gaps.some(g=>g.undecided&&/Transit Gateway 라우트 테이블/.test(g.text)));
 });
+
+// ---- GCP
+test('GCP 2. a firewall rule targets tags: of two instances side by side, only the tagged one admits',async()=>{
+  const tagged=await awsFlow('analytics-api-02','analytics-api-01',443),untagged=await awsFlow('analytics-api-01','analytics-api-02',443);
+  assert.equal(tagged.status,'allowed');assert.match(tagged.policies.find(p=>p.direction==='inbound')!.reason,/대상 태그 analytics/);
+  assert.equal(untagged.status,'blocked');assert.match(untagged.policies.find(p=>p.direction==='inbound')!.name,/암묵적 인그레스 거부/);
+});
+test('GCP: VPC routes, peering by exchanged subnet routes, and the policies not collected are named',async()=>{
+  const r=await awsFlow('analytics-api-01','sandbox-01',443);
+  assert.ok(kinds(r).includes('peering'));assert.ok(r.gaps.some(g=>/계층형 방화벽 정책/.test(g.text)&&!g.undecided));
+});
+test('GCP: with a Cloud Router, a private range covered only by the default route is undecided, not unroutable',async()=>{
+  const r=analyzeFlow(await demo,{from:await id('analytics-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
+  assert.equal(r.status,'unknown');assert.ok(r.gaps.some(g=>g.undecided&&/BGP/.test(g.text)));
+});
+test('GCP: instances keep their NICs, tags, service account and collected disk',async()=>{
+  const s=await demo,vm=s.resources.find(r=>r.name==='analytics-api-01')!,out=s.links.filter(l=>l.source===vm.id);
+  assert.deepEqual(vm.netTags,['analytics']);
+  assert.ok(out.some(l=>l.kind==='uses_identity'&&s.resources.find(x=>x.id===l.target)?.specs['이메일']?.startsWith('analytics-api@')));
+  assert.ok(out.some(l=>l.kind==='attachment'&&s.resources.find(x=>x.id===l.target)?.kind==='disk'),'its disk asset is joined');
+  const twin=s.resources.find(r=>r.name==='analytics-api-02')!;assert.ok(!s.links.some(l=>l.source===twin.id&&s.resources.find(x=>x.id===l.target)?.kind==='disk'),'a disk whose asset was not collected is not invented');
+});

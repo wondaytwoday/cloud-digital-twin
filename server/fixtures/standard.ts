@@ -1,4 +1,4 @@
-import {asset,awsRouteTable,ebs,nacl,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,publicIp,routeTable,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
+import {asset,awsRouteTable,ebs,gceDisk,nacl,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,publicIp,routeTable,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
 import type {Scenario} from './types.js';
 const connectivity='00000000-0000-4000-8000-000000000001',platform='00000000-0000-4000-8000-000000000002',data='00000000-0000-4000-8000-000000000003',dev='00000000-0000-4000-8000-000000000004',partner='00000000-0000-4000-8000-000000000099';
 const hub=vnetId(connectivity,'rg-network-hub','vnet-hub'),spokes={platform:vnetId(platform,'rg-platform','vnet-platform-prod'),data:vnetId(data,'rg-data','vnet-data-prod'),dev:vnetId(dev,'rg-dev','vnet-dev')};
@@ -87,7 +87,8 @@ export const standard:Scenario={
     asset('compute.googleapis.com/Firewall',`${compute(hostProject)}/global/firewalls/fw-allow-internal`,{name:'fw-allow-internal',network:sharedVpc,direction:'INGRESS',priority:1000,allowed:[{IPProtocol:'tcp',ports:['443','5432']}],sourceRanges:['10.0.0.0/8'],targetTags:['analytics']}),
     asset('compute.googleapis.com/Firewall',`${compute(hostProject)}/global/firewalls/fw-iap-ssh`,{name:'fw-iap-ssh',network:sharedVpc,direction:'INGRESS',priority:900,allowed:[{IPProtocol:'tcp',ports:['22']}],sourceRanges:['35.235.240.0/20']}),
     asset('compute.googleapis.com/ForwardingRule',`${compute(appProject)}/regions/${R}/forwardingRules/ilb-analytics`,{name:'ilb-analytics',IPAddress:'10.30.2.5',loadBalancingScheme:'INTERNAL',ports:['443'],subnetwork:hostSubnet('apps-seoul')}),
-    gce(appProject,sharedVpc,hostSubnet('apps-seoul'),'analytics-api-01','10.30.2.30','e2-standard-4'),
+    // Only analytics-api-01 carries the 'analytics' tag that fw-allow-internal targets, so its twin next to it is not admitted.
+    gce(appProject,sharedVpc,hostSubnet('apps-seoul'),'analytics-api-01','10.30.2.30','e2-standard-4','RUNNING',{tags:{items:['analytics']},serviceAccounts:[{email:`analytics-api@${appProject}.iam.gserviceaccount.com`,scopes:['https://www.googleapis.com/auth/cloud-platform']}]}),gceDisk(appProject,'analytics-api-01'),
     gce(appProject,sharedVpc,hostSubnet('apps-seoul'),'analytics-api-02','10.30.2.31','e2-standard-4'),
     gce(appProject,sharedVpc,hostSubnet('data-seoul'),'inference-gpu-01','10.30.3.30','n1-standard-4','RUNNING',{guestAccelerators:[{acceleratorCount:1,acceleratorType:'zones/asia-northeast3-a/acceleratorTypes/nvidia-tesla-t4'}]}),
     asset('container.googleapis.com/Cluster',`//container.googleapis.com/projects/${appProject}/locations/${R}/clusters/gke-analytics`,{name:'gke-analytics',status:'RUNNING',currentMasterVersion:'1.33.1-gke.100',currentNodeCount:9,networkConfig:{subnetwork:`projects/${hostProject}/regions/${R}/subnetworks/gke-seoul`}}),

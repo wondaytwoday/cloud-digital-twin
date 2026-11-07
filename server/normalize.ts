@@ -233,7 +233,7 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   return {resources,links,warnings:[],scopeLabels:label?{[scope]:label}:{}};
 }
 export function normalizeGcp(assets:Raw[]):Normalized {
-  const resources:Resource[]=[],links:Link[]=[];
+  const resources:Resource[]=[],links:Link[]=[],diskAssets=new Set(assets.filter(a=>a.assetType==='compute.googleapis.com/Disk').map(a=>a.name));
   // Cluster and Cloud SQL report partial or leading-slash references; Compute assets use full URLs.
   const canonical=(v:string)=>v.replace('https://www.googleapis.com/compute/v1/','//compute.googleapis.com/').replace(/^\/?projects\//,'//compute.googleapis.com/projects/');
   const id=(v:string)=>`gcp:${canonical(v)}`;
@@ -245,9 +245,22 @@ export function normalizeGcp(assets:Raw[]):Normalized {
       for(const peer of p.peerings??[])if(peer.network&&peer.state!=='INACTIVE')links.push(relation(id(a.name),id(peer.network),'peering',peer.exportCustomRoutes||peer.importCustomRoutes?'Peering · transit':'Peering','network.peerings.network',!!(peer.exportCustomRoutes||peer.importCustomRoutes)));
     }
     else if(t==='compute.googleapis.com/Subnetwork')add('subnet',{parent:p.network?id(p.network):undefined,cidr:p.ipCidrRange});
-    else if(t==='compute.googleapis.com/Instance'){const machine=p.machineType?.split('/').pop();add('compute',{parent:p.networkInterfaces?.[0]?.subnetwork?id(p.networkInterfaces[0].subnetwork):undefined,ip:p.networkInterfaces?.[0]?.networkIP,publicIp:p.networkInterfaces?.[0]?.accessConfigs?.[0]?.natIP,status:p.status??'미확인',specs:{'인스턴스':machine??'미확인',...skuSpecs(gcpMachines[machine]),...diskSpec((p.disks??[]).map((d:Raw)=>d.diskSizeGb)),'GPU':p.guestAccelerators?.map((g:Raw)=>`${g.acceleratorCount} × ${g.acceleratorType.split('/').pop()}`).join(', ')||'없음'}});}
+    else if(t==='compute.googleapis.com/Instance'){
+      const machine=p.machineType?.split('/').pop(),nics=(p.networkInterfaces??[]) as Raw[],first=nics[0];
+      const addrOf=(n:Raw,k:number)=>[{ip:n.networkIP,primary:k===0},...(n.aliasIpRanges??[]).map((a:Raw)=>({ip:a.ipCidrRange})),...(n.accessConfigs??[]).filter((x:Raw)=>x.natIP).map((x:Raw)=>({ip:x.natIP,public:true}))].filter((a:Raw)=>a.ip);
+      // Network tags decide which firewall rules and routes apply to this instance, so they are kept as matching keys.
+      add('compute',{parent:first?.subnetwork?id(first.subnetwork):undefined,ip:first?.networkIP,publicIp:first?.accessConfigs?.[0]?.natIP,addresses:nics.flatMap(addrOf),netTags:p.tags?.items??[],status:p.status??'미확인',specs:{'인스턴스':machine??'미확인',...skuSpecs(gcpMachines[machine]),...diskSpec((p.disks??[]).map((d:Raw)=>d.diskSizeGb)),'GPU':p.guestAccelerators?.map((g:Raw)=>`${g.acceleratorCount} × ${g.acceleratorType.split('/').pop()}`).join(', ')||'없음',...(nics.length>1?{'NIC':`${nics.length}개`}:{}),...(p.tags?.items?.length?{'네트워크 태그':p.tags.items.join(', ')}:{})}});
+      nics.forEach((n:Raw,k:number)=>{const nicId=`${a.name}/networkInterfaces/${n.name??`nic${k}`}`;resources.push(base('gcp',nicId,`${p.name} ${n.name??`nic${k}`}`,'nic','compute.googleapis.com/NetworkInterface',scope,region,'Cloud Asset Inventory · RESOURCE',{parent:n.subnetwork?id(n.subnetwork):undefined,ip:n.networkIP,publicIp:n.accessConfigs?.[0]?.natIP,addresses:addrOf(n,0),netTags:p.tags?.items??[],specs:{'종류':'Network interface','네트워크':String(n.network??'').split('/').pop()??'미확인'}}));links.push(relation(id(a.name),id(nicId),'attachment',k===0?'기본 NIC':`NIC ${k}`,'instance.networkInterfaces'));});
+      for(const sa of p.serviceAccounts??[])if(sa.email){const saId=`//iam.googleapis.com/projects/${scope}/serviceAccounts/${sa.email}`;if(!resources.some(r=>r.id===id(saId)))resources.push(base('gcp',saId,sa.email.split('@')[0],'identity','iam.googleapis.com/ServiceAccount',scope,'global','Cloud Asset Inventory · RESOURCE',{specs:{'종류':'서비스 계정','이메일':sa.email,'접근 범위':(sa.scopes??[]).map((x:string)=>x.split('/').pop()).join(', ')||'미수집'}}));links.push(relation(id(a.name),id(saId),'uses_identity','서비스 계정','instance.serviceAccounts.email',{ref:sa.email}));}
+      // A disk is joined only when its own asset was collected; an unreadable disk is not invented.
+      for(const d of p.disks??[]){const src=d.source?String(d.source).replace('https://www.googleapis.com/compute/v1/','//compute.googleapis.com/'):undefined;if(src&&diskAssets.has(src))links.push(relation(id(a.name),id(src),'attachment',d.boot?'부팅 디스크':'데이터 디스크','instance.disks.source',{ref:d.source,note:'OS 내부 마운트 여부는 클라우드 API로 확인할 수 없습니다.'}));}
+    }
+    else if(t==='compute.googleapis.com/Disk')add('disk',{status:p.status??'미확인',specs:{'종류':'Persistent Disk','크기':p.sizeGb?`${p.sizeGb} GiB`:'미확인','유형':String(p.type??'').split('/').pop()||'미확인','사용 인스턴스':(p.users??[]).map((u:string)=>u.split('/').pop()).join(', ')||'없음'}});
+    else if(t==='storage.googleapis.com/Bucket')add('bucket',{status:'구성 수집됨',specs:{'종류':'Cloud Storage 버킷','위치':p.location??a.resource?.location??'미확인','균일한 버킷 수준 액세스':String(p.iamConfiguration?.uniformBucketLevelAccess?.enabled??'미수집')}});
     else if(t==='compute.googleapis.com/Firewall'){
-      add('firewall',{parent:p.network?id(p.network):undefined,status:p.disabled?'disabled':'enabled',specs:{'대상 태그':p.targetTags?.join(', ')||'전체 대상 (태그 제한 없음)','비활성':String(p.disabled??false)},rules:[...(p.allowed??[]).map((r:Raw)=>({...r,action:'Allow'})),...(p.denied??[]).map((r:Raw)=>({...r,action:'Deny'}))].map((r:Raw)=>({direction:p.direction??'INGRESS',action:r.action,protocol:r.IPProtocol,ports:r.ports?.join(', ')||'All',source:p.sourceRanges?.join(', ')||p.sourceTags?.join(', ')||'미지정',destination:p.destinationRanges?.join(', ')||p.targetTags?.join(', ')||'network targets',priority:String(p.priority??1000)}))});
+      // Which instances a rule applies to (target tags or service accounts, none means all) and which senders it names beyond ranges.
+      const peers=[...(p.sourceTags??[]).map((x:string)=>`tag:${x}`),...(p.sourceServiceAccounts??[]).map((x:string)=>`sa:${x}`)];
+      add('firewall',{appliesTo:{...(p.targetTags?.length?{tags:p.targetTags}:{}),...(p.targetServiceAccounts?.length?{serviceAccounts:p.targetServiceAccounts}:{})},parent:p.network?id(p.network):undefined,status:p.disabled?'disabled':'enabled',specs:{'대상 태그':p.targetTags?.join(', ')||'전체 대상 (태그 제한 없음)','비활성':String(p.disabled??false)},rules:[...(p.allowed??[]).map((r:Raw)=>({...r,action:'Allow'})),...(p.denied??[]).map((r:Raw)=>({...r,action:'Deny'}))].map((r:Raw)=>({name:p.name,direction:p.direction??'INGRESS',action:r.action,protocol:r.IPProtocol,ports:r.ports?.join(', ')||'All',source:p.sourceRanges?.join(', ')||(peers.length?'':'*'),destination:p.destinationRanges?.join(', ')||'*',priority:String(p.priority??1000),...(peers.length?{peers}:{})}))});
       if(p.network)links.push(relation(id(a.name),id(p.network),'policy','VPC 방화벽 정책','firewall.network (대상 태그·서비스 계정 별도 평가 필요)'));
     } else if(t==='compute.googleapis.com/Router')add('gateway',{parent:p.network?id(p.network):undefined,specs:{'종류':'Cloud Router','ASN':String(p.bgp?.asn??'미확인')}});
     else if(t==='compute.googleapis.com/InterconnectAttachment'){
@@ -265,7 +278,8 @@ export function normalizeGcp(assets:Raw[]):Normalized {
   for(const a of assets)if(a.assetType==='compute.googleapis.com/Route'){
     const p=a.resource?.data??{},network=resources.find(r=>r.id===id(p.network??''));if(!network)continue;
     const hop=p.nextHopIlb??p.nextHopPeering??p.nextHopGateway??p.nextHopIp??p.nextHopVpnTunnel??'미확인';
-    network.routes.push({destination:p.destRange??'미확인',nextHop:String(hop).split('/').pop()??'미확인',via:p.nextHopPeering?'Peering':p.nextHopIlb?'Load Balancer':p.nextHopGateway?'Gateway':p.nextHopVpnTunnel?'VPN':'IP'});
+    // GCP routes belong to the network, carry a priority, and with tags apply only to instances that carry them.
+    network.routes.push({destination:p.destRange??'미확인',nextHop:String(hop).split('/').pop()??'미확인',via:p.nextHopPeering?'Peering':p.nextHopIlb?'Load Balancer':p.nextHopGateway?'Gateway':p.nextHopVpnTunnel?'VPN':p.nextHopInstance?'Instance':'IP',priority:Number(p.priority??1000),...(p.tags?.length?{tags:p.tags}:{}),...(p.nextHopIp?{nextHopIp:p.nextHopIp}:{}),origin:String(a.name).includes('/default-route')||p.routeType==='SUBNET'?'system':'user'});
   }
   return {resources,links,warnings:[],scopeLabels:{}};
 }

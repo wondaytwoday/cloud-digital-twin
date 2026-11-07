@@ -304,6 +304,58 @@ function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
     if(bad?.verdict==='deny'){res.status='blocked';res.summary=`요청은 통과하지만 응답이 ${bad.name}에서 차단됩니다 (NACL은 상태 비저장).`;}
   }else res.returnPath={status:'allowed',notes:['같은 서브넷 안이라 NACL을 거치지 않고, 보안 그룹은 상태 기반입니다.']};
 }
+// ---- GCP
+const gcpIdentity=(c:Ctx,instance?:Resource)=>instance?(c.out.get(instance.id)??[]).filter(l=>l.kind==='uses_identity').map(l=>c.byId.get(l.target)?.specs['이메일']).filter((x):x is string=>!!x):[];
+function gcpFirewall(c:Ctx,network:Resource|undefined,direction:'INGRESS'|'EGRESS',target:Resource|undefined,peer:Addr&{instance?:Resource},q:FlowQuery,at:string):PolicyCheck{
+  const tags=new Set(target?.netTags??[]),sas=new Set(gcpIdentity(c,target)),peerTags=new Set(peer.instance?.netTags??[]),peerSas=new Set(gcpIdentity(c,peer.instance));
+  const applies=(fw:Resource)=>{const t=fw.appliesTo;if(!t?.tags?.length&&!t?.serviceAccounts?.length)return true;return!!(t.tags?.some(x=>tags.has(x))||t.serviceAccounts?.some(x=>sas.has(x)));};
+  const firewalls=policiesOn(c,network?.id).filter(p=>p.type==='compute.googleapis.com/Firewall'&&p.status!=='disabled'&&applies(p));
+  const rules=firewalls.flatMap(fw=>fw.rules.filter(r=>r.direction.toUpperCase()===direction).map(r=>({fw,r,n:Number(r.priority)}))).sort((a,b)=>a.n-b.n||Number(a.r.action==='Allow')-Number(b.r.action==='Allow'));
+  const unevaluated:string[]=[],actions=new Set<string>();
+  for(const {fw,r} of rules){
+    const ranges=(direction==='INGRESS'?r.source:r.destination).split(/,\s*/).filter(Boolean),peers=(r as {peers?:string[]}).peers??[];
+    const byRange:Tri[]=ranges.map(t=>t==='*'?true:cidrMatch(t,peer)),byPeer:Tri[]=direction==='INGRESS'?peers.map(p=>p.startsWith('tag:')?peerTags.has(p.slice(4)):p.startsWith('sa:')?peerSas.has(p.slice(3)):'unknown'):[];
+    const all=[...byRange,...byPeer],who:Tri=all.includes(true)?true:all.includes('unknown')?'unknown':false;
+    const m=and(protoMatch(r.protocol,q.protocol),portMatch(r.ports,q),who);
+    if(m===false)continue;
+    if(m==='unknown'){unevaluated.push(`${fw.name}`);actions.add(r.action);continue;}
+    const verdict=r.action==='Allow'?'allow' as const:'deny' as const,ref={name:fw.name,priority:r.priority,action:r.action,protocol:r.protocol,ports:r.ports,source:r.source||peers.join(', '),destination:r.destination};
+    if(unevaluated.length&&![...actions].every(a=>a===r.action))return{policy:fw.id,name:fw.name,at,direction:direction==='INGRESS'?'inbound':'outbound',verdict:'unknown',rule:ref,reason:`우선순위가 더 높은 규칙을 확정하지 못했습니다: ${unevaluated.join(', ')}`,unevaluated};
+    return{policy:fw.id,name:fw.name,at,direction:direction==='INGRESS'?'inbound':'outbound',verdict,rule:ref,reason:`${target?.name??'대상'}에 적용되는 규칙 중 우선순위 ${r.priority} ${fw.name}이(가) 먼저 일치합니다${fw.appliesTo?.tags?` (대상 태그 ${fw.appliesTo.tags.join(', ')})`:''}.`};
+  }
+  // The implied rules close every VPC: ingress is denied, egress allowed, at the lowest priority.
+  const implied=direction==='INGRESS'?'deny' as const:'allow' as const;
+  if(unevaluated.length&&!actions.has(implied==='deny'?'Deny':'Allow')&&actions.size)return{name:'VPC 방화벽',at,direction:direction==='INGRESS'?'inbound':'outbound',verdict:'unknown',reason:`확정하지 못한 규칙이 있습니다: ${unevaluated.join(', ')}`,unevaluated};
+  return{name:`암묵적 ${direction==='INGRESS'?'인그레스 거부':'이그레스 허용'}`,at,direction:direction==='INGRESS'?'inbound':'outbound',verdict:implied,reason:`${target?.name??'대상'}에 적용되면서 일치하는 방화벽 규칙이 없어 GCP의 암묵적 규칙(우선순위 65535)이 적용됩니다.${firewalls.length?'':' 이 인스턴스에 적용되는 규칙 자체가 없습니다.'}`};
+}
+function analyzeGcp(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
+  const instance=from.resource?.kind==='compute'?from.resource:undefined,tags=new Set(instance?.netTags??[]);
+  const dst:Addr={ip:to.ip,cidr:to.ip?undefined:to.cidr};
+  res.policies.push(gcpFirewall(c,from.network,'EGRESS',instance,{...dst,instance:to.resource?.kind==='compute'?to.resource:undefined},q,`출발 ${instance?.name??''} 이그레스`));
+  note(res,'계층형 방화벽 정책과 네트워크 방화벽 정책은 수집하지 않았습니다. VPC 방화벽 규칙보다 먼저 평가될 수 있습니다.');
+  const network=from.network;if(!network){undecided(res,'출발 인스턴스의 VPC를 찾지 못했습니다.');return;}
+  const subnetsOf=(n:Resource)=>c.s.resources.filter(r=>r.kind==='subnet'&&r.parent===n.id&&r.cidr);
+  const candidates=[...subnetsOf(network).map(sn=>({prefix:sn.cidr!,type:'subnet',priority:0,label:`${sn.name} 서브넷 경로`,peer:undefined as Resource|undefined})),
+    ...peersOf(c,network).flatMap(p=>subnetsOf(p.peer).map(sn=>({prefix:sn.cidr!,type:'peering',priority:0,label:`${p.peer.name} 피어링 (서브넷 경로 교환)`,peer:p.peer}))),
+    ...network.routes.filter(r=>!r.tags?.length||r.tags.some(t=>tags.has(t))).map(r=>({prefix:r.destination,type:r.via,priority:r.priority??1000,label:`경로 ${r.destination} → ${r.nextHop}`,peer:undefined}))];
+  const target=addrRange(dst),route=candidates.filter(r=>{const p=parseCidr(r.prefix);return p&&target&&within(target,p);}).sort((a,b)=>prefixLen(b.prefix)-prefixLen(a.prefix)||a.priority-b.priority)[0];
+  // Routes learnt over BGP by a Cloud Router are not in Asset Inventory, so a private destination that only the default route covers is undecided, not unroutable, wherever a router exists.
+  const router=c.s.resources.find(r=>r.kind==='gateway'&&r.parent===network.id&&/Cloud Router/.test(r.specs['종류']??''));
+  if((!route||(route.type==='Gateway'&&(to.zone==='onprem'||(to.ip&&isPrivate(to.ip)))))&&router){res.path.push({id:router.id,label:router.name,kind:'gateway',evidence:'Cloud Router (BGP 동적 경로)'});undecided(res,'Cloud Router가 BGP로 받는 동적 경로는 Asset Inventory에 없어 이 목적지로 가는 경로를 확정할 수 없습니다.');return;}
+  if(!route){undecided(res,`${network.name}에 ${to.label}(으)로 가는 경로가 없습니다.`);return;}
+  res.path.push({label:route.label,kind:'route',evidence:`최장 접두사 ${route.prefix}, 우선순위 ${route.priority}`,basis:'configured'});
+  if(route.type==='peering'){if(to.network?.id!==route.peer?.id){res.status='blocked';res.summary='피어링은 전이되지 않습니다.';return;}res.path.push({id:route.peer!.id,label:`${network.name} ↔ ${route.peer!.name} 피어링`,kind:'peering',evidence:'VPC 피어링은 직접 연결된 네트워크의 서브넷 경로만 교환합니다.'});}
+  else if(route.type==='Gateway'){
+    if(to.ip&&isPrivate(to.ip)){res.status='blocked';res.summary=`사설 주소 ${to.ip}(으)로 가는 경로가 인터넷 게이트웨이뿐입니다.`;return;}
+    res.path.push({label:from.nic?.publicIp?`외부 IP ${from.nic.publicIp}`:'인터넷 게이트웨이',kind:'internet',evidence:'기본 인터넷 경로'});
+    if(!from.nic?.publicIp)undecided(res,'외부 IP가 없어 Cloud NAT가 필요하지만 Cloud NAT 구성은 수집하지 않았습니다.');
+    note(res,'인터넷 쪽 목적지는 수집 범위 밖입니다.');return;
+  }
+  else if(route.type!=='subnet'){undecided(res,`다음 홉 유형 ${route.type}은(는) 아직 분석하지 않습니다.`);return;}
+  if(to.zone!=='cloud')return;
+  res.policies.push(gcpFirewall(c,to.network,'INGRESS',to.resource?.kind==='compute'?to.resource:undefined,{ip:from.ip,instance},q,`도착 ${to.resource?.name??''} 인그레스`));
+  res.returnPath={status:'allowed',notes:['VPC 방화벽 규칙은 상태 기반이라 허용된 연결의 응답을 따로 평가하지 않습니다.']};
+}
 export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   const c=index(s),from=resolveEndpoint(s,q.from,c),to=resolveEndpoint(s,q.to,c);
   const res:FlowResult={query:q,status:'allowed',summary:'',from,to,path:[{id:from.resource?.id,label:from.label,kind:'source',evidence:from.nic?`${from.nic.name} · ${from.ip}`:from.ip??from.cidr??''}],policies:[],returnPath:{status:'unknown',notes:[]},gaps:[],conditions:[],observed:'not-integrated',dataAt:Object.fromEntries(s.connections.map(x=>[x.provider,x.collectedAt])),analyzedAt:now.toISOString(),completeness:'full'};
@@ -311,6 +363,7 @@ export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   if(from.zone==='unknown'||to.zone==='unknown')undecided(res,`${from.zone==='unknown'?from.label:to.label}을(를) 수집된 자원이나 주소로 찾지 못했습니다.`);
   else if(from.zone!=='cloud')undecided(res,'출발지가 클라우드 밖이면 그쪽 라우팅을 알 수 없어 분석하지 않습니다. 클라우드 쪽에서 출발하는 방향으로 분석하세요.');
   else if(from.provider==='aws'&&(to.provider==='aws'||to.zone==='internet'||to.zone==='onprem'))analyzeAws(c,q,from,to,res);
+  else if(from.provider==='gcp'&&(to.provider==='gcp'||to.zone==='internet'||to.zone==='onprem'))analyzeGcp(c,q,from,to,res);
   else if((to.provider&&to.provider!==from.provider&&to.provider!=='onprem')||(to.zone==='internet'&&to.service))undecided(res,to.service&&to.zone==='internet'?`${to.service.name}에 Private Endpoint가 없어 공용 엔드포인트로만 접근합니다. 공용 경로와 서비스 방화벽은 평가하지 않습니다.`:'클라우드 사이 경로(전용선·VPN 상호 연결)는 아직 분석하지 않습니다.');
   else if(from.provider==='azure')analyzeAzure(c,q,from,to,res);
   else undecided(res,`${from.provider} 경로 분석은 아직 지원하지 않습니다.`);
