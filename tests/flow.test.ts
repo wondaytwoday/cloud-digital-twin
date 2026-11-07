@@ -94,3 +94,40 @@ test('return path: a request through a firewall whose reply bypasses it is repor
 test('every result says it is configuration, not observation, and when its data was collected',async()=>{
   const r=await flow('web-01','web-02');assert.equal(r.observed,'not-integrated');assert.ok(r.analyzedAt);assert.ok('azure' in r.dataAt);
 });
+
+// ---- AWS
+const awsFlow=async(from:string,to:string,port:number,s?:Snapshot)=>analyzeFlow(s??await demo,{from:/^\d/.test(from)?from:await id(from),to:await id(to),protocol:'tcp',port});
+test('AWS 1. same VPC decides nothing: a security group admits only what a rule allows',async()=>{
+  const r=await awsFlow('checkout-api-01','checkout-api-02',8443);
+  assert.equal(r.status,'blocked');assert.match(r.summary,/허용하는 규칙이 없습니다/);
+  assert.equal(r.policies.find(p=>p.verdict==='deny')?.at,'도착 ENI eni-checkout2-0');
+});
+test('AWS: a NACL refuses what the security group would never be asked about, by rule number',async()=>{
+  const ok=await awsFlow('checkout-api-01','rds-orders',5432),refused=await awsFlow('checkout-api-02','rds-orders',5432);
+  assert.equal(ok.status,'allowed');assert.equal(ok.returnPath.status,'allowed');
+  assert.equal(refused.status,'blocked');assert.equal(refused.policies.find(p=>p.verdict==='deny')?.rule?.name,'#90');
+});
+test('AWS: a NACL that drops the reply\'s ephemeral ports blocks a request it lets in',async()=>{
+  const s=structuredClone(await demo),acl=s.resources.find(r=>r.name==='acl-data')!;
+  acl.rules=acl.rules.filter(r=>!(r.direction==='Outbound'&&r.ports==='1024-65535'));
+  const r=await awsFlow('checkout-api-01','rds-orders',5432,s);
+  assert.equal(r.returnPath.status,'blocked');assert.equal(r.status,'blocked');assert.match(r.summary,/응답/);
+});
+test('AWS: S3 through a gateway endpoint: a route-table target with no ENI, and the bucket outside the VPC',async()=>{
+  const s=await demo,r=await awsFlow('checkout-api-01','commerce-prod-assets',443),ep=s.resources.find(x=>x.name==='vpce-s3')!;
+  assert.equal(ep.kind,'endpoint');assert.equal(ep.ip,undefined);assert.ok(!ep.addresses?.length,'no address is invented for a gateway endpoint');
+  assert.ok(!s.links.some(l=>l.kind==='attachment'&&(l.source===ep.id||l.target===ep.id)&&s.resources.find(x=>x.id===(l.source===ep.id?l.target:l.source))?.kind==='nic'),'and no NIC');
+  assert.deepEqual(kinds(r).slice(1,4),['route','endpoint','service']);assert.ok(r.gaps.some(g=>/버킷 정책/.test(g.text)));
+  assert.equal(s.resources.find(x=>x.name==='commerce-prod-assets')!.parent,undefined);
+});
+test('AWS 6. a second ENI keeps its own subnet, groups and address',async()=>{
+  const s=await demo,r=resolveEndpoint(s,'10.21.3.30');
+  assert.equal(r.nic?.name,'eni-orders-1');assert.equal(r.subnet?.name,'data-a');assert.equal(r.resource?.name,'orders-worker-01');
+  const vm=s.resources.find(x=>x.name==='orders-worker-01')!;assert.deepEqual(vm.addresses?.map(a=>[a.ip,a.primary]),[['10.21.1.30',true],['10.21.3.30',false]]);
+  // Same instance, other ENI: its own security group (sg-db, no egress rules) refuses to start the connection.
+  assert.equal((await awsFlow('10.21.3.30','rds-orders',5432)).policies[0].verdict,'deny');
+});
+test('AWS: routing through a Transit Gateway is undecided while its route tables are not collected',async()=>{
+  const r=analyzeFlow(await demo,{from:await id('checkout-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
+  assert.equal(r.status,'unknown');assert.ok(kinds(r).includes('gateway'));assert.ok(r.gaps.some(g=>g.undecided&&/Transit Gateway 라우트 테이블/.test(g.text)));
+});

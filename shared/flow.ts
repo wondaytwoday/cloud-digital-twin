@@ -59,7 +59,8 @@ export function resolveEndpoint(s:Snapshot,ref:string,c:Ctx=index(s)):Endpoint{
       return{ref,label:r.name,resource:r,provider:r.provider,zone:'internet',service:r};
     }
     const subnet=r.kind==='subnet'?r:subnetOf(c,r);
-    return{ref,label:r.name,resource:r,nic:r.kind==='nic'?r:undefined,ip:r.ip,cidr:r.kind==='subnet'?r.cidr:undefined,subnet,network:networkOf(c,subnet??r),provider:r.provider,zone:'cloud'};
+    // A managed database placed in a subnet without a collected address (RDS reports a DNS name) is located by its subnet's range.
+    return{ref,label:r.name,resource:r,nic:r.kind==='nic'?r:undefined,ip:r.ip,cidr:r.kind==='subnet'||!r.ip?subnet?.cidr:undefined,subnet,network:networkOf(c,subnet??r),provider:r.provider,zone:'cloud'};
   }
   if(isIp(ref)){
     const h=holding(c,ref);
@@ -209,12 +210,107 @@ function analyzeAzure(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult
   }
 }
 
+// ---- AWS: security groups are stateful allow-lists unioned across an ENI's groups; NACLs are stateless and ordered by rule number.
+const isType=(r:Resource,t:string)=>r.type===t;
+const awsId=(c:Ctx,ref:Resource,raw:string)=>`aws:${ref.nativeId.split('/').slice(0,2).join('/')}/${raw}`;
+type RangeQ={from:number;to:number};
+// Whether a rule's port list covers a whole range (the reply's ephemeral ports), or the single destination port.
+function portsCover(ports:string,want:RangeQ):Tri{
+  if(/^(\*|all)$/i.test(ports.trim()))return true;
+  const parts=ports.split(/,\s*/).map(p=>{const [a,b=a]=p.split(/[–-]/).map(Number);return{from:a,to:b};});
+  if(parts.some(p=>p.from<=want.from&&p.to>=want.to))return true;
+  return parts.every(p=>p.to<want.from||p.from>want.to)?false:'unknown';
+}
+const EPHEMERAL={from:1024,to:65535};
+function sgCheck(c:Ctx,holder:Resource|undefined,direction:'Inbound'|'Outbound',peer:Addr&{nic?:Resource;service?:boolean},q:FlowQuery,at:string):PolicyCheck|undefined{
+  const eni=holder,groups=policiesOn(c,eni?.id).filter(p=>isType(p,'AWS::EC2::SecurityGroup'));if(!eni||!groups.length)return undefined;
+  const peerGroups=new Set(policiesOn(c,peer.nic?.id).filter(p=>isType(p,'AWS::EC2::SecurityGroup')).map(p=>p.nativeId.split('/').pop()));
+  const unevaluated:string[]=[];
+  for(const g of groups)for(const rule of g.rules.filter(r=>r.direction===direction)){
+    const tokens=(direction==='Inbound'?rule.source:rule.destination).split(/,\s*/).filter(Boolean),peers=(rule as {peers?:string[]}).peers??[];
+    const addr:Tri[]=tokens.filter(t=>!t.startsWith('sg-')&&!t.startsWith('pl-')).map(t=>peer.service?(t==='0.0.0.0/0'?true:'unknown'):cidrMatch(t,peer));
+    const refs:Tri[]=peers.map(p=>p.startsWith('sg:')?peerGroups.has(p.slice(3)):'unknown');
+    const m=and(protoMatch(rule.protocol,q.protocol),portMatch(rule.ports,q),[...addr,...refs].includes(true)?true:[...addr,...refs].includes('unknown')?'unknown':false);
+    if(m===true)return{policy:g.id,name:groups.length>1?`보안 그룹 ${groups.length}개 (${groups.map(x=>x.name).join(', ')})`:g.name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'allow',rule:{name:g.name,action:'Allow',protocol:rule.protocol,ports:rule.ports,source:rule.source,destination:rule.destination},reason:`${g.name}의 허용 규칙이 일치합니다. 보안 그룹은 ENI에 붙은 모든 그룹의 허용 규칙을 합쳐 평가합니다.`};
+    if(m==='unknown')unevaluated.push(`${g.name}: ${tokens.join(', ')||peers.join(', ')}`);
+  }
+  const name=groups.map(x=>x.name).join(', ');
+  return unevaluated.length?{policy:groups[0].id,name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'unknown',reason:`확정적으로 일치하는 허용 규칙이 없고, 해석하지 못한 규칙이 있습니다: ${unevaluated.join('; ')}`,unevaluated}
+    :{policy:groups[0].id,name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'deny',reason:'일치하는 허용 규칙이 없습니다. 보안 그룹은 허용 규칙만 있으며 나머지는 거부됩니다.'};
+}
+function naclCheck(c:Ctx,subnet:Resource|undefined,direction:'Inbound'|'Outbound',peer:Addr&{service?:boolean},protocol:Protocol,ports:RangeQ,at:string):PolicyCheck|undefined{
+  const acl=policiesOn(c,subnet?.id).find(p=>isType(p,'AWS::EC2::NetworkAcl'));if(!acl)return undefined;
+  const rules=acl.rules.filter(r=>r.direction===direction).sort((a,b)=>Number(a.priority)-Number(b.priority));const skipped:string[]=[];
+  for(const rule of rules){
+    const token=direction==='Inbound'?rule.source:rule.destination,addr:Tri=peer.service?(token==='0.0.0.0/0'?true:'unknown'):cidrMatch(token,peer);
+    const m=and(protoMatch(rule.protocol,protocol),protocol==='icmp'?true:portsCover(rule.ports,ports),addr);
+    if(m===false)continue;
+    if(m==='unknown'){skipped.push(`${rule.name} (${token} ${rule.ports})`);continue;}
+    const verdict=rule.action==='Allow'?'allow' as const:'deny' as const,ref={name:rule.name,priority:rule.priority,action:rule.action,protocol:rule.protocol,ports:rule.ports,source:rule.source,destination:rule.destination};
+    if(skipped.length)return{policy:acl.id,name:acl.name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'unknown',rule:ref,reason:`번호가 더 앞선 규칙의 일치 여부를 확정하지 못했습니다: ${skipped.join('; ')}`,unevaluated:skipped};
+    return{policy:acl.id,name:acl.name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict,rule:ref,reason:`규칙 ${rule.name}이(가) 먼저 일치합니다 (NACL은 상태 비저장).`};
+  }
+  return{policy:acl.id,name:acl.name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'unknown',reason:`일치하는 규칙을 확정하지 못했습니다: ${skipped.join('; ')||'규칙 없음'}`};
+}
+function awsRoutes(c:Ctx,subnet?:Resource,network?:Resource){
+  // The local route always covers the VPC's own ranges; a table's 'local' entry is read as that, whatever prefix it lists.
+  const out:{prefix:string;type:string;target?:string;hop:string;origin:string}[]=spaces(network).map(p=>({prefix:p,type:'local',hop:'local',origin:'system'}));
+  for(const r of subnet?.routes??[])if(r.nextHop!=='local')out.push({prefix:r.destination,type:r.via,target:r.target,hop:r.nextHop,origin:r.origin??'user'});
+  return out;
+}
+function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
+  const push=(p?:PolicyCheck)=>{if(p)res.policies.push(p);};
+  const service=!!to.service&&!to.ip,src:Addr&{nic?:Resource}={ip:from.ip,nic:from.nic},dst:Addr&{nic?:Resource;service?:boolean}={ip:to.ip,cidr:to.ip?undefined:to.cidr,nic:to.nic,service};
+  const qPort=q.port===undefined?undefined:{from:q.port,to:q.port};
+  push(sgCheck(c,from.nic,'Outbound',dst,q,`출발 ENI ${from.nic?.name??''}`));
+  const sameSubnet=!!to.subnet&&to.subnet.id===from.subnet?.id;
+  // NACLs sit on subnet boundaries: traffic within one subnet never meets them.
+  if(!sameSubnet&&qPort)push(naclCheck(c,from.subnet,'Outbound',dst,q.protocol,qPort,`출발 서브넷 ${from.subnet?.name??''} NACL`));
+  // Pick the route: longest prefix; a prefix-list route serves the AWS service it names.
+  const routes=awsRoutes(c,from.subnet,from.network);
+  let route;
+  if(service){route=routes.find(r=>r.prefix.startsWith('pl-')&&r.hop.startsWith('vpce-'));if(!route){undecided(res,`${to.label}에 대한 게이트웨이 엔드포인트 경로가 없어 인터넷(NAT·IGW)을 거치는 공용 경로로만 접근합니다. 그 경로와 서비스 쪽 정책은 평가하지 않습니다.`);return;}}
+  else{const target=addrRange(dst);route=routes.filter(r=>{const p=parseCidr(r.prefix);return p&&target&&within(target,p);}).sort((a,b)=>prefixLen(b.prefix)-prefixLen(a.prefix))[0];}
+  if(!route){undecided(res,`${from.subnet?.name??'출발 서브넷'}의 라우트 테이블에 ${to.label}(으)로 가는 경로가 없습니다.`);return;}
+  res.path.push({label:`경로 ${route.prefix} → ${route.hop}`,kind:'route',evidence:route.type==='local'?`${from.network?.name} VPC 로컬 경로`:`${from.subnet?.name}의 라우트 테이블`,basis:'configured'});
+  const hop=route.hop;
+  if(route.type==='local'){if(to.network&&to.network.id!==from.network?.id)undecided(res,'목적지가 VPC 대역에 있지만 다른 VPC로 수집됐습니다.');}
+  else if(hop.startsWith('vpce-')){const ep=c.byId.get(awsId(c,from.subnet!,hop));res.path.push({id:ep?.id,label:ep?.name??hop,kind:'endpoint',evidence:'게이트웨이 엔드포인트 (ENI·주소 없음, 라우트 테이블 대상)'});note(res,'엔드포인트 정책과 버킷 정책은 평가하지 않았습니다.');}
+  else if(hop.startsWith('pcx-')){
+    const peer=peersOf(c,from.network!).find(p=>to.network&&p.peer.id===to.network.id);
+    if(!peer){res.gaps.push({text:'피어링은 직접 연결된 VPC 사이에서만 전달합니다. 목적지는 이 피어링의 상대 VPC가 아닙니다.',undecided:false});res.status='blocked';res.summary='비전이 피어링: 목적지 VPC로 직접 피어링되어 있지 않습니다.';return;}
+    res.path.push({id:peer.peer.id,label:`${from.network!.name} ↔ ${peer.peer.name} 피어링`,kind:'peering',evidence:peer.link.evidence});
+  }else if(hop.startsWith('tgw-')){
+    const tgw=c.s.resources.find(r=>r.kind==='gateway'&&r.nativeId.endsWith(`/${hop}`));res.path.push({id:tgw?.id,label:tgw?.name??hop,kind:'gateway',evidence:'Transit Gateway 연결'});
+    const attached=tgw?c.s.links.filter(l=>l.source===tgw.id&&l.kind==='attachment').map(l=>l.target):[];
+    if(to.zone==='onprem'){const sites=tgw?sitesBehind(c,tgw):[];if(!sites.some(x=>x.id===to.resource?.id)){undecided(res,'이 Transit Gateway 뒤에 목적지 사내망이 연결된 것을 확인하지 못했습니다.');return;}res.path.push({id:to.resource?.id,label:to.resource?.name??'사내망',kind:'onprem',evidence:'VPN·DX 연결 너머 (수동 등록한 사내망)',basis:'declared'});undecided(res,'Transit Gateway 라우트 테이블을 수집하지 않아 사내망으로 전달하는지 확정할 수 없습니다.');note(res,'사내망 쪽 라우팅과 방화벽은 수집 범위 밖입니다.');return;}
+    if(to.network&&!attached.includes(to.network.id)){undecided(res,`${to.network.name}이(가) 이 Transit Gateway에 연결된 것을 확인하지 못했습니다.`);return;}
+    undecided(res,'Transit Gateway 라우트 테이블(연결·전파)을 수집하지 않아 TGW가 이 대상으로 전달하는지 확정할 수 없습니다.');
+  }else if(hop.startsWith('igw-')||hop.startsWith('nat-')){
+    if(to.ip&&isPrivate(to.ip)){res.status='blocked';res.summary=`사설 주소 ${to.ip}을(를) ${hop}(으)로 보내는 경로뿐입니다.`;return;}
+    if(hop.startsWith('igw-')&&!(from.nic?.publicIp??from.resource?.publicIp)){res.status='blocked';res.summary='인터넷 게이트웨이로 가는 경로지만 출발 ENI에 공인 IP가 없습니다.';return;}
+    res.path.push({label:hop.startsWith('nat-')?`NAT ${hop}`:`인터넷 게이트웨이 ${hop}`,kind:'internet',evidence:'라우트 테이블 대상'});note(res,'인터넷 쪽 목적지는 수집 범위 밖입니다.');return;
+  }else{undecided(res,`지원하지 않는 다음 홉 ${hop}`);return;}
+  if(to.zone!=='cloud'||service){if(service)res.path.push({id:to.service!.id,label:to.service!.name,kind:'service',evidence:'S3 서비스 (리전 엔드포인트)'});return;}
+  if(!sameSubnet&&qPort)push(naclCheck(c,to.subnet,'Inbound',src,q.protocol,qPort,`도착 서브넷 ${to.subnet?.name??''} NACL`));
+  // An RDS instance or load balancer carries its groups itself rather than on an ENI the collector sees.
+  push(sgCheck(c,to.nic??to.resource,'Inbound',src,q,`도착 ${to.nic?`ENI ${to.nic.name}`:to.resource?.name??''}`));
+  if(!to.ip&&to.cidr)res.conditions.push(`${to.label}의 주소를 수집하지 않아 ${to.cidr} 범위 전체로 판정했습니다. 범위 일부에만 맞는 규칙은 판단 불가로 남습니다.`);
+  // Replies: security groups are stateful, NACLs are not, so the reply's ephemeral ports must pass both subnets' ACLs.
+  if(!sameSubnet&&q.protocol!=='icmp'){
+    const back=[naclCheck(c,to.subnet,'Outbound',src,q.protocol,EPHEMERAL,`응답: 도착 서브넷 NACL`),naclCheck(c,from.subnet,'Inbound',dst,q.protocol,EPHEMERAL,`응답: 출발 서브넷 NACL`)].filter(Boolean) as PolicyCheck[];
+    const bad=back.find(b=>b.verdict!=='allow');
+    res.returnPath={status:bad?(bad.verdict==='deny'?'blocked':'unknown'):'allowed',notes:bad?[`${bad.at}: ${bad.reason} (임시 포트 1024-65535)`]:['보안 그룹은 상태 기반이고, NACL은 응답의 임시 포트(1024-65535)를 허용합니다.']};
+    if(bad?.verdict==='deny'){res.status='blocked';res.summary=`요청은 통과하지만 응답이 ${bad.name}에서 차단됩니다 (NACL은 상태 비저장).`;}
+  }else res.returnPath={status:'allowed',notes:['같은 서브넷 안이라 NACL을 거치지 않고, 보안 그룹은 상태 기반입니다.']};
+}
 export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   const c=index(s),from=resolveEndpoint(s,q.from,c),to=resolveEndpoint(s,q.to,c);
   const res:FlowResult={query:q,status:'allowed',summary:'',from,to,path:[{id:from.resource?.id,label:from.label,kind:'source',evidence:from.nic?`${from.nic.name} · ${from.ip}`:from.ip??from.cidr??''}],policies:[],returnPath:{status:'unknown',notes:[]},gaps:[],conditions:[],observed:'not-integrated',dataAt:Object.fromEntries(s.connections.map(x=>[x.provider,x.collectedAt])),analyzedAt:now.toISOString(),completeness:'full'};
   if(s.mode==='mock')res.conditions.push('예시 데이터에 대한 분석입니다.');
   if(from.zone==='unknown'||to.zone==='unknown')undecided(res,`${from.zone==='unknown'?from.label:to.label}을(를) 수집된 자원이나 주소로 찾지 못했습니다.`);
   else if(from.zone!=='cloud')undecided(res,'출발지가 클라우드 밖이면 그쪽 라우팅을 알 수 없어 분석하지 않습니다. 클라우드 쪽에서 출발하는 방향으로 분석하세요.');
+  else if(from.provider==='aws'&&(to.provider==='aws'||to.zone==='internet'||to.zone==='onprem'))analyzeAws(c,q,from,to,res);
   else if((to.provider&&to.provider!==from.provider&&to.provider!=='onprem')||(to.zone==='internet'&&to.service))undecided(res,to.service&&to.zone==='internet'?`${to.service.name}에 Private Endpoint가 없어 공용 엔드포인트로만 접근합니다. 공용 경로와 서비스 방화벽은 평가하지 않습니다.`:'클라우드 사이 경로(전용선·VPN 상호 연결)는 아직 분석하지 않습니다.');
   else if(from.provider==='azure')analyzeAzure(c,q,from,to,res);
   else undecided(res,`${from.provider} 경로 분석은 아직 지원하지 않습니다.`);
@@ -224,7 +320,7 @@ export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   // A verdict is only as strong as its weakest part: one definite deny blocks, anything undecided makes the whole undecided.
   const denied=res.policies.find(p=>p.verdict==='deny');
   if(res.status!=='blocked'){
-    if(denied){res.status='blocked';res.summary=`${denied.name}의 ${denied.rule?.name??'규칙'}이(가) ${denied.direction==='inbound'?'들어오는':'나가는'} 트래픽을 차단합니다.`;}
+    if(denied){res.status='blocked';res.summary=denied.rule?`${denied.name}의 ${denied.rule.name??'규칙'}이(가) ${denied.direction==='inbound'?'들어오는':'나가는'} 트래픽을 차단합니다.`:`${denied.name}: ${denied.direction==='inbound'?'들어오는':'나가는'} 트래픽을 허용하는 규칙이 없습니다.`;}
     // A reply path only counts where the destination is collected; the far side of a gateway or the internet is out of reach either way.
     else if(res.status==='unknown'||res.policies.some(p=>p.verdict==='unknown')||(to.zone==='cloud'&&res.returnPath.status==='unknown')){res.status='unknown';res.summary=res.summary||'판단에 필요한 정보 일부를 수집하지 않았거나 해석할 수 없습니다. 아래 미확인 항목을 보세요.';}
     else res.summary=res.summary||`구성상 허용${res.completeness==='partial'?' (부분 평가)':''}: 경로와 정책 ${res.policies.length}개가 이 트래픽을 허용합니다.`;

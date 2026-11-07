@@ -1,9 +1,12 @@
-import {asset,awsRouteTable,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,publicIp,routeTable,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
+import {asset,awsRouteTable,ebs,nacl,awsSubnet,azId,azRow,compute,ec2,egress,gce,gcpSubnetName,instanceTypes,nicConfig,nsg,publicIp,routeTable,securityGroup,sgRule,standardRules,subnetId,tag,vm,vnet,vnetId,withPublicIp} from './builders.js';
 import type {Scenario} from './types.js';
 const connectivity='00000000-0000-4000-8000-000000000001',platform='00000000-0000-4000-8000-000000000002',data='00000000-0000-4000-8000-000000000003',dev='00000000-0000-4000-8000-000000000004',partner='00000000-0000-4000-8000-000000000099';
 const hub=vnetId(connectivity,'rg-network-hub','vnet-hub'),spokes={platform:vnetId(platform,'rg-platform','vnet-platform-prod'),data:vnetId(data,'rg-data','vnet-data-prod'),dev:vnetId(dev,'rg-dev','vnet-dev')};
 // The API VM's identities: a system-assigned one, and a user-assigned one granted read on the log storage account's blobs.
 const API_SYSTEM_ID='bbbbbbbb-0000-4000-8000-000000000001',API_PRINCIPAL='bbbbbbbb-0000-4000-8000-000000000002',API_IDENTITY=azId(platform,'rg-platform','ManagedIdentity/userAssignedIdentities','id-api-prod');
+// Commerce instances: orders-worker-01 has a second ENI in the data subnet, checkout-api-01 runs with an instance profile.
+const COMMERCE=[ec2('i-checkout1','checkout-api-01','m6i.xlarge','subnet-app-a','10.21.1.20','sg-app','running',{profile:'arn:aws:iam::444455556666:instance-profile/checkout-api'}),ec2('i-checkout2','checkout-api-02','m6i.xlarge','subnet-app-c','10.21.2.20','sg-app'),
+  ec2('i-orders','orders-worker-01','m6i.xlarge','subnet-app-a','10.21.1.30','sg-app','running',{enis:[{subnet:'subnet-data-a',ip:'10.21.3.30',sg:'sg-db'}]}),ec2('i-batch','batch-nightly-01','c6i.2xlarge','subnet-app-c','10.21.2.40','sg-app','stopped')];
 const hostProject='atlas-net-host',appProject='atlas-analytics-prod',sandboxProject='atlas-sandbox',R='asia-northeast3';
 const sharedVpc=`${compute(hostProject)}/global/networks/vpc-shared`,sandboxVpc=`${compute(sandboxProject)}/global/networks/vpc-sandbox`,hostSubnet=(n:string)=>gcpSubnetName(hostProject,R,n);
 export const standard:Scenario={
@@ -50,15 +53,20 @@ export const standard:Scenario={
     {account:'444455556666',label:'commerce-prod',region:'ap-northeast-2',api:{
       DescribeVpcs:{Vpcs:[{VpcId:'vpc-commerce',CidrBlock:'10.21.0.0/16',Tags:tag('vpc-commerce')}]},
       DescribeSubnets:{Subnets:[awsSubnet('subnet-public-a','public-a','vpc-commerce','10.21.0.0/24','ap-northeast-2a',true),awsSubnet('subnet-app-a','app-a','vpc-commerce','10.21.1.0/24','ap-northeast-2a'),awsSubnet('subnet-app-c','app-c','vpc-commerce','10.21.2.0/24','ap-northeast-2c'),awsSubnet('subnet-data-a','data-a','vpc-commerce','10.21.3.0/24','ap-northeast-2a')]},
-      DescribeInstances:{Reservations:[{Instances:[ec2('i-checkout1','checkout-api-01','m6i.xlarge','subnet-app-a','10.21.1.20','sg-app'),ec2('i-checkout2','checkout-api-02','m6i.xlarge','subnet-app-c','10.21.2.20','sg-app')]},{Instances:[ec2('i-orders','orders-worker-01','m6i.xlarge','subnet-app-a','10.21.1.30','sg-app'),ec2('i-batch','batch-nightly-01','c6i.2xlarge','subnet-app-c','10.21.2.40','sg-app','stopped')]}]},
+      DescribeInstances:{Reservations:[{Instances:COMMERCE.slice(0,2)},{Instances:COMMERCE.slice(2)}]},
       DescribeSecurityGroups:{SecurityGroups:[securityGroup('sg-alb','vpc-commerce',[sgRule(443,'0.0.0.0/0')]),securityGroup('sg-app','vpc-commerce',[sgRule(8443,'10.21.0.0/24'),sgRule(443,'10.0.0.0/8')]),securityGroup('sg-db','vpc-commerce',[sgRule(5432,'10.21.1.0/24')],[])]},
       DescribeInternetGateways:{InternetGateways:[{InternetGatewayId:'igw-commerce',Attachments:[{VpcId:'vpc-commerce',State:'available'}],Tags:tag('igw-commerce')}]},
       DescribeNatGateways:{NatGateways:[{NatGatewayId:'nat-commerce',SubnetId:'subnet-public-a',State:'available',ConnectivityType:'public',NatGatewayAddresses:[{PrivateIp:'10.21.0.9'}],Tags:tag('nat-commerce')}]},
-      DescribeRouteTables:{RouteTables:[awsRouteTable(['subnet-public-a'],[{DestinationCidrBlock:'0.0.0.0/0',GatewayId:'igw-commerce'}],'vpc-commerce'),awsRouteTable(['subnet-app-a','subnet-app-c','subnet-data-a'],[{DestinationCidrBlock:'0.0.0.0/0',NatGatewayId:'nat-commerce'},{DestinationCidrBlock:'10.0.0.0/8',TransitGatewayId:'tgw-core'}],'vpc-commerce')]},
+      DescribeRouteTables:{RouteTables:[awsRouteTable(['subnet-public-a'],[{DestinationCidrBlock:'0.0.0.0/0',GatewayId:'igw-commerce'}],'vpc-commerce'),awsRouteTable(['subnet-app-a','subnet-app-c','subnet-data-a'],[{DestinationCidrBlock:'0.0.0.0/0',NatGatewayId:'nat-commerce'},{DestinationCidrBlock:'10.0.0.0/8',TransitGatewayId:'tgw-core'},{DestinationPrefixListId:'pl-78a54011',GatewayId:'vpce-s3'}],'vpc-commerce')]},
       DescribeInstanceTypes:{InstanceTypes:instanceTypes},
       DescribeLoadBalancers:{LoadBalancers:[{LoadBalancerArn:'arn:aws:elasticloadbalancing:ap-northeast-2:444455556666:loadbalancer/app/alb-checkout/1',LoadBalancerName:'alb-checkout',Type:'application',Scheme:'internet-facing',State:{Code:'active'},AvailabilityZones:[{SubnetId:'subnet-public-a'}],SecurityGroups:['sg-alb']}]},
       DescribeTargetGroups:{TargetGroups:[{TargetGroupArn:'arn:aws:elasticloadbalancing:ap-northeast-2:444455556666:targetgroup/tg-checkout/1',TargetType:'instance'}]},
       DescribeTargetHealth:{TargetHealthDescriptions:[{Target:{Id:'i-checkout1'}},{Target:{Id:'i-checkout2'}}]},
+      DescribeVolumes:{Volumes:ebs(COMMERCE)},
+      // The data subnet's ACL admits app-a only; app-c is refused even though sg-db would let it in.
+      DescribeNetworkAcls:{NetworkAcls:[nacl('acl-default','vpc-commerce',['subnet-public-a','subnet-app-a','subnet-app-c'],[[100,false,'allow','-1','0.0.0.0/0'],[100,true,'allow','-1','0.0.0.0/0']],true),
+        nacl('acl-data','vpc-commerce',['subnet-data-a'],[[90,false,'deny','-1','10.21.2.0/24'],[100,false,'allow','6','10.21.0.0/16',[5432,5432]],[110,false,'allow','6','10.21.0.0/16',[1024,65535]],[100,true,'allow','6','10.21.0.0/16',[1024,65535]],[110,true,'allow','6','0.0.0.0/0',[443,443]]])]},
+      DescribeVpcEndpoints:{VpcEndpoints:[{VpcEndpointId:'vpce-s3',VpcEndpointType:'Gateway',VpcId:'vpc-commerce',ServiceName:'com.amazonaws.ap-northeast-2.s3',State:'available',RouteTableIds:['rtb-vpc-commerce-subnet-app-a'],Tags:tag('vpce-s3')}]},
       DescribeDBInstances:{DBInstances:[{DBInstanceIdentifier:'rds-orders',Engine:'postgres',DBInstanceClass:'db.r6g.large',DBInstanceStatus:'available',MultiAZ:true,DBSubnetGroup:{Subnets:[{SubnetIdentifier:'subnet-data-a'}]},VpcSecurityGroups:[{VpcSecurityGroupId:'sg-db'}]}]},
     }},
     {account:'777788889999',label:'commerce-dev',region:'ap-northeast-2',api:{

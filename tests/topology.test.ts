@@ -76,13 +76,14 @@ test('every scenario validates, and only documented gaps lack an official icon',
     for(const r of s.resources){
       const key=iconKey(r);
       if(key)assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),`${id}: ${key}`);
-      else assert.ok(r.provider==='onprem'||r.kind==='external'||GLYPH_KINDS.has(r.kind)||r.type==='AWS::EC2::SecurityGroup'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
+      else assert.ok(r.provider==='onprem'||r.kind==='external'||GLYPH_KINDS.has(r.kind)||r.type==='AWS::EC2::SecurityGroup'||r.type==='AWS::EC2::NetworkAcl'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
     }
   }
   for(const key of [...Object.values(providerLogo),...Object.values(groupIcon).flatMap(v=>Object.values(v))])assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),key);
 });
 test('simple scenarios stay small; enterprise is large and multi-region',async()=>{
-  assert.ok((await mockSnapshot('single-vm')).resources.filter(r=>r.kind!=='service').length<=6);
+  // Parts of the VM (its NIC, its disk) are not what makes a scenario large.
+  assert.ok((await mockSnapshot('single-vm')).resources.filter(r=>!['service','bucket','nic','disk','identity'].includes(r.kind)).length<=6);
   const s=await mockSnapshot('enterprise');
   assert.ok(s.resources.length>=500,`only ${s.resources.length}`);
   for(const p of ['azure','aws','gcp'])assert.ok(new Set(s.resources.filter(r=>r.provider===p&&r.kind!=='external').map(r=>r.region)).size>=2,p);
@@ -312,7 +313,7 @@ test('loopback mode serves only local hostnames',async()=>{
 
 test('every AWS operation the collector calls exists in the installed SDK',async()=>{
   const [ec2,elb,rds,dx,eks,org,sts,awsIamSdk,ceSdk,rexSdk]=await Promise.all([import('@aws-sdk/client-ec2'),import('@aws-sdk/client-elastic-load-balancing-v2'),import('@aws-sdk/client-rds'),import('@aws-sdk/client-direct-connect'),import('@aws-sdk/client-eks'),import('@aws-sdk/client-organizations'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-iam'),import('@aws-sdk/client-cost-explorer'),import('@aws-sdk/client-resource-explorer-2')]);
-  const uses:[Record<string,unknown>,string[]][]=[[ec2,['DescribeRegions','DescribeVpcs','DescribeSubnets','DescribeInstances','DescribeSecurityGroups','DescribeInternetGateways','DescribeNatGateways','DescribeTransitGateways','DescribeTransitGatewayVpcAttachments','DescribeTransitGatewayPeeringAttachments','DescribeVpcPeeringConnections','DescribeRouteTables','DescribeVpnGateways','DescribeVpnConnections','DescribeInstanceTypes']],[elb,['DescribeLoadBalancers','DescribeTargetGroups','DescribeTargetHealth']],[rds,['DescribeDBInstances']],[dx,['DescribeDirectConnectGateways','DescribeDirectConnectGatewayAssociations']],[eks,['ListClusters','DescribeCluster']],[org,['DescribeOrganization','ListRoots','ListAccountsForParent','ListOrganizationalUnitsForParent']],[sts,['GetCallerIdentity','AssumeRole']],[awsIamSdk,['ListUsers','ListAttachedUserPolicies','ListGroupsForUser','ListAttachedGroupPolicies','ListMFADevices','ListAccessKeys','ListRoles','ListAttachedRolePolicies']],[ceSdk,['GetCostAndUsage']],[rexSdk,['ListResources']]];
+  const uses:[Record<string,unknown>,string[]][]=[[ec2,['DescribeRegions','DescribeVpcs','DescribeSubnets','DescribeInstances','DescribeSecurityGroups','DescribeInternetGateways','DescribeNatGateways','DescribeTransitGateways','DescribeTransitGatewayVpcAttachments','DescribeTransitGatewayPeeringAttachments','DescribeVpcPeeringConnections','DescribeRouteTables','DescribeVolumes','DescribeVpcEndpoints','DescribeNetworkAcls','DescribeVpnGateways','DescribeVpnConnections','DescribeInstanceTypes']],[elb,['DescribeLoadBalancers','DescribeTargetGroups','DescribeTargetHealth']],[rds,['DescribeDBInstances']],[dx,['DescribeDirectConnectGateways','DescribeDirectConnectGatewayAssociations']],[eks,['ListClusters','DescribeCluster']],[org,['DescribeOrganization','ListRoots','ListAccountsForParent','ListOrganizationalUnitsForParent']],[sts,['GetCallerIdentity','AssumeRole']],[awsIamSdk,['ListUsers','ListAttachedUserPolicies','ListGroupsForUser','ListAttachedGroupPolicies','ListMFADevices','ListAccessKeys','ListRoles','ListAttachedRolePolicies']],[ceSdk,['GetCostAndUsage']],[rexSdk,['ListResources']]];
   for(const [module,operations] of uses)for(const op of operations)assert.equal(typeof module[`${op}Command`],'function',op);
 });
 
@@ -380,7 +381,7 @@ test('Resource Explorer fills the inventory without duplicating described types'
   const call=(async()=>({Resources:[{Arn:'arn:aws:s3:::b',ResourceType:'s3:bucket',Region:'r',OwningAccountId:'1'},{Arn:'arn:aws:ec2:r:1:vpc/v',ResourceType:'ec2:vpc',Region:'r',OwningAccountId:'1'}]})) as any;
   const {rows}=await collectAwsInventory(call);assert.equal(rows.length,1);
   const merged=finish([{resources:[],links:[],warnings:[],scopeLabels:{},awsInventory:{account:'1',rows}}]);
-  assert.deepEqual(merged.resources.map(r=>[r.name,r.kind,r.scope]),[['b','service','1']]);
+  assert.deepEqual(merged.resources.map(r=>[r.name,r.kind,r.scope]),[['b','bucket','1']],'an S3 bucket is object storage, not a generic service');
   const denied=await collectAwsInventory((async()=>{throw Object.assign(new Error('x'),{name:'UnauthorizedException'});}) as any);
   assert.equal(denied.rows.length,0);assert.match(denied.warning!,/Resource Explorer/);
 });

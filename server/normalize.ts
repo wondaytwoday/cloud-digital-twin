@@ -26,7 +26,7 @@ const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
-const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
+const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,r.ResourceType==='s3:bucket'?'bucket':'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
 // Collectors already total their own reads, so merging parts keeps the worst they report.
 const GAP_RANK:Record<Gap,number>={unconfigured:1,partial:2,failed:3};
 function gapsOf(parts:Normalized[]):Pick<Normalized,'gaps'>{
@@ -159,12 +159,44 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   const add=(r:Raw,key:string,kind:Resource['kind'],type:string,extra:Partial<Resource>={})=>resources.push(base('aws',native(r[key]),name(r)??r[key],kind,type,scope,region,'AWS Describe APIs',{group:region,tags:Object.fromEntries((r.Tags??[]).map((t:Raw)=>[t.Key,t.Value??''])),...extra}));
   for(const r of data.Vpcs??[])add(r,'VpcId','network','AWS::EC2::VPC',{cidr:r.CidrBlock});
   for(const r of data.Subnets??[])add(r,'SubnetId','subnet','AWS::EC2::Subnet',{parent:id(r.VpcId),cidr:r.CidrBlock,specs:{'가용 영역':r.AvailabilityZone??'미확인','공개 IP 자동 할당':String(r.MapPublicIpOnLaunch??false)}});
-  for(const r of data.SecurityGroups??[])add(r,'GroupId','firewall','AWS::EC2::SecurityGroup',{parent:id(r.VpcId),rules:[...(r.IpPermissions??[]).map((v:Raw)=>({...v,direction:'Inbound'})),...(r.IpPermissionsEgress??[]).map((v:Raw)=>({...v,direction:'Outbound'}))].map((v:Raw)=>({direction:v.direction,action:'Allow',protocol:v.IpProtocol==='-1'?'All':v.IpProtocol,ports:v.FromPort==null?'All':`${v.FromPort}${v.ToPort!==v.FromPort?`–${v.ToPort}`:''}`,source:v.direction==='Inbound'?[...(v.IpRanges??[]).map((x:Raw)=>x.CidrIp),...(v.Ipv6Ranges??[]).map((x:Raw)=>x.CidrIpv6),...(v.UserIdGroupPairs??[]).map((x:Raw)=>x.GroupId),...(v.PrefixListIds??[]).map((x:Raw)=>x.PrefixListId)].join(', ')||'미확인':'attached resources',destination:v.direction==='Outbound'?[...(v.IpRanges??[]).map((x:Raw)=>x.CidrIp),...(v.Ipv6Ranges??[]).map((x:Raw)=>x.CidrIpv6),...(v.UserIdGroupPairs??[]).map((x:Raw)=>x.GroupId),...(v.PrefixListIds??[]).map((x:Raw)=>x.PrefixListId)].join(', ')||'미확인':'attached resources',priority:'동일 평가'}))});
+  // Security groups allow only; a rule naming another group or a prefix list keeps that reference as a peer the analyser can resolve or report.
+  const sgRules=(v:Raw,direction:string)=>{const cidrs=[...(v.IpRanges??[]).map((x:Raw)=>x.CidrIp),...(v.Ipv6Ranges??[]).map((x:Raw)=>x.CidrIpv6)],groups=(v.UserIdGroupPairs??[]).map((x:Raw)=>x.GroupId),lists=(v.PrefixListIds??[]).map((x:Raw)=>x.PrefixListId);
+    const peers=[...groups.map((g:string)=>`sg:${g}`),...lists.map((x:string)=>`pl:${x}`)],text=[...cidrs,...groups,...lists].join(', ')||'미지정';
+    return{direction,action:'Allow',protocol:v.IpProtocol==='-1'?'All':v.IpProtocol,ports:v.FromPort==null||v.IpProtocol==='-1'?'All':`${v.FromPort}${v.ToPort!==v.FromPort?`-${v.ToPort}`:''}`,source:direction==='Inbound'?text:'*',destination:direction==='Outbound'?text:'*',priority:'-',...(peers.length?{peers}:{})};};
+  for(const r of data.SecurityGroups??[])add(r,'GroupId','firewall','AWS::EC2::SecurityGroup',{parent:id(r.VpcId),specs:{'종류':'Security Group','평가':'허용 규칙만, 상태 기반'},rules:[...(r.IpPermissions??[]).map((v:Raw)=>sgRules(v,'Inbound')),...(r.IpPermissionsEgress??[]).map((v:Raw)=>sgRules(v,'Outbound'))]});
+  // NACLs are stateless and ordered by rule number; 32767 is AWS's catch-all deny and comes with every ACL.
+  const NACL_PROTO:Record<string,string>={'-1':'All','6':'tcp','17':'udp','1':'icmp'};
+  for(const r of data.NetworkAcls??[]){
+    add(r,'NetworkAclId','firewall','AWS::EC2::NetworkAcl',{parent:id(r.VpcId),specs:{'종류':'Network ACL','평가':'번호 순서, 상태 비저장','기본 ACL':String(!!r.IsDefault)},rules:(r.Entries??[]).map((e:Raw)=>({name:`#${e.RuleNumber}`,direction:e.Egress?'Outbound':'Inbound',action:e.RuleAction==='allow'?'Allow':'Deny',protocol:NACL_PROTO[String(e.Protocol)]??String(e.Protocol),ports:e.PortRange?`${e.PortRange.From}${e.PortRange.To!==e.PortRange.From?`-${e.PortRange.To}`:''}`:'All',source:e.Egress?'*':e.CidrBlock??e.Ipv6CidrBlock??'*',destination:e.Egress?e.CidrBlock??e.Ipv6CidrBlock??'*':'*',priority:String(e.RuleNumber)}))});
+    for(const a of r.Associations??[])if(a.SubnetId)links.push(relation(id(r.NetworkAclId),id(a.SubnetId),'policy','NACL 적용','networkAcl.Associations.SubnetId',{ref:a.NetworkAclAssociationId}));
+  }
   for(const reservation of data.Reservations??[])for(const r of reservation.Instances??[]){
     if(r.State?.Name==='terminated')continue;
     const spec=data.InstanceTypes?.find((x:Raw)=>x.InstanceType===r.InstanceType);
-    add(r,'InstanceId','compute','AWS::EC2::Instance',{parent:r.SubnetId?id(r.SubnetId):undefined,ip:r.PrivateIpAddress,publicIp:r.PublicIpAddress,status:r.State?.Name??'미확인',specs:{'인스턴스':r.InstanceType??'미확인','vCPU':String(spec?.VCpuInfo?.DefaultVCpus??'미수집'),'메모리':spec?.MemoryInfo?.SizeInMiB?`${spec.MemoryInfo.SizeInMiB/1024} GiB`:'미수집','GPU':spec?String(spec.GpuInfo?.Gpus?.map((g:Raw)=>`${g.Count} × ${g.Name}`).join(', ')||'없음'):'미수집'}});
-    for(const sg of r.SecurityGroups??[])links.push(relation(id(sg.GroupId),id(r.InstanceId),'policy','Security Group 적용','instance.SecurityGroups'));
+    // Each ENI is its own resource with every private and public address it holds; security groups apply to the ENI, not the instance.
+    const enis=[...(r.NetworkInterfaces??[])].sort((a:Raw,b:Raw)=>(a.Attachment?.DeviceIndex??0)-(b.Attachment?.DeviceIndex??0));
+    const addrOf=(n:Raw)=>(n.PrivateIpAddresses??[{PrivateIpAddress:n.PrivateIpAddress,Primary:true,Association:n.Association}]).flatMap((x:Raw)=>[{ip:x.PrivateIpAddress,primary:!!x.Primary},...(x.Association?.PublicIp?[{ip:x.Association.PublicIp,public:true}]:[])]).filter((a:Raw)=>a.ip);
+    for(const n of enis){
+      add(n,'NetworkInterfaceId','nic','AWS::EC2::NetworkInterface',{parent:n.SubnetId?id(n.SubnetId):undefined,ip:n.PrivateIpAddress,publicIp:n.Association?.PublicIp,addresses:addrOf(n),status:n.Status??'구성 수집됨',specs:{'종류':'ENI','장치 번호':String(n.Attachment?.DeviceIndex??'?'),'원본/대상 확인':String(n.SourceDestCheck??true),'연결 인스턴스':r.InstanceId}});
+      links.push(relation(id(r.InstanceId),id(n.NetworkInterfaceId),'attachment',(n.Attachment?.DeviceIndex??0)===0?'기본 NIC':`ENI ${n.Attachment?.DeviceIndex}`,'instance.NetworkInterfaces',{ref:n.Attachment?.AttachmentId}));
+      for(const sg of n.Groups??[])links.push(relation(id(sg.GroupId),id(n.NetworkInterfaceId),'policy','Security Group 적용','instance.NetworkInterfaces.Groups',{ref:sg.GroupId}));
+    }
+    if(r.IamInstanceProfile?.Arn){const profile=String(r.IamInstanceProfile.Arn);resources.push(base('aws',native(profile.split('/').pop()!,scope,'global'),`${profile.split('/').pop()} (인스턴스 프로파일)`,'identity','AWS::IAM::InstanceProfile',scope,'global','AWS Describe APIs',{specs:{'종류':'인스턴스 프로파일','ARN':profile,'역할':'역할 연결 미수집 (iam:GetInstanceProfile 필요)'}}));links.push(relation(id(r.InstanceId),id(profile.split('/').pop()!,scope,'global'),'uses_identity','인스턴스 프로파일','instance.IamInstanceProfile.Arn',{ref:profile}));}
+    add(r,'InstanceId','compute','AWS::EC2::Instance',{parent:r.SubnetId?id(r.SubnetId):undefined,ip:r.PrivateIpAddress,publicIp:r.PublicIpAddress,addresses:enis.flatMap((n,k)=>addrOf(n).map((a:Raw)=>({...a,primary:k===0&&a.primary}))),status:r.State?.Name??'미확인',specs:{'인스턴스':r.InstanceType??'미확인','vCPU':String(spec?.VCpuInfo?.DefaultVCpus??'미수집'),'메모리':spec?.MemoryInfo?.SizeInMiB?`${spec.MemoryInfo.SizeInMiB/1024} GiB`:'미수집','GPU':spec?String(spec.GpuInfo?.Gpus?.map((g:Raw)=>`${g.Count} × ${g.Name}`).join(', ')||'없음'):'미수집'}});
+    // Without ENI detail (older collections), the groups are recorded on the instance as before.
+    if(!enis.length)for(const sg of r.SecurityGroups??[])links.push(relation(id(sg.GroupId),id(r.InstanceId),'policy','Security Group 적용','instance.SecurityGroups'));
+  }
+  // EBS: attached by the EC2 API; mounted inside the OS is not visible from here.
+  for(const v of data.Volumes??[]){
+    add(v,'VolumeId','disk','AWS::EC2::Volume',{status:v.State??'미확인',specs:{'종류':'EBS','크기':v.Size?`${v.Size} GiB`:'미확인','유형':v.VolumeType??'미확인','암호화':String(v.Encrypted??false),'가용 영역':v.AvailabilityZone??'미확인'}});
+    for(const a of v.Attachments??[])if(a.InstanceId)links.push(relation(id(a.InstanceId),id(v.VolumeId),'attachment',`EBS ${a.Device??''}`.trim(),'volume.Attachments.InstanceId',{ref:v.VolumeId,note:'OS 내부 마운트 여부는 클라우드 API로 확인할 수 없습니다.'}));
+  }
+  // A gateway endpoint has no address and no ENI: it is a route-table target. An interface endpoint has ENIs in subnets.
+  for(const e of data.VpcEndpoints??[]){
+    const gateway=e.VpcEndpointType==='Gateway',service=String(e.ServiceName??'');
+    add(e,'VpcEndpointId','endpoint','AWS::EC2::VPCEndpoint',{parent:gateway?id(e.VpcId):e.SubnetIds?.[0]?id(e.SubnetIds[0]):id(e.VpcId),status:e.State??'미확인',specs:{'종류':gateway?'Gateway Endpoint':`${e.VpcEndpointType??'Interface'} Endpoint`,'서비스':service,'정책':e.PolicyDocument?'엔드포인트 정책 있음 (평가하지 않음)':'없음','DNS 이름':(e.DnsEntries??[]).map((d:Raw)=>d.DnsName).filter(Boolean).slice(0,3).join(', ')||'미수집'}});
+    for(const rt of e.RouteTableIds??[])for(const t of data.RouteTables??[])if(t.RouteTableId===rt)for(const a of t.Associations??[])if(a.SubnetId)links.push(relation(id(a.SubnetId),id(e.VpcEndpointId),'route',`접두사 목록 → ${service.split('.').pop()}`,'vpcEndpoint.RouteTableIds',{ref:rt}));
+    for(const sg of e.Groups??[])links.push(relation(id(sg.GroupId),id(e.VpcEndpointId),'policy','Security Group 적용','vpcEndpoint.Groups',{ref:sg.GroupId}));
   }
   for(const r of live(data.VpnGateways)){add(r,'VpnGatewayId','gateway','AWS::EC2::VPNGateway',{status:r.State??'미확인',specs:{'종류':'Virtual Private Gateway'}});for(const a of r.VpcAttachments??[])links.push(relation(id(r.VpnGatewayId),id(a.VpcId),'attachment','VPN Gateway 연결','vpnGateway.VpcAttachments'));}
   for(const r of data.InternetGateways??[]){const vpc=r.Attachments?.[0]?.VpcId;add(r,'InternetGatewayId','gateway','AWS::EC2::InternetGateway',{parent:vpc?id(vpc):undefined,status:r.Attachments?.[0]?.State??'미확인',specs:{'종류':'Internet Gateway'}});}
@@ -196,7 +228,7 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   for(const table of data.RouteTables??[]){
     const subnets=(table.Associations??[]).map((a:Raw)=>a.SubnetId).filter(Boolean),explicit=new Set((data.RouteTables??[]).flatMap((t:Raw)=>(t.Associations??[]).map((a:Raw)=>a.SubnetId).filter(Boolean)));
     const targets=resources.filter(r=>r.kind==='subnet'&&(subnets.includes(r.nativeId.split('/').pop())||((table.Associations??[]).some((a:Raw)=>a.Main)&&r.parent===id(table.VpcId)&&!explicit.has(r.nativeId.split('/').pop()))));
-    for(const subnet of targets)for(const route of table.Routes??[]){if(route.State==='blackhole')continue;const hop=route.TransitGatewayId??route.NatGatewayId??route.VpcPeeringConnectionId??route.GatewayId??'미확인';subnet.routes.push({destination:route.DestinationCidrBlock??route.DestinationPrefixListId??'미확인',nextHop:hop,via:route.TransitGatewayId?'Transit Gateway':route.NatGatewayId?'NAT':route.VpcPeeringConnectionId?'Peering':hop==='local'?'VPC 내부':'Gateway'});}
+    for(const subnet of targets)for(const route of table.Routes??[]){if(route.State==='blackhole')continue;const hop=route.TransitGatewayId??route.NatGatewayId??route.VpcPeeringConnectionId??route.GatewayId??'미확인';subnet.routes.push({destination:route.DestinationCidrBlock??route.DestinationPrefixListId??'미확인',nextHop:hop,via:route.TransitGatewayId?'Transit Gateway':route.NatGatewayId?'NAT':route.VpcPeeringConnectionId?'Peering':hop==='local'?'VPC 내부':String(hop).startsWith('vpce-')?'Endpoint':String(hop).startsWith('igw-')?'Internet Gateway':String(hop).startsWith('vgw-')?'VPN Gateway':'Gateway',origin:route.Origin==='EnableVgwRoutePropagation'?'propagated':route.Origin==='CreateRouteTable'?'system':'user',target:hop==='local'?undefined:id(hop)});}
   }
   return {resources,links,warnings:[],scopeLabels:label?{[scope]:label}:{}};
 }
