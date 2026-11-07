@@ -22,7 +22,8 @@ const relation=(source:string,target:string,kind:Link['kind'],label:string,evide
 // Managed services reached through Private Link. They live outside any subnet; only their private endpoint has an address in one.
 const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['bucket','Storage account (Blob·Files)'],'microsoft.sql/servers':['database','Azure SQL']};
 // Rows folded into other resources, so they never appear as items of their own.
-const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network/firewallpolicies','microsoft.network/publicipaddresses','microsoft.network/connections']);
+// IP groups and application security groups are folded into the rules and NICs that use them.
+const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network/firewallpolicies','microsoft.network/ipgroups','microsoft.network/applicationsecuritygroups','microsoft.network/publicipaddresses','microsoft.network/connections']);
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
@@ -63,9 +64,12 @@ export function finish(input:Normalized[]):Normalized {
 // Azure Firewall rules, classic (on the firewall) or from a firewall policy's rule collection groups, as ordered device rules.
 // direction carries the rule type (Network, Application, Nat) because the firewall processes them in that order; priority is group then collection.
 export type FirewallPolicyRules={groups:Raw[];basePolicy?:string}|{error:string};
-function azureFirewallRules(p:Raw,policy?:FirewallPolicyRules):{rules:Resource['rules'];source:string}{
+function azureFirewallRules(p:Raw,policy?:FirewallPolicyRules,ipGroups:Map<string,string[]>=new Map()):{rules:Resource['rules'];source:string}{
   const out:Resource['rules']=[];const ports=(x:Raw)=>(x.destinationPorts??[]).join(', ')||'*';
-  const one=(type:string,order:number,collection:string,action:string,r:Raw)=>{
+  // A collected IP group is replaced by its addresses; one that was not collected stays a peer the analyser cannot settle.
+  const expand=(addrs:string[]=[],groups:string[]=[])=>({addrs:[...addrs,...groups.flatMap(g=>ipGroups.get(g.toLowerCase())??[])],unknown:groups.filter(g=>!ipGroups.has(g.toLowerCase()))});
+  const one=(type:string,order:number,collection:string,action:string,raw:Raw)=>{
+    const src=expand(raw.sourceAddresses,raw.sourceIpGroups),dst=expand(raw.destinationAddresses,raw.destinationIpGroups),r:Raw={...raw,sourceAddresses:src.addrs,destinationAddresses:dst.addrs,sourceIpGroups:src.unknown,destinationIpGroups:dst.unknown};
     const peers=[...(r.sourceIpGroups??[]).map((x:string)=>`ipgroup:${x}`),...(r.destinationIpGroups??[]).map((x:string)=>`ipgroup-dst:${x}`),...(r.destinationFqdns??[]).map((x:string)=>`fqdn:${x}`),...(r.targetFqdns??[]).map((x:string)=>`fqdn:${x}`),...(r.fqdnTags??[]).map((x:string)=>`fqdntag:${x}`),...(r.webCategories??[]).map((x:string)=>`category:${x}`)];
     const appProtocols=(r.protocols??[]).filter((x:Raw)=>typeof x==='object');
     out.push({name:`${collection}/${r.name}`,direction:type,action:action==='Deny'?'Deny':'Allow',protocol:type==='Application'?appProtocols.map((x:Raw)=>x.protocolType).join(', ')||'Http, Https':(r.ipProtocols??r.protocols??['Any']).join(', '),ports:type==='Application'?appProtocols.map((x:Raw)=>x.port).join(', ')||'80, 443':ports(r),source:(r.sourceAddresses??[]).join(', ')||(r.sourceIpGroups?.length?'':'*'),destination:(r.destinationAddresses??[]).join(', ')||(peers.length?'':'*'),priority:String(order),...(peers.length?{peers}:{})});
@@ -83,6 +87,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={},p
   for(const r of rows)if(r.type.toLowerCase()==='microsoft.compute/virtualmachines')for(const n of r.properties?.networkProfile?.networkInterfaces??[])nicOwner.set(n.id.toLowerCase(),r.id);
   const endpointsFor=new Map<string,number>();
   for(const r of rows)if(r.type.toLowerCase()==='microsoft.network/privateendpoints')for(const c of r.properties?.privateLinkServiceConnections??[])if(c.properties?.privateLinkServiceId)endpointsFor.set(c.properties.privateLinkServiceId.toLowerCase(),(endpointsFor.get(c.properties.privateLinkServiceId.toLowerCase())??0)+1);
+  const ipGroups=new Map(rows.filter(r=>r.type.toLowerCase()==='microsoft.network/ipgroups').map(r=>[r.id.toLowerCase(),(r.properties?.ipAddresses??[]) as string[]]));
   const publicIpOf=(ref?:Raw)=>ref?.id?byId.get(ref.id.toLowerCase())?.properties?.ipAddress as string|undefined:undefined;
   // Each IP configuration of a NIC, in order with the primary first: a VM with two NICs or a NIC with secondary IPs keeps every address.
   const ipConfigs=(nic?:Raw)=>[...(nic?.properties?.ipConfigurations??[])].sort((a:Raw,b:Raw)=>Number(!!b.properties?.primary)-Number(!!a.properties?.primary));
@@ -109,7 +114,9 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={},p
     } else if(t==='microsoft.network/networkinterfaces'){
       const configs=ipConfigs(r),first=configs[0]?.properties,owner=p.virtualMachine?.id??nicOwner.get(native);
       const addresses=configs.flatMap((c:Raw,m:number)=>[{ip:c.properties?.privateIPAddress,primary:m===0},...(publicIpOf(c.properties?.publicIPAddress)?[{ip:publicIpOf(c.properties?.publicIPAddress)!,public:true}]:[])]).filter((a:Raw)=>a.ip);
-      add('nic',{parent:first?.subnet?.id?id(first.subnet.id):undefined,ip:first?.privateIPAddress,publicIp:publicIpOf(first?.publicIPAddress),addresses,status:p.provisioningState??'구성 수집됨',specs:{'종류':'Network interface','IP 전달':String(p.enableIPForwarding??false),...(owner?{'연결 VM':owner.split('/').pop()}:{'연결':'VM 없음'})}});
+      // Application security group membership is per IP configuration; it is kept as matching keys, an empty list meaning "in none".
+      const asgs=[...new Set(configs.flatMap((c:Raw)=>(c.properties?.applicationSecurityGroups??[]).map((g:Raw)=>`asg:${String(g.id).toLowerCase()}`)))] as string[];
+      add('nic',{parent:first?.subnet?.id?id(first.subnet.id):undefined,ip:first?.privateIPAddress,publicIp:publicIpOf(first?.publicIPAddress),addresses,netTags:asgs,status:p.provisioningState??'구성 수집됨',specs:{'종류':'Network interface','IP 전달':String(p.enableIPForwarding??false),...(owner?{'연결 VM':owner.split('/').pop()}:{'연결':'VM 없음'})}});
       // Secondary IP configurations may sit in another subnet of the same network.
       for(const c of configs.slice(1))if(c.properties?.subnet?.id&&c.properties.subnet.id.toLowerCase()!==first?.subnet?.id?.toLowerCase())links.push(relation(id(r.id),id(c.properties.subnet.id),'attachment',`보조 IP ${c.properties.privateIPAddress}`,'networkInterface.ipConfigurations.subnet.id',{ref:c.id}));
       if(p.networkSecurityGroup?.id)links.push(relation(id(p.networkSecurityGroup.id),id(r.id),'policy','NIC NSG','networkInterface.networkSecurityGroup.id',{ref:p.networkSecurityGroup.id}));
@@ -125,7 +132,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={},p
       for(const c of conns)if(c.properties?.privateLinkServiceId)links.push(relation(id(r.id),id(c.properties.privateLinkServiceId),'private_link',`Private Link ${c.properties?.groupIds?.join(', ')??''}`.trim(),'privateEndpoint.privateLinkServiceConnections.privateLinkServiceId',{ref:c.properties.privateLinkServiceId,note:c.properties?.privateLinkServiceConnectionState?.status?`연결 상태 ${c.properties.privateLinkServiceConnectionState.status}`:undefined}));
     } else if(t==='microsoft.network/networksecuritygroups')add('firewall',{specs:{'종류':'NSG','기본 규칙':(p.defaultSecurityRules??[]).length?'수집됨':'미수집'},rules:[...(p.securityRules??[]),...(p.defaultSecurityRules??[]).map((x:Raw)=>({...x,isDefault:true}))].map((rule:Raw)=>{const q=rule.properties??{};
       // Application security groups and a non-wildcard source port are conditions the analyser cannot settle from addresses alone; they are kept as peers.
-      const peers=[...(q.sourceApplicationSecurityGroups??[]).map((x:Raw)=>`asg:${x.id}`),...(q.destinationApplicationSecurityGroups??[]).map((x:Raw)=>`asg-dst:${x.id}`),...(q.sourcePortRange&&q.sourcePortRange!=='*'?[`source-port:${q.sourcePortRange}`]:[]),...((q.sourcePortRanges??[]).length?[`source-port:${q.sourcePortRanges.join(',')}`]:[])];
+      const peers=[...(q.sourceApplicationSecurityGroups??[]).map((x:Raw)=>`asg:${String(x.id).toLowerCase()}`),...(q.destinationApplicationSecurityGroups??[]).map((x:Raw)=>`asg-dst:${String(x.id).toLowerCase()}`),...(q.sourcePortRange&&q.sourcePortRange!=='*'?[`source-port:${q.sourcePortRange}`]:[]),...((q.sourcePortRanges??[]).length?[`source-port:${q.sourcePortRanges.join(',')}`]:[])];
       return{name:`${rule.name??'규칙'}${rule.isDefault?' (기본 규칙)':''}`,direction:q.direction??'Unknown',action:q.access??'Unknown',protocol:q.protocol??'*',ports:q.destinationPortRange??q.destinationPortRanges?.join(', ')??'*',source:q.sourceAddressPrefix??q.sourceAddressPrefixes?.join(', ')??(q.sourceApplicationSecurityGroups?.length?'ASG':'미확인'),destination:q.destinationAddressPrefix??q.destinationAddressPrefixes?.join(', ')??(q.destinationApplicationSecurityGroups?.length?'ASG':'미확인'),priority:String(q.priority??'-'),...(peers.length?{peers}:{})};})});
     else if(t==='microsoft.network/expressroutecircuits')add('gateway',{specs:{'종류':'ExpressRoute circuit','대역폭':`${p.serviceProviderProperties?.bandwidthInMbps??'?'} Mbps`,'공급자':p.serviceProviderProperties?.serviceProviderName??'미확인','피어링 위치':p.serviceProviderProperties?.peeringLocation??'미확인'},status:p.provisioningState??'미확인'});
     else if(t==='microsoft.network/virtualnetworkgateways'){
@@ -133,7 +140,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={},p
       add('gateway',{parent:subnet?id(subnet):undefined,status:p.provisioningState??'미확인',specs:{'종류':`${p.gatewayType??'미확인'} gateway`,'SKU':p.sku?.name??'미확인'}});
     } else if(t==='microsoft.network/connections'&&p.virtualNetworkGateway1?.id&&p.peer?.id)links.push(relation(id(p.peer.id),id(p.virtualNetworkGateway1.id),'attachment',p.connectionType??'연결','connection.peer.id / virtualNetworkGateway1.id'));
     else if(t==='microsoft.network/azurefirewalls'){
-      const ip=p.ipConfigurations?.[0]?.properties,policy=p.firewallPolicy?.id?policies.get(String(p.firewallPolicy.id).toLowerCase()):undefined,{rules,source}=azureFirewallRules(p,policy);
+      const ip=p.ipConfigurations?.[0]?.properties,policy=p.firewallPolicy?.id?policies.get(String(p.firewallPolicy.id).toLowerCase()):undefined,{rules,source}=azureFirewallRules(p,policy,ipGroups);
       const collected=!p.firewallPolicy?.id||(!!policy&&'groups' in policy);
       add('appliance',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,status:p.provisioningState??'미확인',rules,specs:{'종류':'Azure Firewall','SKU':p.sku?.tier??'미확인','정책 규칙':collected?'수집됨':'미수집','규칙 출처':source,'위협 인텔리전스':p.threatIntelMode??'미수집',...(policy&&'basePolicy' in policy&&policy.basePolicy?{'상위 정책':String(policy.basePolicy).split('/').pop()!+' (규칙 상속 미수집)'}:{})}});
     } else if(t==='microsoft.network/loadbalancers'){

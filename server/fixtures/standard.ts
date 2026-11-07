@@ -11,9 +11,11 @@ const COMMERCE=[ec2('i-checkout1','checkout-api-01','m6i.xlarge','subnet-app-a',
 const PAYMENTS_PRINCIPAL='bbbbbbbb-0000-4000-8000-000000000003',PAYMENTS_CLIENT='cccccccc-0000-4000-8000-000000000002';
 // The hub firewall's policy: dev is denied first, the platform spoke may reach the data spoke's SQL and HTTPS, both spokes may leave on 443,
 // and OS updates are an application (FQDN) rule, which an address alone cannot match.
+const ASG_WEB=azId(platform,'rg-platform','Network/applicationSecurityGroups','asg-web'),IPG_BLOCKLIST=azId(connectivity,'rg-network-hub','Network/ipGroups','ipg-blocklist');
 const HUB_POLICY=azId(connectivity,'rg-network-hub','Network/firewallPolicies','afwp-hub');
 const net=(name:string,src:string[],dst:string[],ports:string[],protocols=['TCP'])=>({ruleType:'NetworkRule',name,ipProtocols:protocols,sourceAddresses:src,destinationAddresses:dst,destinationPorts:ports});
 const HUB_RULES=[{name:'platform-rules',properties:{priority:200,ruleCollections:[
+  {ruleCollectionType:'FirewallPolicyFilterRuleCollection',name:'blocklist',priority:50,action:{type:'Deny'},rules:[{ruleType:'NetworkRule',name:'known-bad',ipProtocols:['Any'],sourceAddresses:['*'],destinationIpGroups:[IPG_BLOCKLIST],destinationPorts:['*']}]},
   {ruleCollectionType:'FirewallPolicyFilterRuleCollection',name:'deny-dev',priority:100,action:{type:'Deny'},rules:[net('dev-anywhere',['10.12.0.0/16'],['*'],['*'],['Any'])]},
   {ruleCollectionType:'FirewallPolicyFilterRuleCollection',name:'spoke-to-spoke',priority:200,action:{type:'Allow'},rules:[net('platform-to-data',['10.10.0.0/16'],['10.11.0.0/16'],['1433','443'])]},
   {ruleCollectionType:'FirewallPolicyFilterRuleCollection',name:'internet-https',priority:300,action:{type:'Allow'},rules:[net('spokes-https',['10.10.0.0/16','10.11.0.0/16'],['*'],['443'])]},
@@ -29,13 +31,16 @@ export const standard:Scenario={
     azRow(connectivity,'rg-network-hub','Network/expressRouteCircuits','er-seoul-01',{provisioningState:'Succeeded',serviceProviderProperties:{bandwidthInMbps:1000,serviceProviderName:'Demo carrier',peeringLocation:'Seoul'}}),
     azRow(connectivity,'rg-network-hub','Network/virtualNetworkGateways','vgw-hub-er',{provisioningState:'Succeeded',gatewayType:'ExpressRoute',sku:{name:'ErGw1AZ'},ipConfigurations:[{properties:{subnet:{id:subnetId(connectivity,'rg-network-hub','vnet-hub','GatewaySubnet')}}}]}),
     azRow(connectivity,'rg-network-hub','Network/connections','conn-er-hub',{connectionType:'ExpressRoute',peer:{id:azId(connectivity,'rg-network-hub','Network/expressRouteCircuits','er-seoul-01')},virtualNetworkGateway1:{id:azId(connectivity,'rg-network-hub','Network/virtualNetworkGateways','vgw-hub-er')}}),
+    azRow(connectivity,'rg-network-hub','Network/ipGroups','ipg-blocklist',{provisioningState:'Succeeded',ipAddresses:['203.0.113.0/24','198.51.100.7']}),
     azRow(connectivity,'rg-network-hub','Network/firewallPolicies','afwp-hub',{provisioningState:'Succeeded',threatIntelMode:'Alert'}),
     azRow(connectivity,'rg-network-hub','Network/azureFirewalls','afw-hub',{provisioningState:'Succeeded',sku:{tier:'Premium'},threatIntelMode:'Alert',firewallPolicy:{id:HUB_POLICY},ipConfigurations:[{properties:{privateIPAddress:'10.0.1.4',subnet:{id:subnetId(connectivity,'rg-network-hub','vnet-hub','AzureFirewallSubnet')}}}]}),
     ...vm(connectivity,'rg-network-hub','vnet-hub','shared-services','bastion-01','10.0.2.10','Standard_B2s'),
     vnet(platform,'rg-platform','vnet-platform-prod','10.10.0.0/16',[['web','10.10.1.0/24','nsg-web'],['app','10.10.2.0/24','nsg-app'],['aks','10.10.8.0/21','nsg-app'],['data','10.10.3.0/24','nsg-data']],[[hub,{useRemoteGateways:true}]]),
-    nsg(platform,'rg-platform','nsg-web',standardRules),nsg(platform,'rg-platform','nsg-app',[['AllowFromWeb','Inbound','Allow','Tcp','8443','10.10.1.0/24',100],...standardRules]),nsg(platform,'rg-platform','nsg-data',[['AllowFromApp','Inbound','Allow','Tcp','1433','10.10.2.0/24',100],['DenyAll','Inbound','Deny','*','*','*',4000]]),
+    nsg(platform,'rg-platform','nsg-web',standardRules),// Metrics are scraped only by members of asg-web; everyone else, even in the same subnet, is refused.
+    nsg(platform,'rg-platform','nsg-app',[['AllowFromWeb','Inbound','Allow','Tcp','8443','10.10.1.0/24',100],['AllowMetricsFromWebAsg','Inbound','Allow','Tcp','9100',`asg:${ASG_WEB}`,120],['DenyMetrics','Inbound','Deny','Tcp','9100','*',130],...standardRules]),nsg(platform,'rg-platform','nsg-data',[['AllowFromApp','Inbound','Allow','Tcp','1433','10.10.2.0/24',100],['DenyAll','Inbound','Deny','*','*','*',4000]]),
     azRow(platform,'rg-platform','Network/loadBalancers','ilb-web',{provisioningState:'Succeeded',frontendIPConfigurations:[{properties:{privateIPAddress:'10.10.1.4',subnet:{id:subnetId(platform,'rg-platform','vnet-platform-prod','web')}}}],backendAddressPools:[{properties:{backendIPConfigurations:[nicConfig(platform,'rg-platform','web-01'),nicConfig(platform,'rg-platform','web-02')]}}]},{sku:{name:'Standard'}}),
-    ...vm(platform,'rg-platform','vnet-platform-prod','web','web-01','10.10.1.10','Standard_D2s_v5','running',undefined,{secondaryIps:['10.10.1.12']}),...vm(platform,'rg-platform','vnet-platform-prod','web','web-02','10.10.1.11','Standard_D2s_v5','running',undefined,{nicNsg:'nsg-web-02'}),
+    ...vm(platform,'rg-platform','vnet-platform-prod','web','web-01','10.10.1.10','Standard_D2s_v5','running',undefined,{secondaryIps:['10.10.1.12'],asgs:[ASG_WEB]}),
+    azRow(platform,'rg-platform','Network/applicationSecurityGroups','asg-web',{provisioningState:'Succeeded'}),...vm(platform,'rg-platform','vnet-platform-prod','web','web-02','10.10.1.11','Standard_D2s_v5','running',undefined,{nicNsg:'nsg-web-02',asgs:[ASG_WEB]}),
     // A NIC-level NSG: web-02 refuses SSH even from its own subnet, so two VMs side by side get different answers.
     nsg(platform,'rg-platform','nsg-web-02',[['DenySshFromWebSubnet','Inbound','Deny','Tcp','22','10.10.1.0/24',100]]),
     ...vm(platform,'rg-platform','vnet-platform-prod','app','api-prod-01','10.10.2.10','Standard_D4s_v5','running',undefined,{identity:{principalId:API_SYSTEM_ID,userAssigned:[API_IDENTITY]}}),

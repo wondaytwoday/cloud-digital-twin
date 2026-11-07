@@ -26,7 +26,8 @@ const PRIVATE=['10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','100.64.0.0/10','16
 export const isPrivate=(v:string)=>{const r=rangeOf(v);return!!r&&PRIVATE.some(p=>within(r,p));};
 const spaces=(r?:Resource)=>(r?.cidr??'').split(/,\s*/).filter(c=>parseCidr(c));
 // An address is the endpoint's IP, or for an on-prem site its whole range; a rule matches only if it covers all of it.
-type Addr={ip?:string;cidr?:string};
+// asgs: the endpoint NIC's application security groups; undefined when membership was not collected (then an ASG rule is undecided).
+type Addr={ip?:string;cidr?:string;asgs?:string[]};
 const addrRange=(a:Addr)=>a.ip?rangeOf(a.ip):a.cidr?rangeOf(a.cidr):null;
 type Tri=true|false|'unknown';
 function cidrMatch(token:string,a:Addr):Tri{const t=rangeOf(token),r=addrRange(a);if(!t||!r)return 'unknown';if(within(r,t))return true;if(disjoint(r,t))return false;return 'unknown';}
@@ -100,11 +101,14 @@ function evaluateNsg(nsg:Resource,direction:'Inbound'|'Outbound',src:Addr,dst:Ad
   const rules=[...own,...(hasDefaults?[]:(direction==='Inbound'?AZURE_DEFAULTS:AZURE_DEFAULTS_OUT).map(r=>({...r,direction,priority:r.priority!,priorityN:Number(r.priority)})))].sort((a,b)=>a.priorityN-b.priorityN);
   const unevaluated:string[]=[],undecidedActions=new Set<string>();
   for(const rule of rules){
-    const peers=(rule as {peers?:string[]}).peers??[],hard=peers.filter((p:string)=>p.startsWith('asg')||p.startsWith('source-port'));
-    const m=and(protoMatch(rule.protocol,q.protocol),portMatch(rule.ports,q),anyOf(rule.source,src,tags),anyOf(rule.destination,dst,tags),...(hard.length?['unknown' as const]:[]));
+    const peers=(rule as {peers?:string[]}).peers??[],hard=peers.filter((p:string)=>p.startsWith('source-port'));
+    // A rule naming application security groups matches by NIC membership instead of by address.
+    const asg=(list:string[],a:Addr):Tri=>a.asgs===undefined?'unknown':list.some(g=>a.asgs!.includes(g));
+    const srcAsg=peers.filter(p=>p.startsWith('asg:')),dstAsg=peers.filter(p=>p.startsWith('asg-dst:')).map(p=>`asg:${p.slice(8)}`);
+    const m=and(protoMatch(rule.protocol,q.protocol),portMatch(rule.ports,q),srcAsg.length?asg(srcAsg,src):anyOf(rule.source,src,tags),dstAsg.length?asg(dstAsg,dst):anyOf(rule.destination,dst,tags),...(hard.length?['unknown' as const]:[]));
     const ref:RuleRef={name:rule.name,priority:rule.priority,action:rule.action,protocol:rule.protocol,ports:rule.ports,source:rule.source,destination:rule.destination};
     if(m===false)continue;
-    if(m==='unknown'){undecidedActions.add(rule.action.toLowerCase());unevaluated.push(`${rule.name??rule.priority} (${hard.length?hard.join(', '):`${rule.source} → ${rule.destination}`})`);continue;}
+    if(m==='unknown'){undecidedActions.add(rule.action.toLowerCase());unevaluated.push(`${rule.name??rule.priority} (${hard.length?hard.join(', '):srcAsg.length||dstAsg.length?'ASG 구성원 미수집':`${rule.source} → ${rule.destination}`})`);continue;}
     // A definitive match after an undecided rule is only the answer if that rule would have decided the same way.
     const verdict=rule.action.toLowerCase()==='allow'?'allow' as const:'deny' as const;
     // If every undecided rule above would act the same way as this one, whichever of them matches gives the same answer.
@@ -169,7 +173,7 @@ const undecided=(res:FlowResult,text:string)=>{res.gaps.push({text,undecided:tru
 const note=(res:FlowResult,text:string)=>{res.gaps.push({text,undecided:false});res.completeness='partial';};
 function analyzeAzure(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
   const tagsFor=(network?:Resource):TagCtx=>{if(!network)return{vnet:[]};const vnet=[...spaces(network),...peersOf(c,network).flatMap(p=>spaces(p.peer))];const gws=[gatewayIn(c,network),...peersOf(c,network).filter(p=>p.link.transit).map(p=>gatewayIn(c,p.peer))].filter(Boolean) as Resource[];for(const g of gws)for(const s of sitesBehind(c,g))vnet.push(...spaces(s));return{vnet};};
-  const src:Addr={ip:from.ip,cidr:from.ip?undefined:from.cidr},dst:Addr={ip:to.ip,cidr:to.ip?undefined:to.cidr};
+  const src:Addr={ip:from.ip,cidr:from.ip?undefined:from.cidr,asgs:from.nic?.netTags},dst:Addr={ip:to.ip,cidr:to.ip?undefined:to.cidr,asgs:to.nic?.netTags};
   const check=(holder:Resource|undefined,direction:'Inbound'|'Outbound',at:string,network?:Resource)=>{for(const p of policiesOn(c,holder?.id))if(p.provider==='azure'&&p.kind==='firewall')res.policies.push(evaluateNsg(p,direction,src,dst,q,tagsFor(network),at));};
   // Outbound at the source: NIC first, then subnet (also a VM-level link from snapshots written before NICs existed).
   if(from.zone==='cloud'){check(from.nic,'Outbound',`출발 NIC ${from.nic?.name??''}`,from.network);if(!from.nic&&from.resource)check(from.resource,'Outbound',`출발 ${from.resource.name}`,from.network);check(from.subnet,'Outbound',`출발 서브넷 ${from.subnet?.name??''}`,from.network);}

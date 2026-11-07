@@ -234,3 +234,22 @@ test('TGW: without collected route tables the answer stays undecided, as before'
   const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='checkout-api-01')!.id,to:'10.200.0.1',protocol:'tcp',port:443});
   assert.equal(r.status,'unknown');assert.ok(r.gaps.some(g=>/라우트 테이블을 수집하지 않아/.test(g.text)));
 });
+
+// ---- ASG membership and IP groups
+test('an NSG rule naming an ASG matches by NIC membership, not by address',async()=>{
+  const member=await flow('web-01','api-prod-01',9100),other=await flow('api-prod-02','api-prod-01',9100);
+  assert.equal(member.status,'allowed');assert.equal(member.policies.find(p=>p.name==='nsg-app')!.rule!.name,'AllowMetricsFromWebAsg');
+  assert.equal(other.status,'blocked');assert.equal(other.policies.find(p=>p.verdict==='deny')!.rule!.name,'DenyMetrics');
+});
+test('ASG membership that was not collected leaves an ASG rule undecided',async()=>{
+  const s=structuredClone(await demo);delete s.resources.find(r=>r.name==='web-01-nic')!.netTags;
+  const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='web-01')!.id,to:s.resources.find(x=>x.name==='api-prod-01')!.id,protocol:'tcp',port:9100});
+  assert.equal(r.status,'unknown');assert.match(r.policies.find(p=>p.name==='nsg-app')!.reason,/ASG 구성원 미수집/);
+});
+test('a firewall rule on a collected IP group uses its addresses; an uncollected group is undecided',async()=>{
+  const r=await flow('web-01','203.0.113.5',443);assert.equal(r.status,'blocked');assert.match(r.policies.find(p=>p.direction==='through')!.rule!.name!,/blocklist/);
+  assert.match(r.policies.find(p=>p.direction==='through')!.rule!.destination,/203\.0\.113\.0\/24/);
+  const s=structuredClone(await demo),rule=s.resources.find(x=>x.name==='afw-hub')!.rules.find(x=>x.name?.includes('blocklist'))!;rule.destination='';rule.peers=['ipgroup-dst:/subscriptions/x/ipgroups/unknown'];
+  const u=analyzeFlow(s,{from:s.resources.find(x=>x.name==='web-01')!.id,to:'8.8.8.8',protocol:'tcp',port:443});
+  assert.equal(u.status,'unknown','an unreadable deny ahead of the allow could apply');
+});

@@ -65,7 +65,7 @@
 | 라우트 선택 | ✅ 최장 접두사, 같으면 UDR 우선. 시스템 경로(VNet·피어링·게이트웨이 전송·기본 인터넷) 포함 | ✅ 최장 접두사, local = VPC CIDR. pcx / tgw / igw / nat / vgw / vpce | ✅ 최장 접두사 → 우선순위. 서브넷 경로, 태그 경로, 피어링 서브넷 경로 | – |
 | 경유 장비 | ✅ UDR 다음 홉 IP의 장비만 경로에 넣음. **Azure Firewall 정책 규칙 평가**(네트워크 규칙 우선순위, 기본 거부, 애플리케이션 규칙은 FQDN이라 판단 불가). NVA 내부 정책은 판단 불가 | ⚠️ Network Firewall·GWLB 미수집 | ⚠️ 다음 홉 Instance·ILB는 판단 불가 | – |
 | 비전이 피어링 | ✅ | ✅ | ✅ | – |
-| 정책 평가 | ✅ NSG: 우선순위, 기본 규칙, VirtualNetwork·Internet·AzureLoadBalancer 태그. ASG·기타 서비스 태그는 판단 불가 | ✅ SG(합집합, 상태 기반, SG 참조), NACL(번호 순, 상태 비저장, 응답 임시 포트) | ✅ VPC 방화벽: 대상 태그·SA, 출발 태그·SA, 우선순위, 같은 우선순위면 거부 우선, 암묵 규칙. 계층형·네트워크 방화벽 정책은 미수집 | ✅ NetworkPolicy: 선택 시 격리, 규칙 합집합, pod·ns·ipBlock 선택자. 엔진 미확인이면 차단을 확정하지 않음 |
+| 정책 평가 | ✅ NSG: 우선순위, 기본 규칙, VirtualNetwork·Internet·AzureLoadBalancer 태그, **ASG(NIC 구성원)**. 기타 서비스 태그는 판단 불가 | ✅ SG(합집합, 상태 기반, SG 참조), NACL(번호 순, 상태 비저장, 응답 임시 포트) | ✅ VPC 방화벽: 대상 태그·SA, 출발 태그·SA, 우선순위, 같은 우선순위면 거부 우선, 암묵 규칙. 계층형·네트워크 방화벽 정책은 미수집 | ✅ NetworkPolicy: 선택 시 격리, 규칙 합집합, pod·ns·ipBlock 선택자. 엔진 미확인이면 차단을 확정하지 않음 |
 | 응답 경로 | ✅ 비대칭(장비 우회) 검출 | ✅ NACL 임시 포트 | 상태 기반 | 상태 기반 |
 | 게이트웨이·사내망 | ✅ ER·VPN 게이트웨이, 게이트웨이 전송 | ✅ **TGW 라우트 테이블**(연결·전파·블랙홀, 응답 경로). 다른 계정 소유 TGW는 그 계정을 수집해야 함 | ✅ **Cloud Router 동적 경로**(getRouterStatus). 읽기 실패 시 판단 불가 | – |
 | 블록 스토리지 | ✅ 관리 디스크 연결 | ✅ EBS 연결 | ✅ PD (Disk 자산이 있을 때만) | ✅ Pod→PVC→PV→클라우드 디스크 |
@@ -203,13 +203,13 @@ rules:
 - **미구현:**
   - 파일 스토리지(Azure Files·EFS·Filestore), Gateway API
   - 클라우드 간 경로, Pod → 클러스터 밖 경로
-  - AWS Network Firewall·GWLB 규칙 수집, NVA 내부 정책, Azure Firewall 상위 정책 상속·IP 그룹 내용
+  - AWS Network Firewall·GWLB 규칙 수집, NVA 내부 정책, Azure Firewall 상위 정책 상속(IP 그룹은 수집 시 주소로 펼침)
   - 스냅샷 시점 선택 UI: 비교는 직전 수집 1회분만 가능
   - 서버 측 범위 조회·페이지 처리
 
 ## 9. 다음 단계
 1. 실계정 검증(5절)과 CSP 자체 연결 분석 결과 비교
-2. ~~Azure Firewall 정책, AWS TGW 라우트 테이블, GCP Cloud NAT·동적 경로 수집~~ (완료). 다음 '판단 불가' 원인은 Azure Firewall IP 그룹·상위 정책, AWS Network Firewall, NSG의 ASG 구성원입니다.
+2. ~~Azure Firewall 정책, AWS TGW 라우트 테이블, GCP Cloud NAT·동적 경로 수집~~ (완료). ASG 구성원과 IP 그룹도 수집합니다. 다음 '판단 불가' 원인은 Azure Firewall 상위 정책, AWS Network Firewall, NSG의 서비스 태그(대역 목록 미수집)입니다.
 3. LB 리스너·규칙 경로와 DNS 해석 증거(Private DNS 영역, Route 53 Resolver)
 4. 흐름 로그 연동(NSG/VNet flow logs, VPC Flow Logs, VPC Flow Logs for GCP)으로 관측 통신 상태 추가
 5. 이력 스냅샷 시점 선택과 비교 UI

@@ -17,11 +17,12 @@ const defaultRule=(name:string,direction:string,access:string,source:string,dest
 const AZURE_DEFAULT_RULES=[defaultRule('AllowVnetInBound','Inbound','Allow','VirtualNetwork','VirtualNetwork',65000),defaultRule('AllowAzureLoadBalancerInBound','Inbound','Allow','AzureLoadBalancer','*',65001),defaultRule('DenyAllInBound','Inbound','Deny','*','*',65500),
   defaultRule('AllowVnetOutBound','Outbound','Allow','VirtualNetwork','VirtualNetwork',65000),defaultRule('AllowInternetOutBound','Outbound','Allow','*','Internet',65001),defaultRule('DenyAllOutBound','Outbound','Deny','*','*',65500)];
 // Fixture rules are inbound: [name, direction, access, protocol, destination port, source prefix, priority].
-const nsgRule=([rule,direction,access,protocol,port,source,priority]:Rule)=>({name:rule,properties:{direction,access,protocol,sourcePortRange:'*',destinationPortRange:port,sourceAddressPrefix:source,destinationAddressPrefix:'*',priority}});
+// A source of the form asg:<id> names an application security group instead of an address prefix.
+const nsgRule=([rule,direction,access,protocol,port,source,priority]:Rule)=>({name:rule,properties:{direction,access,protocol,sourcePortRange:'*',destinationPortRange:port,...(source.startsWith('asg:')?{sourceApplicationSecurityGroups:[{id:source.slice(4)}]}:{sourceAddressPrefix:source}),destinationAddressPrefix:'*',priority}});
 export const nsg=(sub:string,rg:string,name:string,rules:Rule[],location?:string)=>azRow(sub,rg,'Network/networkSecurityGroups',name,{securityRules:rules.map(nsgRule),defaultSecurityRules:AZURE_DEFAULT_RULES},{},location);
 // What Resource Graph returns for a VM: the VM row with managed disk IDs, one row per disk with managedBy, and one row per NIC.
 // extra adds what real estates have and the first demos did not: more NICs, secondary IPs, a managed identity.
-export type VmExtra={secondaryIps?:string[];nics?:{subnet:string;ips:string[]}[];identity?:{principalId:string;userAssigned?:string[]};nicNsg?:string};
+export type VmExtra={secondaryIps?:string[];nics?:{subnet:string;ips:string[]}[];identity?:{principalId:string;userAssigned?:string[]};nicNsg?:string;asgs?:string[]};
 export const vm=(sub:string,rg:string,vnetName:string,subnet:string,name:string,ip:string,size:string,power='running',location?:string,extra:VmExtra={})=>{
   const nicId=(n:string)=>azId(sub,rg,'Network/networkInterfaces',n),diskId=(n:string)=>azId(sub,rg,'Compute/disks',n),vmId=azId(sub,rg,'Compute/virtualMachines',name);
   const data=/^Standard_(E|NC)/.test(size)?[{lun:0,diskSizeGB:512,managedDisk:{id:diskId(`${name}-data-0`)}}]:[];
@@ -31,7 +32,7 @@ export const vm=(sub:string,rg:string,vnetName:string,subnet:string,name:string,
     azRow(sub,rg,'Compute/virtualMachines',name,{provisioningState:'Succeeded',hardwareProfile:{vmSize:size},storageProfile:{osDisk:{osType:'Linux',diskSizeGB:128,managedDisk:{id:diskId(`${name}-os`)}},dataDisks:data},networkProfile:{networkInterfaces:nics.map((x,k)=>({id:nicId(x.n),properties:{primary:k===0}}))},extended:{instanceView:{powerState:{code:`PowerState/${power}`}}}},identity,location),
     azRow(sub,rg,'Compute/disks',`${name}-os`,{diskSizeGB:128,diskState:'Attached',osType:'Linux'},{managedBy:vmId,sku:{name:'Premium_LRS'}},location),
     ...data.map(d=>azRow(sub,rg,'Compute/disks',`${name}-data-${d.lun}`,{diskSizeGB:d.diskSizeGB,diskState:'Attached'},{managedBy:vmId,sku:{name:'Premium_LRS'}},location)),
-    ...nics.map((x,k)=>azRow(sub,rg,'Network/networkInterfaces',x.n,{primary:k===0,virtualMachine:{id:vmId},...(k===0&&extra.nicNsg?{networkSecurityGroup:{id:nsgId(sub,rg,extra.nicNsg)}}:{}),ipConfigurations:x.ips.map((addr,m)=>({id:`${nicId(x.n)}/ipConfigurations/ipconfig${m+1}`,name:`ipconfig${m+1}`,properties:{primary:m===0,privateIPAddress:addr,subnet:{id:subnetId(sub,rg,vnetName,x.subnet)}}}))},{},location)),
+    ...nics.map((x,k)=>azRow(sub,rg,'Network/networkInterfaces',x.n,{primary:k===0,virtualMachine:{id:vmId},...(k===0&&extra.nicNsg?{networkSecurityGroup:{id:nsgId(sub,rg,extra.nicNsg)}}:{}),ipConfigurations:x.ips.map((addr,m)=>({id:`${nicId(x.n)}/ipConfigurations/ipconfig${m+1}`,name:`ipconfig${m+1}`,properties:{primary:m===0,privateIPAddress:addr,subnet:{id:subnetId(sub,rg,vnetName,x.subnet)},...(k===0&&extra.asgs?{applicationSecurityGroups:extra.asgs.map(id=>({id}))}:{})}}))},{},location)),
   ];
 };
 export const nicConfig=(sub:string,rg:string,vmName:string)=>({id:`${azId(sub,rg,'Network/networkInterfaces',`${vmName}-nic`)}/ipConfigurations/ipconfig1`});
