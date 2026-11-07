@@ -389,14 +389,22 @@ function analyzeGcp(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
   const target=addrRange(dst),route=candidates.filter(r=>{const p=parseCidr(r.prefix);return p&&target&&within(target,p);}).sort((a,b)=>prefixLen(b.prefix)-prefixLen(a.prefix)||a.priority-b.priority)[0];
   // Routes learnt over BGP by a Cloud Router are not in Asset Inventory, so a private destination that only the default route covers is undecided, not unroutable, wherever a router exists.
   const router=c.s.resources.find(r=>r.kind==='gateway'&&r.parent===network.id&&/Cloud Router/.test(r.specs['종류']??''));
-  if((!route||(route.type==='Gateway'&&(to.zone==='onprem'||(to.ip&&isPrivate(to.ip)))))&&router){res.path.push({id:router.id,label:router.name,kind:'gateway',evidence:'Cloud Router (BGP 동적 경로)'});undecided(res,'Cloud Router가 BGP로 받는 동적 경로는 Asset Inventory에 없어 이 목적지로 가는 경로를 확정할 수 없습니다.');return;}
+  const dynamic=!!router&&!/미수집|실패/.test(router.specs['동적 경로']??'미수집');
+  if((!route||(route.type==='Gateway'&&(to.zone==='onprem'||(to.ip&&isPrivate(to.ip)))))&&router&&!dynamic){res.path.push({id:router.id,label:router.name,kind:'gateway',evidence:'Cloud Router (BGP 동적 경로)'});undecided(res,'Cloud Router가 BGP로 받는 동적 경로는 Asset Inventory에 없어 이 목적지로 가는 경로를 확정할 수 없습니다.');return;}
   if(!route){undecided(res,`${network.name}에 ${to.label}(으)로 가는 경로가 없습니다.`);return;}
-  res.path.push({label:route.label,kind:'route',evidence:`최장 접두사 ${route.prefix}, 우선순위 ${route.priority}`,basis:'configured'});
+  res.path.push({label:route.label,kind:'route',evidence:`최장 접두사 ${route.prefix}, 우선순위 ${route.priority}${route.type==='BGP'?' · Cloud Router가 BGP로 받은 경로':''}`,basis:'configured'});
+  if(route.type==='BGP'){
+    res.path.push({id:router?.id,label:router?.name??'Cloud Router',kind:'gateway',evidence:'BGP 다음 홉 (Interconnect·VPN)'});
+    if(to.zone!=='onprem'){undecided(res,'BGP 경로는 사내망으로 향하지만 목적지는 사내망으로 수집되지 않았습니다.');return;}
+    res.path.push({id:to.resource?.id,label:to.resource?.name??'사내망',kind:'onprem',evidence:'BGP 경로 너머 (수동 등록한 사내망)',basis:'declared'});note(res,'사내망 쪽 라우팅과 방화벽은 수집 범위 밖입니다.');return;
+  }
   if(route.type==='peering'){if(to.network?.id!==route.peer?.id){res.status='blocked';res.summary='피어링은 전이되지 않습니다.';return;}res.path.push({id:route.peer!.id,label:`${network.name} ↔ ${route.peer!.name} 피어링`,kind:'peering',evidence:'VPC 피어링은 직접 연결된 네트워크의 서브넷 경로만 교환합니다.'});}
   else if(route.type==='Gateway'){
     if(to.ip&&isPrivate(to.ip)){res.status='blocked';res.summary=`사설 주소 ${to.ip}(으)로 가는 경로가 인터넷 게이트웨이뿐입니다.`;return;}
-    res.path.push({label:from.nic?.publicIp?`외부 IP ${from.nic.publicIp}`:'인터넷 게이트웨이',kind:'internet',evidence:'기본 인터넷 경로'});
-    if(!from.nic?.publicIp)undecided(res,'외부 IP가 없어 Cloud NAT가 필요하지만 Cloud NAT 구성은 수집하지 않았습니다.');
+    // Without an external IP an instance reaches the internet only through a Cloud NAT that serves its subnet; NAT configuration is read from the routers.
+    const nat=from.nic?.publicIp?undefined:c.s.resources.find(r=>r.kind==='nat'&&r.specs['종류']==='Cloud NAT'&&r.parent===network.id&&(r.specs['적용 서브넷']==='전체 서브넷'||(c.out.get(r.id)??[]).some(l=>l.target===from.subnet?.id)));
+    if(!from.nic?.publicIp&&!nat){res.status='blocked';res.summary=`외부 IP가 없고 ${from.subnet?.name??'출발 서브넷'}을(를) 담당하는 Cloud NAT도 없어 인터넷으로 나갈 수 없습니다.`;return;}
+    res.path.push({id:nat?.id,label:from.nic?.publicIp?`외부 IP ${from.nic.publicIp}`:`Cloud NAT ${nat!.name}`,kind:'internet',evidence:nat?`${nat.specs['라우터']}의 Cloud NAT (적용 서브넷: ${nat.specs['적용 서브넷']})`:'인스턴스의 외부 IP'});
     note(res,'인터넷 쪽 목적지는 수집 범위 밖입니다.');return;
   }
   else if(route.type!=='subnet'){undecided(res,`다음 홉 유형 ${route.type}은(는) 아직 분석하지 않습니다.`);return;}

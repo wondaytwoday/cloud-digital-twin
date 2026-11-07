@@ -141,9 +141,21 @@ test('GCP: VPC routes, peering by exchanged subnet routes, and the policies not 
   const r=await awsFlow('analytics-api-01','sandbox-01',443);
   assert.ok(kinds(r).includes('peering'));assert.ok(r.gaps.some(g=>/계층형 방화벽 정책/.test(g.text)&&!g.undecided));
 });
-test('GCP: with a Cloud Router, a private range covered only by the default route is undecided, not unroutable',async()=>{
-  const r=analyzeFlow(await demo,{from:await id('analytics-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
+test('GCP: when a Cloud Router\'s dynamic routes could not be read, a private range covered only by the default route is undecided',async()=>{
+  const s=structuredClone(await demo),router=s.resources.find(r=>r.name==='router-seoul')!,vpc=s.resources.find(r=>r.id===router.parent)!;
+  router.specs['동적 경로']='수집 실패';vpc.routes=vpc.routes.filter(r=>r.via!=='BGP');
+  const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='analytics-api-01')!.id,to:'10.200.0.1',protocol:'tcp',port:443});
   assert.equal(r.status,'unknown');assert.ok(r.gaps.some(g=>g.undecided&&/BGP/.test(g.text)));
+});
+test('GCP: BGP routes read from the router lead on-prem',async()=>{
+  const r=analyzeFlow(await demo,{from:await id('analytics-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
+  assert.equal(r.status,'allowed');assert.equal(r.completeness,'partial');assert.deepEqual(kinds(r).slice(-2),['gateway','onprem']);
+  assert.match(r.path.find(h=>h.kind==='route')!.evidence,/BGP/);
+});
+test('GCP: without an external IP, the internet is reached only through a Cloud NAT that serves the subnet',async()=>{
+  const apps=analyzeFlow(await demo,{from:await id('analytics-api-01'),to:'8.8.8.8',protocol:'tcp',port:443}),data=analyzeFlow(await demo,{from:await id('inference-gpu-01'),to:'8.8.8.8',protocol:'tcp',port:443});
+  assert.equal(apps.status,'allowed');assert.match(apps.path.find(h=>h.kind==='internet')!.label,/Cloud NAT nat-seoul/);
+  assert.equal(data.status,'blocked');assert.match(data.summary,/Cloud NAT도 없어/);
 });
 test('GCP: instances keep their NICs, tags, service account and collected disk',async()=>{
   const s=await demo,vm=s.resources.find(r=>r.name==='analytics-api-01')!,out=s.links.filter(l=>l.source===vm.id);

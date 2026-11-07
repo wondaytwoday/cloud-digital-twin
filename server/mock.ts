@@ -32,7 +32,8 @@ const awsTransport=(api:Record<string,any>):AwsCaller=>async(_service,operation,
   const offset=Number(input.NextToken??0),end=offset+2,rows=response[key];
   return {[key]:rows.slice(offset,end),...(end<rows.length?{NextToken:String(end)}:{})};
 };
-const gcpTransport=(all:any[],policies:any[],now:Date):GcpRequest=>async(url,init)=>{
+const gcpTransport=(all:any[],policies:any[],now:Date,routerStatus:Record<string,any>={}):GcpRequest=>async(url,init)=>{
+  if(url.includes('/getRouterStatus')){const name=url.split('/routers/')[1]?.split('/')[0];return routerStatus[name]??{result:{bestRoutes:[]}};}
   if(url.includes('bigquery.googleapis.com')){const scopes=[...new Set(all.filter(a=>!String(a.assetType).startsWith('cloudresourcemanager')).map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];return {jobComplete:true,rows:costPoints('gcp',scopes,now).map(p=>({f:[{v:p.month.replace('-','')},{v:p.scope},{v:p.service},{v:'USD'},{v:String(p.amount)}]}))};}
   const params=new URL(url).searchParams,types=new Set(params.getAll('assetTypes')),source=params.get('contentType')==='IAM_POLICY'?policies:all,assets=source.filter(a=>!types.size||types.has(a.assetType)),offset=Number(params.get('pageToken')??0),end=offset+PAGE;
   return {readTime:now.toISOString(),assets:assets.slice(offset,end),...(end<assets.length?{nextPageToken:String(end)}:{})};
@@ -75,7 +76,7 @@ async function collectScenario(s:Scenario,now:Date){
   if(s.gcp){
     const projects=[...new Set(s.gcp.assets.map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];
     const numbers=new Map<string,string>(),policies=gcpPolicies(projects,s.gcp.tree?{id:s.gcp.tree.id,domain:s.gcp.tree.name}:null,numbers);
-    const assets=[...s.gcp.assets,...projects.flatMap(gcpServices),...(s.gcp.tree?gcpOrgAssets(s.gcp.tree,numbers):[])],request=gcpTransport(assets,policies,now);
+    const assets=[...s.gcp.assets,...projects.flatMap(gcpServices),...(s.gcp.tree?gcpOrgAssets(s.gcp.tree,numbers):[])],request=gcpTransport(assets,policies,now,s.gcp.routerStatus);
     parts.push(await collectGcpWith(s.gcp.parent,request,{withActivity:false}),{resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectGcpCost(request,'demo.billing.export',now)});
   }
   const merged=finish(parts);

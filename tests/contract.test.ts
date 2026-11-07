@@ -68,3 +68,13 @@ test('firewall policy rules are read over ARM with paging, and a refused read le
   const refused=await collectAzureWith([sub],async()=>'t',transport(true)),fw2=refused.resources.find(r=>r.name==='fw')!;
   assert.equal(fw2.specs['정책 규칙'],'미수집');assert.ok(refused.warnings.some(w=>/방화벽 정책 p의 규칙을 읽지 못했습니다/.test(w)));
 });
+test('GCP router status supplies BGP routes, and a refused read is a warning that keeps the router uncollected',async()=>{
+  const {collectGcpWith}=await import('../server/collectors.ts');
+  const router={name:'//compute.googleapis.com/projects/p/regions/r/routers/rt',assetType:'compute.googleapis.com/Router',resource:{location:'r',data:{name:'rt',network:'https://www.googleapis.com/compute/v1/projects/p/global/networks/n'}}};
+  const net={name:'//compute.googleapis.com/projects/p/global/networks/n',assetType:'compute.googleapis.com/Network',resource:{location:'global',data:{name:'n'}}};
+  const request=(refuse:boolean)=>(async(url:string)=>{if(url.includes('getRouterStatus')){if(refuse)throw new Error('403 compute.routers.get');return{result:{bestRoutes:[{destRange:'10.0.0.0/8',nextHopIp:'169.254.0.1',priority:100}]}};}const types=new URL(url).searchParams.getAll('assetTypes');return types.length?{assets:[]}:{assets:[net,router]};}) as any;
+  const ok=await collectGcpWith('projects/p',request(false),{withActivity:false});
+  assert.deepEqual(ok.resources.find(r=>r.name==='n')!.routes.map(r=>[r.destination,r.via]),[['10.0.0.0/8','BGP']]);assert.equal(ok.resources.find(r=>r.name==='rt')!.specs['동적 경로'],'1개');
+  const refused=await collectGcpWith('projects/p',request(true),{withActivity:false});
+  assert.equal(refused.resources.find(r=>r.name==='rt')!.specs['동적 경로'],'수집 실패');assert.ok(refused.warnings.some(w=>/동적 경로를 읽지 못했습니다/.test(w)));
+});

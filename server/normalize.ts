@@ -285,7 +285,14 @@ export function normalizeGcp(assets:Raw[]):Normalized {
       const peers=[...(p.sourceTags??[]).map((x:string)=>`tag:${x}`),...(p.sourceServiceAccounts??[]).map((x:string)=>`sa:${x}`)];
       add('firewall',{appliesTo:{...(p.targetTags?.length?{tags:p.targetTags}:{}),...(p.targetServiceAccounts?.length?{serviceAccounts:p.targetServiceAccounts}:{})},parent:p.network?id(p.network):undefined,status:p.disabled?'disabled':'enabled',specs:{'대상 태그':p.targetTags?.join(', ')||'전체 대상 (태그 제한 없음)','비활성':String(p.disabled??false)},rules:[...(p.allowed??[]).map((r:Raw)=>({...r,action:'Allow'})),...(p.denied??[]).map((r:Raw)=>({...r,action:'Deny'}))].map((r:Raw)=>({name:p.name,direction:p.direction??'INGRESS',action:r.action,protocol:r.IPProtocol,ports:r.ports?.join(', ')||'All',source:p.sourceRanges?.join(', ')||(peers.length?'':'*'),destination:p.destinationRanges?.join(', ')||'*',priority:String(p.priority??1000),...(peers.length?{peers}:{})}))});
       if(p.network)links.push(relation(id(a.name),id(p.network),'policy','VPC 방화벽 정책','firewall.network (대상 태그·서비스 계정 별도 평가 필요)'));
-    } else if(t==='compute.googleapis.com/Router')add('gateway',{parent:p.network?id(p.network):undefined,specs:{'종류':'Cloud Router','ASN':String(p.bgp?.asn??'미확인')}});
+    } else if(t==='compute.googleapis.com/Router'){
+      add('gateway',{parent:p.network?id(p.network):undefined,specs:{'종류':'Cloud Router','ASN':String(p.bgp?.asn??'미확인'),'동적 경로':'미수집','Cloud NAT':(p.nats??[]).length?`${p.nats.length}개`:'없음'}});
+      // Cloud NAT lives on the router; which subnets it serves is part of its configuration.
+      for(const n of p.nats??[]){const natId=`${a.name}/nats/${n.name}`,all=n.sourceSubnetworkIpRangesToNat!=='LIST_OF_SUBNETWORKS';
+        add('nat',{parent:p.network?id(p.network):undefined,status:'구성 수집됨',specs:{'종류':'Cloud NAT','라우터':p.name,'적용 서브넷':all?'전체 서브넷':(n.subnetworks??[]).map((x:Raw)=>String(x.name).split('/').pop()).join(', ')||'없음'}});
+        resources[resources.length-1]={...resources[resources.length-1],id:id(natId),nativeId:natId,name:n.name};
+        if(!all)for(const sn of n.subnetworks??[])links.push(relation(id(natId),id(sn.name),'attachment','Cloud NAT 적용','router.nats.subnetworks'));}
+    }
     else if(t==='compute.googleapis.com/InterconnectAttachment'){
       add('gateway',{status:p.state??'미확인',specs:{'종류':'Interconnect VLAN','대역폭':p.bandwidth??'미확인','유형':p.type??'미확인'}});
       if(p.router)links.push(relation(id(a.name),id(p.router),'attachment','Interconnect BGP','interconnectAttachment.router'));

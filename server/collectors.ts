@@ -400,6 +400,14 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
   const report=options.report??noReport;
   report('resources',{detail:parent});
   const part=normalizeGcp(await gcpPages(parent,request,[],'RESOURCE',n=>report('resources',{detail:`${parent} · 자원 ${count(n)}개 읽음`})));
+  // BGP-learnt routes are not assets: each Cloud Router's status names its best routes (compute.routers.get, roles/compute.networkViewer).
+  for(const router of part.resources.filter(r=>r.type==='compute.googleapis.com/Router')){
+    const path=router.nativeId.replace('//compute.googleapis.com/','');
+    try{const body=await request(`https://compute.googleapis.com/compute/v1/${path}/getRouterStatus`);const best=(body?.result?.bestRoutes??[]) as Record<string,any>[],network=part.resources.find(r=>r.id===router.parent);
+      for(const b of best)network?.routes.push({destination:b.destRange,nextHop:b.nextHopIp??String(b.nextHopVpnTunnel??b.nextHopInterconnectAttachment??'BGP').split('/').pop(),via:'BGP',priority:Number(b.priority??1000),origin:'propagated',...(b.nextHopIp?{nextHopIp:b.nextHopIp}:{}),target:router.id});
+      router.specs['동적 경로']=`${best.length}개`;}
+    catch(e){router.specs['동적 경로']='수집 실패';part.warnings.push(`GCP: Cloud Router ${router.name}의 동적 경로를 읽지 못했습니다 (${(e as Error)?.message?.slice(0,80)}). roles/compute.networkViewer가 필요합니다.`);}
+  }
   const projectNumbers=new Map<string,string>(),org:{domain?:string}={};
   if(!parent.startsWith('projects/'))try{part.hierarchy=await gcpHierarchy(parent,request,projectNumbers,org);}catch(e){part.warnings.push(`GCP: 조직 계층을 읽지 못해 프로젝트를 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
   report('iam',{detail:parent});
