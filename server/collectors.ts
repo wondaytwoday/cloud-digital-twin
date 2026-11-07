@@ -1,4 +1,4 @@
-import { combineGaps,finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
+import { combineGaps,finish,type FirewallPolicyRules,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
 import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/schema.js';
 import {noReport,type Report} from '../shared/collect.js';
 // signal stops a run that timed out: every request after it fails at once instead of reaching the cloud.
@@ -116,7 +116,19 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
   for(const sub of subscriptions){report('scopes',{detail:'구독 접근 확인',done:checked++,total:subscriptions.length});const r=await azureFetch(request,`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,async()=>({headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)}));if(!r.ok){warnings.push(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status}), 건너뜁니다.`);continue;}readable.push(sub);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
   if(!readable.length)throw new Error(warnings[0]??'Azure: 읽을 수 있는 구독이 없습니다.');
   report('scopes',{state:'done',detail:`구독 ${readable.length}개`});report('resources',{detail:'Resource Graph 조회'});
-  const part=normalizeAzure(await azurePages(readable,token,request,AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`})),labels);
+  const rows=await azurePages(readable,token,request,AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`}));
+  // Firewall policy rule collection groups are child resources Resource Graph does not return; each referenced policy is read once over ARM.
+  type Raw=Record<string,any>;const policies=new Map<string,FirewallPolicyRules>();
+  for(const fw of rows.filter(r=>String(r.type).toLowerCase()==='microsoft.network/azurefirewalls'&&r.properties?.firewallPolicy?.id)){
+    const pid=String(fw.properties.firewallPolicy.id);if(policies.has(pid.toLowerCase()))continue;
+    try{
+      const groups:Raw[]=[];let url:string|undefined=`https://management.azure.com${pid}/ruleCollectionGroups?api-version=2023-09-01`;
+      while(url){const r:Response=await azureFetch(request,url,async()=>({headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)}));if(!r.ok)throw new Error(`HTTP ${r.status}`);const b:any=await r.json();groups.push(...(b.value??[]));url=b.nextLink||undefined;}
+      const policyRow=rows.find(r=>String(r.id).toLowerCase()===pid.toLowerCase());
+      policies.set(pid.toLowerCase(),{groups,basePolicy:policyRow?.properties?.basePolicy?.id});
+    }catch(e){policies.set(pid.toLowerCase(),{error:(e as Error).message});warnings.push(`Azure: 방화벽 정책 ${pid.split('/').pop()}의 규칙을 읽지 못했습니다 (${(e as Error).message}). 이 방화벽을 지나는 경로는 판단 불가로 남습니다.`);}
+  }
+  const part=normalizeAzure(rows,labels,policies);
   report('resources',{state:'done',detail:`자원 ${count(part.resources.length)}개`});
   part.warnings.push(...warnings);part.incomplete=subscriptions.filter(x=>!readable.includes(x));
   if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);

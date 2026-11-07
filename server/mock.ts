@@ -14,8 +14,9 @@ import { resolveCrossRefs } from '../shared/crossref.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
-const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date):typeof fetch=>async(url,init)=>{
+const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date,policies:Record<string,any[]>={}):typeof fetch=>async(url,init)=>{
   const target=String(url);
+  if(target.includes('/ruleCollectionGroups')){const id=decodeURIComponent(new URL(target).pathname.replace('/ruleCollectionGroups','')).toLowerCase(),groups=Object.entries(policies).find(([k])=>k.toLowerCase()===id)?.[1];return groups?json({value:groups}):new Response('{}',{status:404});}
   if(target.includes('directoryObjects/getByIds'))return json({value:JSON.parse(String(init?.body)).ids.map((id:string)=>({id,displayName:iam.directory[id]??id}))});
   if(target.includes('Microsoft.CostManagement/query')){const sub=target.match(/subscriptions\/([^/]+)/)![1];return json({properties:{columns:[{name:'Cost'},{name:'BillingMonth'},{name:'ServiceName'},{name:'Currency'}],rows:costPoints('azure',[sub],now).map(p=>[p.amount,`${p.month}-01T00:00:00`,p.service,'USD'])}});}
   if(target.includes('/tenants?'))return tree?json({value:[{tenantId:tree.id,displayName:tree.name}]}):new Response('{}',{status:403});
@@ -56,7 +57,7 @@ async function collectScenario(s:Scenario,now:Date){
   const parts:Normalized[]=[];
   if(s.azure){
     const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions,s.azure.assignments),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
-    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now),{graphToken:async()=>'demo-token',withActivity:false}));
+    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now,s.azure.firewallPolicies),{graphToken:async()=>'demo-token',withActivity:false}));
   }
   for(const a of s.aws??[]){const merged={...a.api,...awsIamApi(a.account,a.label,now)};parts.push(await collectAwsAccount(awsTransport(merged),a.account,a.region,a.label));}
   const accounts=[...new Map((s.aws??[]).map(a=>[a.account,a])).values()];

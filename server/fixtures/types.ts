@@ -8,4 +8,5 @@ import type {Site} from '../onprem.js';
 export type AzureAssignment={scope:string;principalId:string;principalType:string;role:string;name:string};
 // kubernetes: clusters read through the Kubernetes API, as kubectl would return them.
 export type KubeFixture={binding:import('../kubernetes.js').ClusterBinding;items:import('../kubernetes.js').KubeList};
-export type Scenario={kubernetes?:KubeFixture[];azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[]};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};
+// firewallPolicies: rule collection groups per policy ID, served as GET {policy}/ruleCollectionGroups returns them.
+export type Scenario={kubernetes?:KubeFixture[];azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[];firewallPolicies?:Record<string,Raw[]>};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};

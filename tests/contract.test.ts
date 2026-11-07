@@ -54,3 +54,17 @@ test('CloudTrail pages are spaced to stay under two calls a second',async()=>{
   await collectAwsActivity(call as any,'111','ap-northeast-2',NOW,120);
   assert.equal(at.length,3);for(let i=1;i<at.length;i++)assert.ok(at[i]-at[i-1]>=110,`gap ${at[i]-at[i-1]}ms`);
 });
+test('firewall policy rules are read over ARM with paging, and a refused read leaves the firewall marked uncollected',async()=>{
+  const sub='00000000-0000-4000-8000-000000000001',policy=`/subscriptions/${sub}/resourceGroups/rg/providers/Microsoft.Network/firewallPolicies/p`;
+  const fwRow={id:`/subscriptions/${sub}/resourceGroups/rg/providers/Microsoft.Network/azureFirewalls/fw`,name:'fw',type:'Microsoft.Network/azureFirewalls',subscriptionId:sub,resourceGroup:'rg',location:'kc',properties:{firewallPolicy:{id:policy},ipConfigurations:[{properties:{privateIPAddress:'10.0.1.4'}}]}};
+  const group=(name:string,prio:number)=>({name,properties:{priority:prio,ruleCollections:[{ruleCollectionType:'FirewallPolicyFilterRuleCollection',name:'c',priority:100,action:{type:'Allow'},rules:[{ruleType:'NetworkRule',name:`r-${name}`,ipProtocols:['TCP'],sourceAddresses:['*'],destinationAddresses:['*'],destinationPorts:['443']}]}]}});
+  const transport=(refuse:boolean)=>(async(u:unknown,init?:RequestInit)=>{const url=String(u);
+    if(url.includes('ruleCollectionGroups'))return refuse?json({},403):url.includes('page2')?json({value:[group('g2',300)]}):json({value:[group('g1',200)],nextLink:`https://management.azure.com${policy}/ruleCollectionGroups?page2`});
+    if(url.includes('ResourceGraph'))return json({data:String(init?.body).includes('authorizationresources')?[]:[fwRow]});
+    if(url.includes('eventtypes'))return json({value:[]});if(url.includes('CostManagement'))return json({properties:{columns:[],rows:[]}});
+    return url.includes('/tenants')||url.includes('managementGroups')?json({value:[]}):json({displayName:'S',tenantId:'t'});}) as typeof fetch;
+  const ok=await collectAzureWith([sub],async()=>'t',transport(false)),fw=ok.resources.find(r=>r.name==='fw')!;
+  assert.equal(fw.specs['정책 규칙'],'수집됨');assert.deepEqual(fw.rules.map(r=>r.name),['g1/c/r-g1','g2/c/r-g2'],'both pages, in group order');
+  const refused=await collectAzureWith([sub],async()=>'t',transport(true)),fw2=refused.resources.find(r=>r.name==='fw')!;
+  assert.equal(fw2.specs['정책 규칙'],'미수집');assert.ok(refused.warnings.some(w=>/방화벽 정책 p의 규칙을 읽지 못했습니다/.test(w)));
+});

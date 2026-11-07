@@ -116,6 +116,26 @@ function evaluateNsg(nsg:Resource,direction:'Inbound'|'Outbound',src:Addr,dst:Ad
 }
 function anyOf(list:string,a:Addr,tags:TagCtx):Tri{const v=list.split(/,\s*/).filter(Boolean).map(t=>azureAddr(t,a,tags));return v.includes(true)?true:v.includes('unknown')?'unknown':false;}
 
+// ---- Azure Firewall: network rules by group then collection priority, first match decides; application rules match FQDNs, which an address
+// cannot settle; nothing matching is the firewall's default deny. Threat intelligence and IDPS are not evaluated.
+function evaluateAzureFirewall(fw:Resource,src:Addr,dst:Addr,q:FlowQuery,tags:TagCtx):PolicyCheck{
+  const at='경유 장비',base={policy:fw.id,name:fw.name,at,direction:'through' as const};
+  const network=fw.rules.filter(r=>r.direction==='Network').sort((a,b)=>Number(a.priority)-Number(b.priority)),undecided:string[]=[],actions=new Set<string>();
+  const proto=(p:string):Tri=>/any/i.test(p)?true:q.protocol==='any'?'unknown':p.toLowerCase().split(/,\s*/).includes(q.protocol);
+  for(const r of network){
+    const hard=(r.peers??[]).filter(p=>/^(ipgroup|fqdn|fqdntag)/.test(p));
+    const m=and(proto(r.protocol),portMatch(r.ports,q),r.source?anyOf(r.source,src,tags):'unknown',r.destination?anyOf(r.destination,dst,tags):(hard.length?'unknown':false),...(hard.length?['unknown' as const]:[]));
+    const ref={name:r.name,priority:r.priority,action:r.action,protocol:r.protocol,ports:r.ports,source:r.source,destination:r.destination||hard.join(', ')};
+    if(m===false)continue;
+    if(m==='unknown'){undecided.push(r.name!);actions.add(r.action);continue;}
+    if(undecided.length&&![...actions].every(a=>a===r.action))return{...base,verdict:'unknown',rule:ref,reason:`먼저 처리되는 네트워크 규칙을 확정하지 못했습니다 (IP 그룹·FQDN 등): ${undecided.join(', ')}`,unevaluated:undecided};
+    return{...base,verdict:r.action==='Allow'?'allow':'deny',rule:ref,reason:`네트워크 규칙 ${r.name}이(가) 먼저 일치합니다 (그룹·컬렉션 우선순위 순). 위협 인텔리전스·IDPS는 평가하지 않았습니다.`};
+  }
+  if(undecided.length)return{...base,verdict:'unknown',reason:`확정하지 못한 네트워크 규칙이 있습니다: ${undecided.join(', ')}`,unevaluated:undecided};
+  const app=fw.rules.filter(r=>r.direction==='Application'&&q.protocol==='tcp'&&q.port!==undefined&&portMatches(r.ports,q.port)&&anyOf(r.source||'*',src,tags)!==false);
+  if(app.length)return{...base,verdict:'unknown',reason:`일치하는 네트워크 규칙은 없고, 애플리케이션 규칙 ${app.map(r=>r.name).join(', ')}이(가) 대상 FQDN으로 일치할 수 있습니다. 주소만으로는 판정할 수 없습니다.`};
+  return{...base,verdict:'deny',reason:'일치하는 규칙이 없어 Azure Firewall 기본 거부가 적용됩니다.'};
+}
 // ---- Azure routing: user routes win over system routes of the same prefix length; the longest prefix wins first.
 type Route={prefix:string;type:string;nextHopIp?:string;origin:'user'|'system';evidence:string;peer?:Resource};
 function azureRoutes(c:Ctx,subnet:Resource|undefined,network:Resource|undefined):Route[]{
@@ -169,8 +189,9 @@ function analyzeAzure(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult
       if(devNet&&network&&devNet.id!==network.id){if(!peersOf(c,network).some(p=>p.peer.id===devNet.id)){undecided(res,`${device.name}이(가) 있는 ${devNet.name}과(와) 직접 피어링이 없어 다음 홉에 닿는지 확인할 수 없습니다.`);return;}res.path.push({id:devNet.id,label:`${network.name} ↔ ${devNet.name} 피어링`,kind:'peering',evidence:'사용자 정의 경로의 다음 홉이 피어링된 VNet에 있습니다.'});}
       if(appliances.includes(device)){undecided(res,`${device.name}을(를) 다시 거치는 경로 순환이 있습니다.`);return;}
       appliances.push(device);res.path.push({id:device.id,label:device.name,kind:'appliance',evidence:`${route.nextHopIp}은(는) ${device.name}의 주소 (UDR 다음 홉)`,basis:'inferred'});
-      // The device decides with rules this collector does not read: Azure Firewall policy, or whatever runs inside an NVA.
-      res.policies.push({policy:device.id,name:device.name,at:'경유 장비',direction:'through',verdict:'unknown',reason:device.specs['종류']==='Azure Firewall'?'Azure Firewall 정책(규칙 컬렉션)을 수집하지 않아 이 장비가 허용하는지 판정하지 않습니다.':'NVA 내부 정책은 클라우드 API로 확인할 수 없습니다.'});
+      // An Azure Firewall whose rules were collected is evaluated; an NVA's own policy is not visible to any cloud API.
+      res.policies.push(device.specs['종류']==='Azure Firewall'&&device.specs['정책 규칙']==='수집됨'?evaluateAzureFirewall(device,src,dst,q,tagsFor(network)):{policy:device.id,name:device.name,at:'경유 장비',direction:'through',verdict:'unknown',reason:device.specs['종류']==='Azure Firewall'?'Azure Firewall 정책 규칙을 수집하지 못해 이 장비가 허용하는지 판정하지 않습니다.':'NVA 내부 정책은 클라우드 API로 확인할 수 없습니다.'});
+      if(device.specs['상위 정책'])undecided(res,`${device.name}의 상위 정책 규칙은 수집하지 않았습니다. 상위 정책 규칙이 먼저 처리됩니다.`);
       subnet=subnetOf(c,device);network=devNet;continue;
     }
     if(route.type==='VirtualNetworkGateway'){

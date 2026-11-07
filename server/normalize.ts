@@ -22,7 +22,7 @@ const relation=(source:string,target:string,kind:Link['kind'],label:string,evide
 // Managed services reached through Private Link. They live outside any subnet; only their private endpoint has an address in one.
 const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['bucket','Storage account (Blob·Files)'],'microsoft.sql/servers':['database','Azure SQL']};
 // Rows folded into other resources, so they never appear as items of their own.
-const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
+const AZURE_CONSUMED=new Set(['microsoft.network/routetables','microsoft.network/firewallpolicies','microsoft.network/publicipaddresses','microsoft.network/connections']);
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
@@ -60,7 +60,22 @@ export function finish(input:Normalized[]):Normalized {
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
   return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()],...gapsOf(parts)};
 }
-export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
+// Azure Firewall rules, classic (on the firewall) or from a firewall policy's rule collection groups, as ordered device rules.
+// direction carries the rule type (Network, Application, Nat) because the firewall processes them in that order; priority is group then collection.
+export type FirewallPolicyRules={groups:Raw[];basePolicy?:string}|{error:string};
+function azureFirewallRules(p:Raw,policy?:FirewallPolicyRules):{rules:Resource['rules'];source:string}{
+  const out:Resource['rules']=[];const ports=(x:Raw)=>(x.destinationPorts??[]).join(', ')||'*';
+  const one=(type:string,order:number,collection:string,action:string,r:Raw)=>{
+    const peers=[...(r.sourceIpGroups??[]).map((x:string)=>`ipgroup:${x}`),...(r.destinationIpGroups??[]).map((x:string)=>`ipgroup-dst:${x}`),...(r.destinationFqdns??[]).map((x:string)=>`fqdn:${x}`),...(r.targetFqdns??[]).map((x:string)=>`fqdn:${x}`),...(r.fqdnTags??[]).map((x:string)=>`fqdntag:${x}`),...(r.webCategories??[]).map((x:string)=>`category:${x}`)];
+    const appProtocols=(r.protocols??[]).filter((x:Raw)=>typeof x==='object');
+    out.push({name:`${collection}/${r.name}`,direction:type,action:action==='Deny'?'Deny':'Allow',protocol:type==='Application'?appProtocols.map((x:Raw)=>x.protocolType).join(', ')||'Http, Https':(r.ipProtocols??r.protocols??['Any']).join(', '),ports:type==='Application'?appProtocols.map((x:Raw)=>x.port).join(', ')||'80, 443':ports(r),source:(r.sourceAddresses??[]).join(', ')||(r.sourceIpGroups?.length?'':'*'),destination:(r.destinationAddresses??[]).join(', ')||(peers.length?'':'*'),priority:String(order),...(peers.length?{peers}:{})});
+  };
+  for(const c of p.networkRuleCollections??[])for(const r of c.properties?.rules??[])one('Network',c.properties?.priority??65000,c.name,c.properties?.action?.type,r);
+  for(const c of p.applicationRuleCollections??[])for(const r of c.properties?.rules??[])one('Application',c.properties?.priority??65000,c.name,c.properties?.action?.type,r);
+  if(policy&&'groups' in policy)for(const g of policy.groups)for(const c of g.properties?.ruleCollections??[])if(c.ruleCollectionType==='FirewallPolicyFilterRuleCollection')for(const r of c.rules??[])one(r.ruleType==='ApplicationRule'?'Application':'Network',(g.properties?.priority??65000)*100000+(c.priority??65000),`${g.name}/${c.name}`,c.action?.type,r);
+  return{rules:out,source:policy&&'error' in policy?`정책 규칙 수집 실패 (${policy.error})`:p.firewallPolicy?.id?(policy?`방화벽 정책 ${String(p.firewallPolicy.id).split('/').pop()}`:'정책 규칙 미수집'):'클래식 규칙'};
+}
+export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={},policies:Map<string,FirewallPolicyRules>=new Map()):Normalized {
   const resources:Resource[]=[], links:Link[]=[];
   const id=(v:string)=>`azure:${v.toLowerCase()}`;
   const byId=new Map(rows.map(r=>[r.id.toLowerCase(),r]));
@@ -118,8 +133,9 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
       add('gateway',{parent:subnet?id(subnet):undefined,status:p.provisioningState??'미확인',specs:{'종류':`${p.gatewayType??'미확인'} gateway`,'SKU':p.sku?.name??'미확인'}});
     } else if(t==='microsoft.network/connections'&&p.virtualNetworkGateway1?.id&&p.peer?.id)links.push(relation(id(p.peer.id),id(p.virtualNetworkGateway1.id),'attachment',p.connectionType??'연결','connection.peer.id / virtualNetworkGateway1.id'));
     else if(t==='microsoft.network/azurefirewalls'){
-      const ip=p.ipConfigurations?.[0]?.properties;
-      add('appliance',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,status:p.provisioningState??'미확인',specs:{'종류':'Azure Firewall','SKU':p.sku?.tier??'미확인'}});
+      const ip=p.ipConfigurations?.[0]?.properties,policy=p.firewallPolicy?.id?policies.get(String(p.firewallPolicy.id).toLowerCase()):undefined,{rules,source}=azureFirewallRules(p,policy);
+      const collected=!p.firewallPolicy?.id||(!!policy&&'groups' in policy);
+      add('appliance',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,status:p.provisioningState??'미확인',rules,specs:{'종류':'Azure Firewall','SKU':p.sku?.tier??'미확인','정책 규칙':collected?'수집됨':'미수집','규칙 출처':source,'위협 인텔리전스':p.threatIntelMode??'미수집',...(policy&&'basePolicy' in policy&&policy.basePolicy?{'상위 정책':String(policy.basePolicy).split('/').pop()!+' (규칙 상속 미수집)'}:{})}});
     } else if(t==='microsoft.network/loadbalancers'){
       const front=p.frontendIPConfigurations?.[0]?.properties;
       add('loadbalancer',{parent:front?.subnet?.id?id(front.subnet.id):undefined,ip:front?.privateIPAddress,publicIp:front?.publicIPAddress?.id?byId.get(front.publicIPAddress.id.toLowerCase())?.properties?.ipAddress:undefined,status:p.provisioningState??'미확인',specs:{'종류':front?.subnet?'내부 Load Balancer':'공용 Load Balancer','SKU':r.sku?.name??'미확인'}});

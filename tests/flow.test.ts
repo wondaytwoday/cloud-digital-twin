@@ -53,9 +53,12 @@ test('4. a firewall appears in the path only where a route sends traffic to it',
   const platform=await flow('web-01','8.8.8.8'),dev=await flow('dev-sandbox-01','8.8.8.8');
   assert.ok(kinds(platform).includes('appliance'),'the platform spoke routes 0.0.0.0/0 to afw-hub');
   assert.ok(!kinds(dev).includes('appliance'),'the dev spoke has no such route');
-  // The on-prem range is more specific than the default route, so the gateway takes it and the firewall is not crossed.
-  const onprem=analyzeFlow(await demo,{from:await id('web-01'),to:'10.200.0.5',protocol:'tcp',port:443});
-  assert.ok(kinds(onprem).includes('gateway'));assert.ok(!kinds(onprem).includes('appliance'));
+  // The dev spoke has no route table, so on-prem goes straight to the hub gateway; the platform spoke's 10.0.0.0/8 UDR sends it through the firewall,
+  // a user route winning over the gateway's system route of the same length.
+  const direct=analyzeFlow(await demo,{from:await id('dev-sandbox-01'),to:'10.200.0.5',protocol:'tcp',port:443});
+  assert.ok(kinds(direct).includes('gateway'));assert.ok(!kinds(direct).includes('appliance'));
+  const viaFirewall=analyzeFlow(await demo,{from:await id('web-01'),to:'10.200.0.5',protocol:'tcp',port:443});
+  assert.ok(kinds(viaFirewall).includes('appliance'));
 });
 test('5. NSGs are policies applied to a hop, never a hop themselves',async()=>{
   for(const r of [await flow('web-01','web-02',22),await flow('web-01','8.8.8.8'),await flow('api-prod-01','pe-sql-platform',1433)]){
@@ -174,4 +177,24 @@ test('12. live data refuses demo traffic and observed relations, and every colle
   const s=await demo,collected=s.links.filter(l=>l.kind!=='simulation');
   assert.ok(collected.every(l=>l.basis),'no collector link lacks its basis');
   assert.ok(collected.some(l=>l.basis==='inferred')&&collected.filter(l=>l.basis==='inferred').every(l=>l.note||l.evidence),'inferred links say how');
+});
+
+// ---- Azure Firewall rules
+test('a collected Azure Firewall policy decides in group and collection order, with its default deny',async()=>{
+  const fw=(r:Awaited<ReturnType<typeof flow>>)=>r.policies.find(p=>p.direction==='through')!;
+  const https=await flow('web-01','8.8.8.8',443),ssh=await flow('web-01','8.8.8.8',22),sql=await flow('web-01','etl-01',1433);
+  assert.equal(fw(https).verdict,'allow');assert.match(fw(https).rule!.name!,/internet-https/);
+  assert.equal(ssh.status,'blocked');assert.match(fw(ssh).reason,/기본 거부/);
+  assert.equal(sql.status,'allowed');assert.match(fw(sql).rule!.name!,/spoke-to-spoke/);assert.equal(sql.returnPath.status,'allowed','both spokes route the supernet through the firewall');
+  const dev=analyzeFlow(await demo,{from:await id('dev-sandbox-01'),to:await id('etl-01'),protocol:'tcp',port:1433});
+  assert.notEqual(dev.status,'allowed');
+});
+test('an application rule matches by FQDN, so an address alone leaves the firewall undecided',async()=>{
+  const r=await flow('web-01','8.8.8.8',80),fw=r.policies.find(p=>p.direction==='through')!;
+  assert.equal(fw.verdict,'unknown');assert.match(fw.reason,/FQDN/);
+});
+test('a firewall whose policy rules could not be read stays undecided',async()=>{
+  const s=structuredClone(await demo),afw=s.resources.find(r=>r.name==='afw-hub')!;afw.specs['정책 규칙']='미수집';
+  const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='web-01')!.id,to:'8.8.8.8',protocol:'tcp',port:443});
+  assert.equal(r.status,'unknown');assert.match(r.policies.find(p=>p.direction==='through')!.reason,/수집하지 못해/);
 });
