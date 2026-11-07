@@ -6,7 +6,7 @@ import {isScenario,scenarios,type ScenarioId} from '../shared/scenarios';
 import {ancestors,findPath,health,impactOf,ingressIds,reachable} from '../shared/topology';
 import {buildScopeIndex,focusFor,hierarchyNouns,inScope,type Focus,type ScopeIndex} from '../shared/hierarchy';
 import {ResourceNode,FrameNode,SummaryNode,RoutedEdge,ProviderMark,ResourceIcon,kindNames,type Emphasis,type FlowNode,type FlowEdge} from './graph';
-import {computeTopology,defaultExpanded,providerNames,regionId,startingLevel,type Bundle,type Topology} from './layout';
+import {computeTopology,defaultExpanded,onNetworkMap,providerNames,regionId,startingLevel,type Bundle,type Topology,type View as MapView} from './layout';
 import {EdgeDetail,ImpactPanel,ResourceDetail} from './Detail';
 import {FlowPanel,type FlowState} from './FlowPanel';
 import {analyzeFlow} from '../shared/flow';
@@ -41,9 +41,12 @@ const LEVELS=['개요','서브넷','전체'],ALL='all';
 const FIT_PADDING={top:'24px',right:'24px',bottom:'64px',left:'24px'} as const;
 const EMPTY:Topology={nodes:[],edges:[],rollup:()=>undefined};
 const shortProvider:Record<string,string>={azure:'Azure',aws:'AWS',gcp:'Google Cloud'};
-type Route={scenario:ScenarioId;view:View;tab:string};
-const readRoute=():Route=>{const q=new URLSearchParams(location.search),s=q.get('scenario'),v=q.get('view');return{scenario:isScenario(s)?s:'standard',view:VIEWS.includes(v as View)?v as View:'dashboard',tab:q.get('scope')??ALL};};
-const routeUrl=({scenario,view,tab}:Route)=>{const q=new URLSearchParams({scenario});if(view!=='dashboard')q.set('view',view);if(tab!==ALL)q.set('scope',tab);return `${location.pathname}?${q}`;};
+// The map's view and selection travel in the URL with the page and scope, so a link reopens the same question.
+const LAYERS:{id:MapView;label:string;hint:string}[]=[{id:'network',label:'네트워크',hint:'VNet·VPC, 서브넷, 경유 장비'},{id:'kubernetes',label:'Kubernetes',hint:'클러스터 → 네임스페이스 → 워크로드 → Pod'},{id:'storage',label:'스토리지',hint:'디스크·볼륨·버킷과 연결'},{id:'security',label:'보안 정책',hint:'적용 정책 (경유 장비 아님)'},{id:'identity',label:'실행 신원',hint:'워크로드가 쓰는 신원'},{id:'observed',label:'관측 통신',hint:'흐름 로그 연동 시'},{id:'changes',label:'변경 비교',hint:'직전 수집과 달라진 자원'}];
+const isLayer=(v:string|null):v is MapView=>LAYERS.some(l=>l.id===v);
+type Route={scenario:ScenarioId;view:View;tab:string;layer?:MapView;sel?:string};
+const readRoute=():Route=>{const q=new URLSearchParams(location.search),s=q.get('scenario'),v=q.get('view'),l=q.get('layer');return{scenario:isScenario(s)?s:'standard',view:VIEWS.includes(v as View)?v as View:'dashboard',tab:q.get('scope')??ALL,layer:isLayer(l)?l:'network',sel:q.get('sel')??undefined};};
+const routeUrl=({scenario,view,tab,layer,sel}:Route)=>{const q=new URLSearchParams({scenario});if(view!=='dashboard')q.set('view',view);if(tab!==ALL)q.set('scope',tab);if(view==='map'&&layer&&layer!=='network')q.set('layer',layer);if(view==='map'&&sel)q.set('sel',sel);return `${location.pathname}?${q}`;};
 const tabLabel=(index:ScopeIndex|null,tab:string)=>tab===ALL?'전체 지도':tab.startsWith('provider:')?shortProvider[tab.slice(9)]:index?.nodes.get(tab)?.name??tab;
 const NAV=[['개요',[['dashboard',LayoutDashboard,'대시보드'],['findings',ListChecks,'조치 항목'],['changes',History,'변경 이력']]],['인프라',[['map',Share2,'토폴로지'],['inventory',Table2,'리소스'],['network',Globe,'네트워크']]],['보안',[['security',ShieldAlert,'노출·방화벽'],['iam',KeyRound,'IAM'],['audit',ScrollText,'접근 로그']]],['비용',[['cost',Wallet,'비용']]]] as const;
 function Login({onDone}:{onDone:()=>void}){
@@ -55,7 +58,7 @@ function Workspace(){
   const initial=useRef(readRoute()).current;
   const [scenario,setScenario]=useState<ScenarioId>(initial.scenario),[view,setView]=useState<View>(initial.view),[tabs,setTabs]=useState<string[]>(initial.tab===ALL?[ALL]:[ALL,initial.tab]),[active,setActive]=useState(initial.tab);
   const [snapshot,setSnapshot]=useState<Snapshot|null>(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[layingOut,setLayingOut]=useState(false);
-  const [level,setLevel]=useState(0),[expanded,setExpanded]=useState<Set<string>>(new Set()),[policy,setPolicy]=useState(false),[flow,setFlow]=useState(true),[playing,setPlaying]=useState(true);
+  const [level,setLevel]=useState(0),[expanded,setExpanded]=useState<Set<string>>(new Set()),[layer,setLayer]=useState<MapView>(()=>readRoute().layer??'network'),[hops,setHops]=useState<1|2>(1),[flow,setFlow]=useState(true),[playing,setPlaying]=useState(true);
   const [selected,setSelected]=useState<string|null>(null),[edge,setEdge]=useState<Bundle|null>(null),[trace,setTrace]=useState<FlowState|null>(null),[impact,setImpact]=useState<string|null>(null);
   const [query,setQuery]=useState(''),[dialog,setDialog]=useState(false),[firstGuide,setFirstGuide]=useState(false),[toast,setToast]=useState(''),[topology,setTopology]=useState<Topology>(EMPTY),[fitTick,setFitTick]=useState(0),[sideOpen,setSideOpen]=useState(true);
   const farOut=useStore(s=>s.transform[2]<.5),rf=useReactFlow(),nodesReady=useNodesInitialized(),pendingFit=useRef<{ids?:string[];anchor?:{id:string;x:number;y:number}}|null>({}),searchRef=useRef<HTMLInputElement>(null);
@@ -109,7 +112,7 @@ function Workspace(){
     setActive(tab);clearModes();
     const saved=tabViews.current.get(tab);
     if(saved){setExpanded(saved.expanded);setLevel(saved.level);pendingFit.current={};setFitTick(t=>t+1);return;}
-    const f=focusFor(idx,tab),count=data.resources.filter(r=>r.kind!=='service'&&inFocus(r,f)).length;applyLevel(data,startingLevel(count));
+    const f=focusFor(idx,tab),count=data.resources.filter(r=>!['service','bucket','storage','fileshare','endpoint'].includes(r.kind)&&onNetworkMap(r)&&inFocus(r,f)).length;applyLevel(data,startingLevel(count));
   },[expanded,level,clearModes,applyLevel,inFocus]);
   const seeded=useRef<string|undefined>(undefined);
   useEffect(()=>{
@@ -120,10 +123,10 @@ function Workspace(){
   useEffect(()=>{
     if(!snapshot||!expanded.size||view!=='map')return;
     let stale=false;setLayingOut(true);
-    computeTopology(snapshot,{provider:focus.provider,scopes:focus.scopes,policy,flow,expanded}).then(t=>{if(!stale){setTopology(t);setLayingOut(false);}}).catch(e=>{console.error(e);if(!stale){setError('토폴로지를 배치하지 못했습니다.');setLayingOut(false);}});
+    computeTopology(snapshot,{provider:focus.provider,scopes:focus.scopes,policy:false,flow,expanded,view:layer}).then(t=>{if(!stale){setTopology(t);setLayingOut(false);}}).catch(e=>{console.error(e);if(!stale){setError('토폴로지를 배치하지 못했습니다.');setLayingOut(false);}});
     return()=>{stale=true};
-  },[snapshot,view,focus,policy,flow,expanded]);
-  const go=useCallback((next:Partial<Route>,replace=false)=>{const route={scenario,view,tab:active,...next};history[replace?'replaceState':'pushState'](null,'',routeUrl(route));},[scenario,view,active]);
+  },[snapshot,view,focus,layer,flow,expanded]);
+  const go=useCallback((next:Partial<Route>,replace=false)=>{const route={scenario,view,tab:active,layer,...next};history[replace?'replaceState':'pushState'](null,'',routeUrl(route));},[scenario,view,active,layer]);
   const openTab=useCallback((tab:string)=>{
     if(!snapshot||!index)return;
     setTabs(cur=>cur.includes(tab)?cur:[...cur,tab]);showTab(snapshot,index,tab,tab===active?undefined:active);setView('map');go({view:'map',tab});
@@ -160,7 +163,9 @@ function Workspace(){
   // Keeps the toggled container under the pointer so the rest of the map reflows around a fixed point.
   function toggle(id:string){
     const n=topology.nodes.find(x=>x.id===id),v=rf.getViewport();
-    setLevel(-1);setExpanded(cur=>{const next=new Set(cur);next.has(id)?next.delete(id):next.add(id);return next;});
+    // A Kubernetes namespace starts open, so folding it is what gets remembered.
+    const key=n?.item.variant==='namespace'?`closed:${id}`:id;
+    setLevel(-1);setExpanded(cur=>{const next=new Set(cur);next.has(key)?next.delete(key):next.add(key);return next;});
     pendingFit.current=n?{anchor:{id,x:n.x*v.zoom+v.x,y:n.y*v.zoom+v.y}}:{ids:[id]};
   }
   const stableToggle=useRef(toggle);stableToggle.current=toggle;
@@ -174,7 +179,10 @@ function Workspace(){
     if(trace&&path.length){focusMode=true;const seq=path.map(rollup).filter((x,i,a):x is string=>!!x&&x!==a[i-1]);seq.forEach(id=>{mark(id,'path');keepAncestors(id)});for(let i=0;i<seq.length-1;i++)edgeState.set([seq[i],seq[i+1]].sort().join('|'),'path');if(activeHop)mark(rollup(activeHop),'focus');}
     else if(impactResult){focusMode=true;impactResult.lost.forEach(id=>{mark(rollup(id),'impact');keepAncestors(rollup(id))});impactResult.removed.forEach(id=>{mark(rollup(id),'removed');keepAncestors(rollup(id))});}
     else if(edge){focusMode=true;edgeState.set(edge.id,'focus');mark(edge.source,'focus');mark(edge.target,'focus');keepAncestors(edge.source);keepAncestors(edge.target);}
-    else if(selected){const own=rollup(selected);if(own){focusMode=true;mark(own,'focus');keepAncestors(own);for(const b of topology.edges)if(b.source===own||b.target===own){edgeState.set(b.id,'focus');const other=b.source===own?b.target:b.source;mark(other,'focus');keepAncestors(other);}}}
+    else if(selected){const own=rollup(selected);if(own){focusMode=true;mark(own,'focus');keepAncestors(own);
+      // One or two hops around the selection, over what is drawn: the rest of the map dims instead of moving.
+      let ring=new Set([own]);for(let h=0;h<hops;h++){const next=new Set<string>();for(const b of topology.edges)if(ring.has(b.source)||ring.has(b.target)){edgeState.set(b.id,'focus');for(const end of [b.source,b.target])if(!ring.has(end)){next.add(end);mark(end,'focus');keepAncestors(end);}}ring=new Set([...ring,...next]);}}}
+    if(layer==='changes'&&snapshot?.changes){focusMode=true;for(const c of snapshot.changes.items){const id=rollup(c.id);if(id){mark(id,'impact');keepAncestors(id);}}}
     const placed=new Map(topology.nodes.map(n=>[n.id,n])),frameAncestors=new Set<string>();
     for(const id of emphasisOf.keys())for(let p=placed.get(id)?.item.parent;p;p=placed.get(p)?.item.parent)frameAncestors.add(p);
     const nodes:FlowNode[]=topology.nodes.map(n=>{
@@ -187,7 +195,7 @@ function Workspace(){
       return{id:b.id,source:b.source,target:b.target,type:'routed',zIndex:10,selected:edge?.id===b.id,data:{bundle:b,emphasis,animate:flow&&playing&&b.hasFlow&&emphasis!=='dim',showLabel:emphasis!=='dim'&&(!b.trunk||emphasis==='focus')&&(b.kind==='hybrid'||b.kind==='peering'||b.links.filter(l=>l.kind!=='simulation').length>1||emphasis==='focus')}};
     });
     return{nodes,edges};
-  },[topology,trace,path,activeHop,impactResult,edge,selected,flow,playing,byId,snapshot,onToggle]);
+  },[topology,trace,path,activeHop,impactResult,edge,selected,flow,playing,byId,snapshot,onToggle,hops,layer]);
   // Keyed on the layout, not highlighting: a fit waits for the layout it was requested for.
   useEffect(()=>{
     // A level change bumps the tick before its layout exists; waiting here fits the new graph, not the old one.
@@ -213,12 +221,19 @@ function Workspace(){
     if(r.kind==='service'){setQuery(r.name);setSearchOpen(false);changeView('inventory');return;}
     setTrace(null);setImpact(null);setEdge(null);setSelected(r.id);setQuery('');setSearchOpen(false);
     // Policies are hidden until their layer is on, so opening one must turn it on or the map shows nothing.
-    if(r.kind==='firewall')setPolicy(true);
+    // Policies live in the security view's column, so opening one switches there.
+    if(r.kind==='firewall')setLayer('security');
+    if(r.type.startsWith('k8s/')&&r.kind!=='firewall')setLayer('kubernetes');
     const switched=!inFocus(r)&&r.provider!=='onprem'&&toAllTab();
     if(view!=='map'||switched){setView('map');go({view:'map',...(switched?{tab:ALL}:{})},view==='map');}
     reveal([r.id]);pendingFit.current={ids:[r.id]};
   };
   const selectById=(id:string)=>{const r=byId.get(id);if(r)focusResource(r);};
+  // Switching views keeps the selection and the scope; only what is drawn around it changes.
+  const changeLayer=(next:MapView)=>{setLayer(next);setEdge(null);pendingFit.current={};go({layer:next,sel:selected??undefined},true);};
+  useEffect(()=>{if(view==='map')go({layer,sel:selected??undefined},true);},[selected]);// eslint-disable-line react-hooks/exhaustive-deps
+  const restored=useRef(false);
+  useEffect(()=>{if(restored.current||!snapshot||view!=='map')return;restored.current=true;const sel=readRoute().sel;if(sel&&byId.has(sel))selectById(sel);},[snapshot,view]);// eslint-disable-line react-hooks/exhaustive-deps
   const leaveScopeForAnalysis=()=>{if(toAllTab())go({tab:ALL},true);};
   const startTrace=(id:string)=>{
     if(!snapshot)return;
@@ -258,7 +273,10 @@ function Workspace(){
   const scopePath=resource&&index?index.pathTo(`${resource.provider}:scope:${resource.scope}`):[];
   const panel=!snapshot||view!=='map'?null:trace&&flowResult?<FlowPanel snapshot={snapshot} state={trace} result={flowResult} activeHop={activeHop} picking={picking} onPick={setPicking} onChange={changeTrace} onSelect={focusHop} onClose={()=>{setTrace(null);setPicking(null);setActiveHop(null);}}/>:impact&&impactResult?<ImpactPanel snapshot={snapshot} id={impact} lost={impactResult.lost} onSelect={selectById} onClose={()=>setImpact(null)}/>:edge?<EdgeDetail bundle={edge} snapshot={snapshot} onSelect={id=>{setEdge(null);setSelected(id)}} onClose={()=>setEdge(null)}/>:resource?<ResourceDetail resource={resource} snapshot={snapshot} onSelect={selectById} onClose={()=>setSelected(null)} onTrace={startTrace} onImpact={startImpact} canImpact={ingressIds(snapshot.resources).length>0} scopePath={scopePath} onOpenScope={openTab}/>:null;
   const sidebar=index&&snapshot&&sideOpen&&<aside className="sidebar side-toggle-hide" aria-label="관리 범위 탐색"><div className="side-head">관리 범위<button className="icon-button" onClick={()=>setSideOpen(false)} aria-label="범위 패널 접기"><PanelLeftClose size={16}/></button></div><div className="side-scroll"><ScopePanel snapshot={snapshot} index={index} active={active} allLabel="전체 지도" onPick={openTab}/></div></aside>;
-  const toolbar=snapshot&&<div className="bar-tools"><span className="bar-label">상세</span><div className="segmented" role="group" aria-label="상세 수준">{LEVELS.map((l,i)=><button key={l} className={level===i?'active':''} aria-pressed={level===i} onClick={()=>applyLevel(snapshot,i)}>{l}</button>)}</div><span className="tool-sep"/><button className={`tool ${policy?'on':''}`} aria-pressed={policy} onClick={()=>setPolicy(!policy)} title="NSG·보안 그룹·방화벽 규칙을 적용 관계로 표시"><ShieldCheck size={14}/>정책</button>{hasFlows&&<button className={`tool ${flow?'on':''}`} aria-pressed={flow} disabled={live} title={live?'실제 로그 연동 전입니다.':'시연용 트래픽 표시'} onClick={()=>setFlow(!flow)}><Waypoints size={14}/>트래픽</button>}{flow&&hasFlows&&<button className="tool icon" onClick={()=>setPlaying(!playing)} aria-label={playing?'트래픽 일시정지':'트래픽 재생'}>{playing?<Pause size={12}/>:<Play size={12}/>}</button>}<span className="tool-sep"/><button className={`tool ${trace?'on':''}`} aria-pressed={!!trace} onClick={()=>{if(trace)setTrace(null);else{const start=selected&&byId.get(selected)?.kind!=='firewall'?selected:snapshot.resources.find(r=>r.kind==='compute'&&health(r.status)==='ok'&&inFocus(r))?.id??snapshot.resources.find(r=>r.kind==='compute')?.id??snapshot.resources[0].id;startTrace(start);}}}><Route size={14}/>경로 추적</button><details className="legend-pop menu-pop"><summary>범례</summary><div className="legend">{edgeKinds.has('hybrid')&&<span><i className="line hybrid"/>전용선·VPN</span>}{edgeKinds.has('peering')&&<span><i className="line peering"/>피어링</span>}{edgeKinds.has('attachment')&&<span><i className="line attachment"/>연결</span>}{policy&&<span><i className="line policy"/>정책 적용</span>}{flow&&hasFlows&&<span><i className="line flow"/>시연 트래픽</span>}{stats.warn>0&&<span><AlertTriangle size={12} className="ico-warn"/>이상</span>}{stats.stopped>0&&<span><CircleOff size={12}/>중지</span>}</div></details>{layingOut&&<span className="tool-busy" role="status"><RefreshCw size={13} className="spin"/>배치 중</span>}</div>;
+  // Each view says what it shows and what it does not, so a quiet map is never mistaken for an empty estate.
+  const unresolvedCount=snapshot?.unresolved?.length??0;
+  const layerNote=!snapshot?null:layer==='observed'?'관측 통신: 흐름 로그를 연동하지 않아 표시할 관측 통신이 없습니다. 아래 지도는 수집한 구성입니다.':layer==='changes'?(snapshot.changes?`${new Date(snapshot.changes.since).toLocaleString('ko-KR')} 수집과 비교해 달라진 자원을 강조합니다. 삭제된 자원은 현재 스냅샷에 없어 변경 이력 화면에서 봅니다.`:'비교할 이전 수집이 없습니다.'):layer==='kubernetes'?`Service·Ingress 연결은 논리적 전달이며 패킷 홉이 아닙니다.${unresolvedCount?` 클라우드 자원과 연결하지 못한 참조 ${unresolvedCount}개 (예: 노드 VM).`:''}`:layer==='security'?'정책은 적용 대상에 붙는 규칙입니다. 정책을 선택하면 적용 대상이 보입니다.':layer==='storage'?'디스크 연결(attach)과 OS 안의 마운트는 다릅니다. 마운트는 클라우드 API로 확인하지 않습니다.':layer==='identity'?'신원과 역할 할당은 권한의 근거이며 실효 권한 판정이 아닙니다.':null;
+  const toolbar=snapshot&&<div className="bar-tools"><span className="bar-label">상세</span><div className="segmented" role="group" aria-label="상세 수준">{LEVELS.map((l,i)=><button key={l} className={level===i?'active':''} aria-pressed={level===i} onClick={()=>applyLevel(snapshot,i)}>{l}</button>)}</div><span className="tool-sep"/><label className="bar-label" htmlFor="map-layer">보기</label><select id="map-layer" className="layer-select" value={layer} onChange={e=>changeLayer(e.target.value as MapView)} aria-describedby="layer-hint">{LAYERS.map(l=><option key={l.id} value={l.id}>{l.label}</option>)}</select><span id="layer-hint" className="sr-only">{LAYERS.find(l=>l.id===layer)?.hint}</span>{selected&&<div className="segmented" role="group" aria-label="선택 주변 범위">{([1,2] as const).map(h=><button key={h} className={hops===h?'active':''} aria-pressed={hops===h} onClick={()=>setHops(h)}>{h}홉</button>)}</div>}{hasFlows&&<button className={`tool ${flow?'on':''}`} aria-pressed={flow} disabled={live} title={live?'실제 로그 연동 전입니다.':'시연용 트래픽 표시'} onClick={()=>setFlow(!flow)}><Waypoints size={14}/>트래픽</button>}{flow&&hasFlows&&<button className="tool icon" onClick={()=>setPlaying(!playing)} aria-label={playing?'트래픽 일시정지':'트래픽 재생'}>{playing?<Pause size={12}/>:<Play size={12}/>}</button>}<span className="tool-sep"/><button className={`tool ${trace?'on':''}`} aria-pressed={!!trace} onClick={()=>{if(trace)setTrace(null);else{const start=selected&&byId.get(selected)?.kind!=='firewall'?selected:snapshot.resources.find(r=>r.kind==='compute'&&health(r.status)==='ok'&&inFocus(r))?.id??snapshot.resources.find(r=>r.kind==='compute')?.id??snapshot.resources[0].id;startTrace(start);}}}><Route size={14}/>경로 추적</button><details className="legend-pop menu-pop"><summary>범례</summary><div className="legend">{edgeKinds.has('hybrid')&&<span><i className="line hybrid"/>전용선·VPN</span>}{edgeKinds.has('peering')&&<span><i className="line peering"/>피어링</span>}{edgeKinds.has('attachment')&&<span><i className="line attachment"/>연결</span>}{edgeKinds.has('policy')&&<span><i className="line policy"/>정책 적용 (방패: 적용 정책 수)</span>}{edgeKinds.has('service')&&<span><i className="line service"/>의존 관계 · 선택하면 표시</span>}{layer==='changes'&&<span><i className="mark-changed"/>직전 수집과 달라진 자원</span>}{flow&&hasFlows&&<span><i className="line flow"/>시연 트래픽</span>}{stats.warn>0&&<span><AlertTriangle size={12} className="ico-warn"/>이상</span>}{stats.stopped>0&&<span><CircleOff size={12}/>중지</span>}</div></details>{layingOut&&<span className="tool-busy" role="status"><RefreshCw size={13} className="spin"/>배치 중</span>}</div>;
   const list=useMemo(()=>snapshot?findings(snapshot,undefined,focus):[],[snapshot,focus]);
   const openFinding=(f:Finding)=>{if(!f.target)return;if(f.target.view==='map'&&f.target.id){selectById(f.target.id);return;}changeView(f.target.view);};
   const goTo=(v:View)=>changeView(v);
@@ -268,6 +286,7 @@ function Workspace(){
   const body=needsLogin?<Login onDone={load}/>:onboarding?<Onboarding state={collect} onCollect={startCollect} onGuide={()=>setDialog(true)}/>:error?<div className="load-state" role="alert"><AlertTriangle size={30}/><h2>데이터를 불러오지 못했습니다</h2><p>{error}</p><button className="button" onClick={load}>다시 시도</button></div>:!snapshot||!index?<div className="skeleton" role="status"><RefreshCw className="spin"/>인프라 데이터를 불러오는 중입니다.</div>:SCOPE_BAR_VIEWS.includes(view)?<><ScopeBar snapshot={snapshot} index={index} active={active} focus={focus} label={active===ALL?'전체 범위':tabLabel(index,active)} onPick={selectScope} onHome={()=>changeView('scopes')}/><div className="page-host">{view==='dashboard'?<Dashboard snapshot={snapshot} focus={focus} list={list} go={goTo} openFinding={openFinding}/>:view==='findings'?<FindingsPage list={list} mock={snapshot.mode==='mock'} openFinding={openFinding}/>:view==='changes'?<ChangesPage snapshot={snapshot} focus={focus} openResource={selectById}/>:view==='cost'?<CostPage snapshot={snapshot} focus={focus} onScope={selectScope} onCsv={saveCsv}/>:view==='iam'?<IamPage snapshot={snapshot} focus={focus} list={list} openFinding={openFinding}/>:view==='inventory'?<Suspense fallback={<div className="skeleton" role="status"><RefreshCw className="spin"/>리소스 화면을 불러오는 중입니다.</div>}><ResourcesPage snapshot={snapshot} focus={focus} query={query} onOpen={focusResource}/></Suspense>:view==='audit'?<AuditPage snapshot={snapshot} focus={focus} openResource={selectById} onCsv={saveCsv}/>:view==='security'?<SecurityPage snapshot={snapshot} focus={focus} openResource={selectById}/>:<NetworkPage snapshot={snapshot} focus={focus} openResource={selectById}/>}</div></>:view==='scopes'?<ScopeHome snapshot={snapshot} index={index} onOpen={openTab} onConnect={()=>setDialog(true)} onSelectResource={selectById}/>:<div className="work">{sidebar}<main className="stage">
       <div className="map-tabs" role="tablist" aria-label="열린 범위">{!sideOpen&&<button className="icon-button side-toggle-hide" onClick={()=>setSideOpen(true)} aria-label="범위 패널 펼치기"><PanelLeft size={16}/></button>}{tabs.map(t=>{const node=index.nodes.get(t);return <div key={t} className={`map-tab ${t===active?'active':''}`}><button role="tab" aria-selected={t===active} onClick={()=>{if(t!==active)openTab(t)}} title={tabLabel(index,t)}>{t===ALL?<Layers3 size={14}/>:t.startsWith('provider:')?<ProviderMark provider={t.slice(9)}/>:node&&<ScopeIcon node={node} size={15}/>}<span>{tabLabel(index,t)}</span></button>{t!==ALL&&<button className="tab-close" onClick={()=>closeTab(t)} aria-label={`${tabLabel(index,t)} 탭 닫기`}><X size={13}/></button>}</div>})}</div>
       <div className="map-bar"><nav className="crumbs" aria-label="현재 범위"><button onClick={()=>changeView('scopes')}>관리 범위</button>{crumbs.length===0&&<><ChevronRight size={13}/><span aria-current="page" className="crumb-now">전체 지도</span></>}{crumbs.map((c,i)=><span key={c.id} style={{display:'contents'}}><ChevronRight size={13}/><button aria-current={i===crumbs.length-1?'page':undefined} onClick={()=>openTab(c.id)}>{c.name}</button></span>)}</nav>{view==='map'&&topology.nodes.length>0&&toolbar}</div>
+      {view==='map'&&layerNote&&<p className="layer-note" role="status">{layerNote}</p>}
       <div ref={canvasRef} className={`canvas ${farOut?'lod-far':''} ${picking?'is-picking':''}`} onKeyDown={onCanvasKey}><ReactFlow nodes={decorated.nodes} edges={decorated.edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onNodeClick={onNodeClick} onNodeDoubleClick={onNodeDoubleClick} onEdgeClick={(_,e)=>{setEdge(e.data!.bundle);setSelected(null);setImpact(null);setTrace(null);}} onPaneClick={()=>{if(!picking)clearModes();}} minZoom={.03} maxZoom={1.8} nodesConnectable={false} nodesDraggable={false} edgesReconnectable={false} elevateNodesOnSelect={false} elevateEdgesOnSelect={false} zoomOnDoubleClick={false} onlyRenderVisibleElements={decorated.nodes.length>200} deleteKeyCode={null} proOptions={{hideAttribution:true}}>
         <svg className="edge-defs" aria-hidden="true"><defs><marker id="atlas-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1,1 L7,4 L1,7" fill="none" stroke="context-stroke" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></marker></defs></svg>
         <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="var(--grid)"/>

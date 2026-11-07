@@ -31,3 +31,26 @@ test('the whole map is not a tall sliver',async()=>{
   const {width,height}=box(await layout('enterprise',0));
   assert.ok(width/height>0.9,`aspect ${(width/height).toFixed(2)}`);
 });
+
+const view=async(v:'network'|'security'|'storage'|'identity'|'kubernetes',expanded?:Set<string>)=>{const s=validateSnapshot(JSON.parse(JSON.stringify(await mockSnapshot('standard'))));return computeTopology(s,{provider:'all',scopes:null,policy:false,flow:false,expanded:expanded??defaultExpanded(s,1),view:v});};
+test('13. switching to the security, storage or identity view never moves the network',async()=>{
+  const base=await view('network'),where=new Map(base.nodes.map(n=>[n.id,`${n.x},${n.y},${n.width},${n.height}`]));
+  for(const v of ['security','storage','identity'] as const){
+    const t=await view(v);
+    for(const n of t.nodes)if(where.has(n.id))assert.equal(`${n.x},${n.y},${n.width},${n.height}`,where.get(n.id),`${v}: ${n.id} moved`);
+    assert.ok(t.nodes.length>base.nodes.length,`${v} adds its column`);
+  }
+});
+test('policies are a column of their own in the security view, never a node inside a network',async()=>{
+  const t=await view('security'),policies=t.nodes.filter(n=>n.item.resource?.kind==='firewall');
+  assert.ok(policies.length>0);assert.ok(policies.every(n=>n.item.parent?.startsWith('column:security:')));
+  assert.ok(!(await view('network')).nodes.some(n=>n.item.resource?.kind==='firewall'));
+});
+test('the Kubernetes view opens namespaces but keeps pods folded inside their workloads',async()=>{
+  const t=await view('kubernetes',new Set());
+  assert.ok(t.nodes.some(n=>n.item.variant==='cluster'));assert.ok(t.nodes.some(n=>n.item.variant==='namespace'&&!n.collapsed));
+  const workloads=t.nodes.filter(n=>n.item.variant==='workload');assert.ok(workloads.length>0&&workloads.every(n=>n.collapsed));
+  assert.ok(!t.nodes.some(n=>n.item.resource?.kind==='pod'&&n.item.parent&&t.nodes.find(w=>w.id===n.item.parent)?.item.variant==='workload'),'no owned pod is drawn until its workload opens');
+  const opened=await view('kubernetes',new Set(workloads.map(w=>w.id)));assert.ok(opened.nodes.some(n=>n.item.resource?.kind==='pod'));
+  assert.ok(t.edges.some(e=>!e.overlay&&e.links.some(l=>l.kind==='forwards_to')),'service relations are drawn');
+});

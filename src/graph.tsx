@@ -31,7 +31,7 @@ export const ResourceNode=memo(function ResourceNode({data}:NodeProps<FlowNode>)
     <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{r.publicIp&&<span className="rc-public" title={`공인 IP ${r.publicIp}`}><Globe2 size={11}/></span>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
   </div>;
 });
-const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3,managed:Database};
+const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3,managed:Database,column:ShieldCheck,cluster:Boxes,namespace:FolderTree,workload:Layers};
 function Title({data,open}:{data:NodeData;open:boolean}){
   const it=data.item,Icon=it.variant&&variantIcon[it.variant],official=it.variant&&iconUrl(groupIcon[it.provider]?.[it.variant]);
   return <div className="frame-title">
@@ -47,7 +47,8 @@ function Title({data,open}:{data:NodeData;open:boolean}){
 export const FrameNode=memo(function FrameNode({data}:NodeProps<FlowNode>){
   return <div className={`frame v-${data.item.variant} ${data.item.provider} e-${data.emphasis}`}><Handles/><Title data={data} open/></div>;
 });
-const summaryKinds:ResourceKind[]=['network','compute','cluster','database','storage','loadbalancer','appliance','gateway','nat','firewall','external'];
+// Every kind a frame can hold, so a frame of buckets or Kubernetes objects is never summarised as empty.
+const summaryKinds:ResourceKind[]=['network','compute','cluster','database','storage','bucket','fileshare','disk','endpoint','loadbalancer','appliance','gateway','nat','firewall','external','node','workload','pod','k8sservice','ingress','pvc','pv','identity','serviceaccount'];
 export const SummaryNode=memo(function SummaryNode({data}:NodeProps<FlowNode>){
   const s=data.summary,present=summaryKinds.filter(k=>s.counts[k]);
   return <div className={`summary v-${data.item.variant} ${data.item.provider} e-${data.emphasis} ${data.item.outOfScope?'is-outside':''}`}><Handles/><Title data={data} open={false}/>

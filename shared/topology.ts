@@ -115,8 +115,10 @@ export const isPublic=(r:Resource)=>!!r.publicIp||r.specs['공개 범위']==='in
 export function exposures(resources:Resource[],links:Link[]){
   const byId=new Map(resources.map(r=>[r.id,r])),on=new Map<string,string[]>();
   for(const l of links)if(l.kind==='policy')(on.get(l.target)??on.set(l.target,[]).get(l.target)!).push(l.source);
-  return resources.filter(isPublic).flatMap(r=>{
-    const chain=[r.id,...ancestors(byId,r.id)],policies=[...new Set(chain.flatMap(id=>on.get(id)??[]))].map(id=>byId.get(id)).filter((p):p is Resource=>!!p);
+  // A NIC is judged as part of its VM: the VM's chain includes its NICs, which is where Azure NIC NSGs and AWS ENI groups are attached.
+  const nicsOf=new Map<string,string[]>();for(const l of links)if(l.kind==='attachment'&&byId.get(l.target)?.kind==='nic')(nicsOf.get(l.source)??nicsOf.set(l.source,[]).get(l.source)!).push(l.target);
+  return resources.filter(r=>isPublic(r)&&r.kind!=='nic').flatMap(r=>{
+    const chain=[r.id,...ancestors(byId,r.id),...(nicsOf.get(r.id)??[]).flatMap(n=>[n,...ancestors(byId,n)])],policies=[...new Set(chain.flatMap(id=>on.get(id)??[]))].map(id=>byId.get(id)).filter((p):p is Resource=>!!p);
     const rules=policies.flatMap(p=>p.rules.filter(isWideInbound).map(rule=>({policy:p.name,rule})));
     return rules.length?[{resource:r,rules}]:[];
   });

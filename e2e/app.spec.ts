@@ -165,9 +165,10 @@ test('network page lists peerings and jumps to the map',async({page})=>{
   await expect(page.locator('.overlap-rows li').first()).toBeVisible();await expect(page.getByRole('heading',{name:/^피어링/})).toBeVisible();
   await page.locator('.table-link',{hasText:'er-seoul-01'}).first().click();await settled(page);await expect(page.locator('.inspector')).toContainText('er-seoul-01');
 });
+// A Lambda function has no place on any map view, so it opens in the inventory. (S3 buckets now appear in the managed-services frame.)
 test('non-network services open in the inventory, not an empty map',async({page})=>{
-  await page.goto('/?scenario=standard');await page.waitForSelector('.kpi-row');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-assets');await page.keyboard.press('Enter');
-  await expect(page.locator('tbody tr',{hasText:'commerce-prod-assets'})).toBeVisible();
+  await page.goto('/?scenario=standard');await page.waitForSelector('.kpi-row');await page.getByLabel('리소스와 범위 검색').fill('commerce-prod-events');await page.keyboard.press('Enter');
+  await expect(page.locator('tbody tr',{hasText:'commerce-prod-events'})).toBeVisible();
 });
 test('a scope chosen on one page applies everywhere and survives back',async({page})=>{
   await page.goto('/?scenario=enterprise');await page.waitForSelector('.kpi-row');

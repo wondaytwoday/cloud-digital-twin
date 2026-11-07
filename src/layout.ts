@@ -2,8 +2,11 @@ import type {ElkNode} from 'elkjs/lib/elk-api';
 import type {Link,Resource,ResourceKind,Snapshot} from '../shared/schema';
 import {adjacency,distances,findPath,health,ingressIds} from '../shared/topology';
 // managed: services that live outside every subnet (Azure SQL, Storage), grouped so the map does not pretend they sit in a network.
-export type Variant='provider'|'region'|'network'|'subnet'|'managed';
-export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;expanded:Set<string>};
+export type Variant='provider'|'region'|'network'|'subnet'|'managed'|'column'|'cluster'|'namespace'|'workload';
+// Views answer different questions over the same snapshot. Storage, security and identity add a column beside an unchanged network layout,
+// so switching between them never moves the network; Kubernetes has its own layout; observed has no source yet.
+export type View='network'|'kubernetes'|'storage'|'security'|'identity'|'observed'|'changes';
+export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;expanded:Set<string>;view?:View};
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
@@ -17,7 +20,7 @@ export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
-const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40,managed:44};
+const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40,managed:44,column:44,cluster:50,namespace:44,workload:40};
 const MANAGED=new Set<ResourceKind>(['database','bucket','storage','fileshare']);
 export const managedId=(provider:string)=>`managed:${provider}`;
 const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','firewall','external','subnet','network','onprem'];
@@ -25,6 +28,7 @@ const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','clus
 // appear in their own views and in the detail panel, so they never crowd the network map.
 const NOT_ON_NETWORK_MAP=new Set<ResourceKind>(['nic','disk','fileshare','identity','node','namespace','workload','pod','k8sservice','ingress','serviceaccount','pvc','pv']);
 const NETWORK_NODES=(r:Resource)=>!NOT_ON_NETWORK_MAP.has(r.kind);
+export const onNetworkMap=NETWORK_NODES;
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
@@ -94,6 +98,64 @@ function cachedLayout(input:ElkNode){
 }
 const bundleKind=(links:Link[],hybrid:boolean):Bundle['kind']=>hybrid?'hybrid':links.some(l=>l.kind==='peering')?'peering':links.some(l=>l.kind==='attachment')?'attachment':links.some(l=>l.kind==='policy')?'policy':'simulation';
 export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
+  if(f.view==='kubernetes')return kubeTopology(snapshot,f);
+  // Policies are never drawn inside the network: the network layout is computed without them and they join as a column.
+  const base=await networkTopology(snapshot,{...f,policy:false});
+  return f.view==='security'||f.view==='storage'||f.view==='identity'?withColumn(base,snapshot,f,f.view):base;
+}
+const COLUMN:Record<'security'|'storage'|'identity',{kinds:ResourceKind[];links:Link['kind'][];label:string;subtitle:string}>={
+  security:{kinds:['firewall'],links:['policy'],label:'보안 정책',subtitle:'적용 대상에 붙는 정책 · 패킷이 거치는 장비가 아님'},
+  storage:{kinds:['disk','bucket','fileshare','pvc','pv','storage'],links:['attachment','mounts','binds_to','private_link'],label:'스토리지',subtitle:'블록·파일·객체 · 연결과 마운트는 구분'},
+  identity:{kinds:['identity','serviceaccount'],links:['uses_identity'],label:'실행 신원',subtitle:'워크로드가 쓰는 신원 · 권한 판정 아님'},
+};
+const COLUMN_CAP=240;
+function withColumn(base:Topology,snapshot:Snapshot,f:Filter,view:'security'|'storage'|'identity'):Topology{
+  const spec=COLUMN[view],nodes=[...base.nodes],edges=[...base.edges],inColumn=new Set<string>();
+  const matches=(r:Resource)=>(f.provider==='all'||r.provider===f.provider)&&(!f.scopes||f.scopes.has(r.scope));
+  for(const frame of base.nodes.filter(n=>n.item.variant==='provider')){
+    const p=frame.item.provider,all=snapshot.resources.filter(r=>r.provider===p&&spec.kinds.includes(r.kind)&&matches(r)).sort((a,b)=>a.name.localeCompare(b.name)),shown=all.slice(0,COLUMN_CAP);
+    if(!shown.length)continue;
+    const cols=shown.length>16?2:1,x0=frame.x+frame.width+56,y0=frame.y,top=PADDING_TOP.column,id=`column:${view}:${p}`;
+    const rows=Math.ceil(shown.length/cols),width=cols*(CARD.width+PACK_GAP)+PACK_GAP,height=top+rows*(CARD.height+PACK_GAP)+PACK_GAP;
+    nodes.push({id,x:x0,y:y0,width,height,depth:1,item:{id,variant:'column',label:spec.label,subtitle:`${spec.subtitle}${all.length>shown.length?` · ${shown.length}/${all.length}개 표시`:''}`,provider:p},collapsed:false,expandable:false,summary:{total:shown.length,stopped:0,warn:0,counts:{}},policies:0,hub:false});
+    shown.forEach((r,i)=>{inColumn.add(r.id);nodes.push({id:r.id,x:x0+PACK_GAP+(i%cols)*(CARD.width+PACK_GAP),y:y0+top+Math.floor(i/cols)*(CARD.height+PACK_GAP),width:CARD.width,height:CARD.height,depth:2,item:{id:r.id,parent:id,resource:r,label:r.name,provider:r.provider},collapsed:true,expandable:false,summary:{total:0,stopped:0,warn:0,counts:{}},policies:0,hub:false});});
+  }
+  const rollup=(id:string)=>inColumn.has(id)?id:base.rollup(id),at=new Map(nodes.map(n=>[n.id,n])),centre=(id:string)=>{const n=at.get(id)!;return{x:n.x+n.width/2,y:n.y+n.height/2};};
+  const groups=new Map<string,{a:string;b:string;links:Link[]}>();
+  for(const l of snapshot.links)if(spec.links.includes(l.kind)&&(inColumn.has(l.source)||inColumn.has(l.target))){const a=rollup(l.source),b=rollup(l.target);if(!a||!b||a===b||!at.has(a)||!at.has(b))continue;const key=`c:${[a,b].sort().join('|')}`;(groups.get(key)??groups.set(key,{a,b,links:[]}).get(key)!).links.push(l);}
+  for(const [key,g] of groups)edges.push({id:key,source:g.a,target:g.b,links:g.links,kind:view==='security'?'policy':'service',hasFlow:false,label:g.links.length>1?`${g.links[0].label} +${g.links.length-1}`:g.links[0].label,points:[centre(g.a),centre(g.b)],overlay:view==='security'});
+  return{nodes,edges,rollup};
+}
+// Kubernetes: cluster → namespace → workload → pod, read from contains and owns relations. Workloads open collapsed, so pods appear only on request.
+async function kubeTopology(s:Snapshot,f:Filter):Promise<Topology>{
+  const byId=new Map(s.resources.map(r=>[r.id,r])),parentOf=new Map<string,string>(),ctxCluster=new Map<string,string>();
+  for(const l of s.links){if(l.kind==='contains'&&byId.get(l.target)?.type.startsWith('k8s/'))parentOf.set(l.target,l.source);}
+  for(const l of s.links)if(l.kind==='owns'&&byId.get(l.target)?.kind==='pod')parentOf.set(l.target,l.source);
+  for(const [child,parent] of parentOf)if(byId.get(child)?.kind==='namespace'&&byId.get(parent)?.kind==='cluster')ctxCluster.set(byId.get(child)!.nativeId.split('/')[1],parent);
+  const matches=(r:Resource)=>(f.provider==='all'||r.provider===f.provider)&&(!f.scopes||f.scopes.has(r.scope));
+  const k8s=s.resources.filter(r=>r.type.startsWith('k8s/')&&r.kind!=='firewall'&&r.kind!=='serviceaccount'&&matches(r));
+  for(const r of k8s)if(!parentOf.has(r.id)&&r.kind!=='namespace'){const cl=ctxCluster.get(r.nativeId.split('/')[1]);if(cl)parentOf.set(r.id,cl);}
+  const clusters=[...new Set(k8s.map(r=>{let p=parentOf.get(r.id);while(p&&byId.get(p)?.kind!=='cluster')p=parentOf.get(p);return p;}).filter((x):x is string=>!!x))].map(id=>byId.get(id)!);
+  const items=new Map<string,Item>(),children=new Map<string,string[]>();
+  for(const c of clusters)items.set(c.id,{id:c.id,resource:c,variant:'cluster',label:c.name,subtitle:c.specs['종류'],provider:c.provider});
+  for(const r of k8s){const parent=parentOf.get(r.id);if(!parent||!items.has(parent)&&!k8s.some(x=>x.id===parent))continue;items.set(r.id,{id:r.id,parent,resource:r,variant:r.kind==='namespace'?'namespace':r.kind==='workload'?'workload':undefined,label:r.name,subtitle:r.kind==='workload'?r.specs['종류']:r.ip,provider:r.provider});}
+  for(const it of items.values())if(it.parent)(children.get(it.parent)??children.set(it.parent,[]).get(it.parent)!).push(it.id);
+  const open=(it:Item)=>!!children.get(it.id)?.length&&(it.variant==='cluster'||(it.variant==='namespace'&&!f.expanded.has(`closed:${it.id}`))||(it.variant==='workload'&&f.expanded.has(it.id)));
+  const visible=(id:string):string|undefined=>{let it=items.get(id);if(!it)return undefined;const chain:Item[]=[];for(let c:Item|undefined=it;c;c=c.parent?items.get(c.parent):undefined)chain.unshift(c);return(chain.find((c,i)=>i<chain.length-1&&!open(c))??it).id;};
+  const toElk=(it:Item):ElkNode=>open(it)?{id:it.id,layoutOptions:{'elk.padding':`[top=${PADDING_TOP[it.variant!]},left=12,bottom=12,right=12]`,'elk.algorithm':'layered','elk.direction':'RIGHT'},children:children.get(it.id)!.map(c=>toElk(items.get(c)!))}:{id:it.id,...(it.variant?SUMMARY:CARD)};
+  const STRUCTURE=new Set<Link['kind']>(['forwards_to','mounts','binds_to']),groups=new Map<string,{a:string;b:string;links:Link[];overlay:boolean}>();
+  for(const l of s.links){if(!(STRUCTURE.has(l.kind)||l.kind==='runs_on'||l.kind==='policy'))continue;const a=visible(l.source),b=visible(l.target);if(!a||!b||a===b)continue;const overlay=!STRUCTURE.has(l.kind),key=`${overlay?'o:':''}${[a,b].sort().join('|')}`;(groups.get(key)??groups.set(key,{a,b,links:[],overlay}).get(key)!).links.push(l);}
+  const laid=await cachedLayout({id:'root',layoutOptions:{...ROOT_LAYOUT,'elk.hierarchyHandling':'INCLUDE_CHILDREN'},children:clusters.map(c=>toElk(items.get(c.id)!)),edges:[...groups].filter(([,g])=>!g.overlay).map(([id,g])=>({id,sources:[g.a],targets:[g.b]}))});
+  const nodes:Placed[]=[],sections=new Map<string,{x:number;y:number}[]>();
+  const count=(id:string):Summary=>{const out:Summary={total:0,stopped:0,warn:0,counts:{}};for(const c of children.get(id)??[]){const r=items.get(c)!.resource!;out.total++;out.counts[r.kind]=(out.counts[r.kind]??0)+1;if(health(r.status)==='warn')out.warn++;const sub=count(c);out.total+=sub.total;for(const [k,v] of Object.entries(sub.counts))out.counts[k as ResourceKind]=(out.counts[k as ResourceKind]??0)+(v??0);}return out;};
+  const walk=(n:ElkNode,ox:number,oy:number,depth:number)=>{for(const c of n.children??[]){const x=ox+(c.x??0),y=oy+(c.y??0),it=items.get(c.id)!;nodes.push({id:c.id,x,y,width:c.width??0,height:c.height??0,depth,item:it,collapsed:!open(it),expandable:!!children.get(c.id)?.length&&it.variant!=='cluster',summary:it.variant?count(c.id):{total:0,stopped:0,warn:0,counts:{}},policies:(s.links.filter(l=>l.kind==='policy'&&l.target===c.id)).length,hub:false});walk(c,x,y,depth+1);}};
+  walk(laid,0,0,0);
+  for(const e of laid.edges??[]){const sec=(e as any).sections?.[0];if(sec)sections.set(e.id,[sec.startPoint,...(sec.bendPoints??[]),sec.endPoint]);}
+  const at=new Map(nodes.map(n=>[n.id,n])),centre=(id:string)=>{const n=at.get(id)!;return{x:n.x+n.width/2,y:n.y+n.height/2};};
+  const edges:Bundle[]=[...groups].filter(([,g])=>at.has(g.a)&&at.has(g.b)).map(([id,g])=>({id,source:g.a,target:g.b,links:g.links,kind:g.links.some(l=>l.kind==='policy')?'policy':'service',hasFlow:false,label:g.links.length>1?`${g.links[0].label} +${g.links.length-1}`:g.links[0].label,points:sections.get(id)??[centre(g.a),centre(g.b)],overlay:g.overlay}));
+  return{nodes,edges,rollup:visible};
+}
+async function networkTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
   const items=buildItems(snapshot,f),children=new Map<string,string[]>();
   for(const it of items.values())if(it.parent)(children.get(it.parent)??children.set(it.parent,[]).get(it.parent)!).push(it.id);
   const isOpen=(it:Item)=>!!it.variant&&!it.outOfScope&&f.expanded.has(it.id)&&!!children.get(it.id)?.length;

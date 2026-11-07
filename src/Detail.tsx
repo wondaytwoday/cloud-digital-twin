@@ -4,6 +4,7 @@ import type {Resource,Snapshot} from '../shared/schema';
 import {exposures,health,isWideInbound} from '../shared/topology';
 import {kindNames,ProviderMark,ResourceIcon} from './graph';
 import {DEFAULT_OWNERSHIP_KEYS,ownershipOf} from '../shared/ownership';
+import {BASIS_LABEL,LINK_LABEL,basisOf} from '../shared/relations';
 import {providerNames,scopeNouns,type Bundle} from './layout';
 type Common={snapshot:Snapshot;onSelect:(id:string)=>void;onClose:()=>void};
 const scopeName=(s:Snapshot,id:string)=>s.scopeLabels[id]??id;
@@ -13,16 +14,19 @@ export function EdgeDetail({bundle,snapshot,onSelect,onClose}:Common&{bundle:Bun
   return <aside className="inspector"><div className="inspector-head"><span>연결 상세</span><button className="icon-button" onClick={onClose} aria-label="상세 닫기"><X size={16}/></button></div>
     <div className="hero"><div className="large-icon"><Link2 size={20}/></div><h2>{bundle.label}</h2><p className="muted small">접힌 자원 사이의 관계는 한 선으로 묶입니다. 관계 {bundle.links.length}개가 이 선에 포함됩니다.</p></div>
     <div className="inspector-body">{bundle.links.map(link=>{const from=find(link.source),to=find(link.target);return <div className="rule-card" key={link.id}>
-      <div className="rule-top"><span className={`badge ${link.kind==='simulation'?'amber':''}`}>{link.kind==='simulation'?'시뮬레이션':link.kind==='policy'?'정책 적용':link.kind==='peering'?'피어링':'구성 관계'}</span><b>{link.label}</b></div>
+      <div className="rule-top"><span className={`badge ${link.kind==='simulation'?'amber':''}`}>{LINK_LABEL[link.kind]}</span><span className={`badge ${link.basis==='inferred'||link.basis==='declared'?'amber':'neutral'}`} title="이 관계의 근거">{basisOf(link)}</span><b>{link.label}</b></div>
       <button className="hop-link" onClick={()=>onSelect(link.source)}>{from?.name}<ArrowUpRight size={12}/></button><ArrowDown size={12} className="hop-arrow"/><button className="hop-link" onClick={()=>onSelect(link.target)}>{to?.name}<ArrowUpRight size={12}/></button>
       {link.ports&&<p className="small muted">{link.protocol} / {link.ports}{link.rate?` · 예제 ${link.rate}`:''}</p>}
-      <p className="small evidence">근거: {link.evidence}</p></div>})}
-      <div className="notice"><Info size={15}/><p>구성 관계는 통신 성공을 보장하지 않습니다. 실제 통신은 경로 분석과 로그로 확인해야 합니다.</p></div></div></aside>;
+      <p className="small evidence">근거: {link.evidence}</p>{link.ref&&<p className="small mono muted" title="원본 참조">{link.ref}</p>}{link.note&&<p className="small">{link.note}</p>}
+      <p className="small muted">수집 {(()=>{const p=from?.provider==='onprem'?to?.provider:from?.provider,at=snapshot.connections.find(c=>c.provider===p)?.collectedAt;return at?new Date(at).toLocaleString('ko-KR'):snapshot.mode==='mock'?'예시 데이터':'시각 미상';})()}{link.basis==='inferred'?' · Atlas가 구성에서 추론':link.basis==='declared'?' · 운영자가 수동 등록':''}</p></div>})}
+      <div className="notice"><Info size={15}/><p>구성 관계는 통신 가능 여부를 말하지 않습니다. 통신 여부는 경로·정책 분석으로 판정하며, 관측 통신은 연동되지 않았습니다. 근거 구분: {Object.values(BASIS_LABEL).join(' / ')}.</p></div></div></aside>;
 }
 export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onImpact,canImpact,scopePath,onOpenScope}:Common&{resource:Resource;onTrace:(id:string)=>void;onImpact:(id:string)=>void;canImpact:boolean;scopePath:{id:string;name:string}[];onOpenScope:(id:string)=>void}){
   const [tab,setTab]=useState('overview'),[copied,setCopied]=useState(false);useEffect(()=>{setTab('overview');setCopied(false)},[r.id]);
   const related=snapshot.links.filter(e=>e.source===r.id||e.target===r.id);
   const ancestry=new Set([r.id]);for(let p=r.parent;p;p=snapshot.resources.find(x=>x.id===p)?.parent)ancestry.add(p);
+  // A VM's policies sit on its NICs (Azure NIC NSG, AWS ENI security groups), so those count as its own.
+  for(const l of snapshot.links)if(l.kind==='attachment'&&l.source===r.id&&snapshot.resources.find(x=>x.id===l.target)?.kind==='nic')ancestry.add(l.target);
   const appliedPolicies=snapshot.links.filter(e=>e.kind==='policy'&&ancestry.has(e.target)).map(e=>snapshot.resources.find(x=>x.id===e.source)!);
   const policies=[...new Map(appliedPolicies.map(p=>[p.id,p])).values()];
   const access=snapshot.iam.filter(a=>a.scope===r.scope);
@@ -42,7 +46,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
     {tab==='network'&&<>{r.rules.length>0&&<><h3>이 정책의 규칙 <span className="count">{r.rules.length}</span></h3>{r.rules.map((rule,i)=><RuleCard rule={rule} key={i}/>)}</>}
       {r.kind!=='firewall'&&<><h3>적용 정책 <span className="count">{policies.length}</span></h3>{policies.length?policies.map(p=><div className="policy-group" key={p.id}><button className="relation-row" onClick={()=>onSelect(p.id)}><ShieldCheck size={14}/><span>{p.name}<small>{p.parent&&ancestry.has(p.parent)?'상위 범위':'직접/서브넷 적용'} · 규칙 {p.rules.length}개</small></span><ArrowUpRight size={13}/></button>{p.rules.slice(0,3).map((rule,i)=><RuleCard rule={rule} key={i}/>)}</div>):<p className="muted small">구성 참조로 연결된 정책이 없습니다. 전체 유효 정책을 평가한 결과는 아닙니다.</p>}</>}
       {!!routes.length&&<><h3>라우팅 <span className="count">{routes.length}</span></h3><table className="routes"><thead><tr><th>목적지</th><th>다음 홉</th></tr></thead><tbody>{routes.map((x,i)=><tr key={i}><td className="mono">{x.destination}</td><td>{x.nextHop}<small>{x.via}</small></td></tr>)}</tbody></table></>}
-      <h3>연결 관계 <span className="count">{related.length}</span></h3>{related.map(e=>{const other=snapshot.resources.find(x=>x.id===(e.source===r.id?e.target:e.source));return <button className="relation-row" key={e.id} onClick={()=>other&&onSelect(other.id)}><Link2 size={14}/><span>{other?.name}<small>{e.label}{e.kind==='simulation'?' · 시뮬레이션':''}</small></span><ArrowUpRight size={13}/></button>})}
+      <h3>연결 관계 <span className="count">{related.length}</span></h3>{related.map(e=>{const other=snapshot.resources.find(x=>x.id===(e.source===r.id?e.target:e.source));return <button className="relation-row" key={e.id} onClick={()=>other&&onSelect(other.id)}><Link2 size={14}/><span>{other?.name}<small>{LINK_LABEL[e.kind]} · {e.label} · {basisOf(e)}</small></span><ArrowUpRight size={13}/></button>})}
       <div className="notice"><Info size={15}/><p>정책 허용은 실제 도달 가능 여부와 다릅니다. 라우팅·NAT·반환 경로는 별도 검증이 필요합니다.</p></div></>}
     {tab==='access'&&<><h3><ShieldCheck size={14}/>이 범위의 역할 할당 <span className="count">{access.length}</span></h3>{access.length?access.slice(0,20).map(a=><div key={a.id} className="rule-card"><div className="rule-top"><b>{a.role}</b>{a.privileged&&<span className="badge amber">특권</span>}{snapshot.mode==='mock'&&<span className="demo-label">예제</span>}</div><h4>{a.principal}</h4><small className="muted">{scopeName(snapshot,a.scope)}</small></div>):<p className="muted small">수집된 역할 할당이 없습니다.</p>}<div className="notice"><Info size={15}/><p>역할 할당 목록이며 상속, 조건, 거부 정책을 반영한 실효 권한이 아닙니다.</p></div></>}
     </div></aside>;
