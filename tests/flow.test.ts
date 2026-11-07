@@ -153,3 +153,25 @@ test('GCP: instances keep their NICs, tags, service account and collected disk',
   assert.ok(out.some(l=>l.kind==='attachment'&&s.resources.find(x=>x.id===l.target)?.kind==='disk'),'its disk asset is joined');
   const twin=s.resources.find(r=>r.name==='analytics-api-02')!;assert.ok(!s.links.some(l=>l.source===twin.id&&s.resources.find(x=>x.id===l.target)?.kind==='disk'),'a disk whose asset was not collected is not invented');
 });
+
+// ---- 11, 12: what a restricted user and live data may carry
+import {restrictSnapshot} from '../server/auth.ts';
+test('11. a restricted user cannot analyse into, or learn about, another scope',async()=>{
+  const s=await demo,platform=s.hierarchy.find(n=>n.name==='Platform Prod')!.scope!,mine=restrictSnapshot(s,[platform]);
+  const web=mine.resources.find(r=>r.name==='web-01')!,r=analyzeFlow(mine,{from:web.id,to:'8.8.8.8',protocol:'tcp',port:443});
+  // The firewall in the hub belongs to another subscription: the route's next hop stays as the address the user configured, the device is not revealed.
+  assert.ok(!r.path.some(h=>h.label==='afw-hub'),'no device from another scope appears');assert.equal(r.status,'unknown');
+  assert.ok(!mine.links.some(l=>!mine.resources.some(x=>x.id===l.source)||!mine.resources.some(x=>x.id===l.target)),'every relation has both ends in scope');
+  assert.equal(mine.crossRefs,undefined);
+  for(const p of mine.resources.filter(x=>x.kind==='firewall'))assert.equal(p.scope,platform);
+});
+test('12. live data refuses demo traffic and observed relations, and every collector link says how it was established',async()=>{
+  const {validateSnapshot:v}=await import('../shared/schema.ts');
+  const base={version:1,mode:'live',collectedAt:new Date().toISOString(),resources:[{id:'a',nativeId:'a',name:'a',provider:'azure',kind:'compute',type:'t',scope:'s',region:'r',source:'x'},{id:'b',nativeId:'b',name:'b',provider:'azure',kind:'compute',type:'t',scope:'s',region:'r',source:'x'}],warnings:[],scopes:['s']};
+  assert.throws(()=>v({...base,links:[{id:'1',source:'a',target:'b',kind:'simulation',label:'x',evidence:'x'}]}),/synthetic/);
+  assert.throws(()=>v({...base,links:[{id:'1',source:'a',target:'b',kind:'observed_flow',label:'x',evidence:'x'}]}),/observation source/);
+  assert.throws(()=>v({...base,links:[{id:'1',source:'a',target:'b',kind:'attachment',label:'x',evidence:'x',basis:'observed'}]}),/observation source/);
+  const s=await demo,collected=s.links.filter(l=>l.kind!=='simulation');
+  assert.ok(collected.every(l=>l.basis),'no collector link lacks its basis');
+  assert.ok(collected.some(l=>l.basis==='inferred')&&collected.filter(l=>l.basis==='inferred').every(l=>l.note||l.evidence),'inferred links say how');
+});

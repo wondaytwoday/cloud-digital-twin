@@ -128,6 +128,7 @@ npm run collect -- --provider aws --regions ap-northeast-2
 | `ATLAS_AWS_ACCOUNTS` | Organizations를 읽지 못할 때의 계정 목록 (`이름=ID,이름=ID`) |
 | `ATLAS_GCP_BILLING_TABLE` | BigQuery 결제 내보내기 테이블 (`프로젝트.데이터셋.테이블`) |
 | `ATLAS_COST_HOURS` | 비용 조회 주기(시간). 기본 24 |
+| `ATLAS_KUBERNETES` | 수집할 Kubernetes 클러스터 (kubeconfig 컨텍스트와 클라우드 클러스터 대응). 형식과 최소 RBAC은 [docs/topology.md](docs/topology.md) |
 | `ATLAS_OWNER_TAGS` | 담당자를 읽을 태그 키, 쉼표로 구분해 앞쪽 우선. 기본 `owner,team,owner-team,담당자,담당팀`. 대소문자 무시 |
 | `ATLAS_SERVICE_TAGS` | 서비스를 읽을 태그 키. 기본 `service,app,application,system,workload,서비스` |
 | `ATLAS_HISTORY_DAYS` | 스냅샷 이력 보존 기간(일). 기본 30. 기간과 상관없이 최근 이력 2개는 항상 남김 |
@@ -192,6 +193,8 @@ npm run restore -- /backup/cloud-atlas/cloud-atlas-<시각>
 - 기존 폴더는 지우지 않고 `<폴더>.before-restore-<시각>`으로 옮겨 둡니다. 백업 이후에 쌓인 접근 기록은 여기서 꺼낼 수 있습니다.
 - 복구 전에 서버를 멈추고, 복구한 뒤 다시 시작하세요.
 - 백업 주기는 허용할 데이터 손실(RPO)에 맞춰 cron 등으로 실행합니다. 복구 시간(RTO)은 `--check`와 복구를 정기적으로 연습해 측정하세요.
+
+토폴로지의 관계 모델, 경로·정책 분석 규칙, 지원 범위, 성능 측정은 [docs/topology.md](docs/topology.md)에 있습니다.
 
 실제 계정으로 검증하기 전의 문서 기준 대조 결과와 검증 항목은 [docs/live-validation.md](docs/live-validation.md)에 있습니다.
 
