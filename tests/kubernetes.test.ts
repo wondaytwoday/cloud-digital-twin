@@ -73,3 +73,21 @@ test('11. a user restricted to another scope receives no Kubernetes object of th
 test('fixtures are shaped like kubectl output: every pod names its namespace and node',()=>{
   for(const p of aksPlatform('sub','client').pods)assert.ok((p as any).metadata.namespace&&(p as any).spec.nodeName);
 });
+
+test('a live run collects the configured cluster after the clouds, and the merge joins it to the cloud disk',async()=>{
+  const {mkdtemp}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),path=await import('node:path');
+  const {FileSnapshotStore}=await import('../server/store.ts'),{configureCollector,configureKubectl,runCollection}=await import('../server/runner.ts'),{liveSnapshot}=await import('../server/app.ts'),{pvDiskId}=await import('../server/fixtures/kubernetes.ts');
+  const sub='00000000-0000-4000-8000-000000000002',items=aksPlatform(sub,'client'),store=new FileSnapshotStore(await mkdtemp(path.join(tmpdir(),'atlas-')));
+  const disk={id:`azure:${pvDiskId(sub).toLowerCase()}`,nativeId:pvDiskId(sub).toLowerCase(),name:'pvc-7f3a2c1e',provider:'azure' as const,kind:'disk' as const,type:'Microsoft.Compute/disks',scope:sub,region:'kc',status:'Attached',routes:[],specs:{},rules:[],iam:[],tags:{},source:'test'};
+  const off={detect:async()=>{throw new Error('Could not load credentials');},collect:async()=>{throw new Error('unused');}};
+  configureCollector({azure:{detect:async()=>'a',collect:async()=>({resources:[disk],links:[],warnings:[],scopeLabels:{}})},aws:off,gcp:off});
+  const asked:string[]=[];configureKubectl(async args=>{assert.equal(args[2],'get');asked.push(args[3]);return JSON.stringify({items:items[args[3]]??[]});});
+  const saved=process.env.ATLAS_KUBERNETES;process.env.ATLAS_KUBERNETES=JSON.stringify([{context:'aks-platform',provider:'azure',scope:sub,cluster:'/subscriptions/x/aks',networkPolicyEngine:'azure'}]);
+  try{
+    const status=await runCollection(store);assert.equal(status.kubernetes?.state,'ok');assert.equal(asked.length,KUBE_KINDS.length);
+    const s=(await liveSnapshot(store))!,pv=s.resources.find(r=>r.kind==='pv')!;
+    assert.ok(s.links.some(l=>l.source===pv.id&&l.target===disk.id&&l.kind==='binds_to'),'PV joined to the disk collected by the Azure run');
+    assert.equal(s.connections.find(c=>c.provider==='azure')?.status,'collected','the Kubernetes snapshot does not stand in for Azure');
+    assert.ok(s.unresolved?.some(u=>u.kind==='runs_on'),'nodes whose VMs were not collected stay unresolved');
+  }finally{if(saved===undefined)delete process.env.ATLAS_KUBERNETES;else process.env.ATLAS_KUBERNETES=saved;configureCollector();configureKubectl();}
+});

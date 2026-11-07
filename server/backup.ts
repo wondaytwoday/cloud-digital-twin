@@ -42,7 +42,7 @@ export async function verifyBackup(dir:string):Promise<Manifest>{
     if(path.isAbsolute(f.path)||f.path.split(/[\\/]/).includes('..'))throw new Error(`백업 목록에 허용되지 않는 경로가 있습니다: ${f.path}`);
     let data:Buffer;try{data=await readFile(path.join(dir,f.path));}catch{throw new Error(`백업에 파일이 없습니다: ${f.path}`);}
     if(sha(data)!==f.sha256)throw new Error(`백업 파일이 손상됐습니다: ${f.path}`);
-    if(/^(azure|aws|gcp)\.json$/.test(f.path)||/^history[\\/]/.test(f.path)){try{validateSnapshot(JSON.parse(data.toString('utf8')));}catch(e){throw new Error(`스냅샷 형식이 올바르지 않습니다: ${f.path} (${e instanceof Error?e.message.split('\n')[0]:''})`);}}
+    if(/^(azure|aws|gcp|kubernetes)\.json$/.test(f.path)||/^history[\\/]/.test(f.path)){try{validateSnapshot(JSON.parse(data.toString('utf8')));}catch(e){throw new Error(`스냅샷 형식이 올바르지 않습니다: ${f.path} (${e instanceof Error?e.message.split('\n')[0]:''})`);}}
   }
   return manifest;
 }

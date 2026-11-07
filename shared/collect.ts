@@ -4,7 +4,8 @@ export type StageId='auth'|'scopes'|'resources'|'iam'|'activity'|'cost'|'save';
 export type StageState='pending'|'running'|'done'|'skipped'|'failed';
 export type Stage={id:StageId;label:string;state:StageState;detail?:string;done?:number;total?:number};
 export type ProviderStatus={state:ProviderState;message?:string;at?:string;resources?:number;identity?:string;stages?:Stage[]};
-export type CollectionStatus={running:boolean;startedAt?:string;finishedAt?:string;pid?:number;providers:Record<ProviderId,ProviderStatus>};
+// kubernetes is present only when clusters are configured (ATLAS_KUBERNETES); it is read after the clouds, through the Kubernetes API.
+export type CollectionStatus={running:boolean;startedAt?:string;finishedAt?:string;pid?:number;providers:Record<ProviderId,ProviderStatus>;kubernetes?:ProviderStatus};
 export type Report=(stage:StageId,patch?:Partial<Pick<Stage,'state'|'detail'|'done'|'total'>>)=>void;
 export const noReport:Report=()=>{};
 const SCOPE_STAGE:Record<ProviderId,string>={azure:'구독 찾기',aws:'조직·계정 찾기',gcp:'조직·프로젝트 찾기'};

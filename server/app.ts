@@ -12,6 +12,7 @@ import {requireAccess,requireRole,restrictSnapshot,sessionRoutes,type AccessEntr
 import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
 import {isStale,staleAfterHours} from '../shared/freshness.js';
 import {ownershipKeys} from '../shared/ownership.js';
+import {resolveCrossRefs} from '../shared/crossref.js';
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');
@@ -46,11 +47,15 @@ export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
     // A scope that could not be fully read says nothing about what changed in it, so its gaps are not reported as deletions or additions.
     if(before){const after=new Set(s.incomplete),earlier=new Set(before.incomplete);changes.push(...diffResources(before.resources,s.resources).filter(c=>!(c.kind==='removed'&&after.has(c.scope))&&!(c.kind==='added'&&earlier.has(c.scope))));if(!since||before.collectedAt<since)since=before.collectedAt;}
   }
+  // Kubernetes objects are a collection of their own; they are merged here and joined to cloud resources by their cross references.
+  const kube=await store.latest('kubernetes').catch(()=>{unreadable.add('kubernetes');warnings.push('kubernetes: 저장된 스냅샷을 읽지 못했습니다.');return null;});
+  if(kube&&kube.mode==='live'){snapshots.push({...kube,connections:[],hierarchy:[],cost:[],scopes:[]});warnings.push(`kubernetes: 마지막 수집 ${kube.collectedAt}`);}
   if(!snapshots.length){if(unreadable.size)throw new Error(`저장된 스냅샷을 읽지 못했습니다: ${[...unreadable].join(', ')}`);return null;}
   const resources=snapshots.flatMap(s=>s.resources),links=snapshots.flatMap(s=>s.links),scopeLabels=Object.assign({},...snapshots.map(s=>s.scopeLabels)),allWarnings=[...warnings,...snapshots.flatMap(s=>s.warnings)];
   applySites(await readSites(),resources,links,allWarnings,scopeLabels);
-  return validateSnapshot({version:1,mode:'live',collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),cost:snapshots.flatMap(s=>s.cost),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
-    const s=snapshots.find(x=>x.resources.some(r=>r.provider===p)),run=status?.providers[p],state:Record<ProviderState,string>={idle:s?'collected':'missing',running:'running',ok:'collected',partial:'partial',failed:'failed',unauthenticated:'unauthenticated'};
+  const joined=resolveCrossRefs(resources,snapshots.flatMap(s=>s.crossRefs??[]));links.push(...joined.links);
+  return validateSnapshot({version:1,mode:'live',...(joined.unresolved.length?{unresolved:joined.unresolved}:{}),collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),cost:snapshots.flatMap(s=>s.cost),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
+    const s=snapshots.find(x=>x.resources.some(r=>r.provider===p&&!r.type.startsWith('k8s/'))),run=status?.providers[p],state:Record<ProviderState,string>={idle:s?'collected':'missing',running:'running',ok:'collected',partial:'partial',failed:'failed',unauthenticated:'unauthenticated'};
     // Stale is judged on the snapshot shown, not the last attempt: a run that keeps failing leaves old data on screen, which is exactly what must be flagged.
     if(unreadable.has(p))return{provider:p,status:'failed' as const,api:'수집 스냅샷',scopes:0,message:'저장된 스냅샷 파일을 읽지 못했습니다. 다시 수집하거나 npm run restore로 백업에서 복구하세요.'};
     return{provider:p,status:run?state[run.state]:s?'collected':'missing',api:'수집 스냅샷',scopes:s?.scopes.length??0,collectedAt:s?.collectedAt,message:run?.message,...(s?{stale:isStale(s.collectedAt,staleAfterHours(process.env))}:{}),...(s?.coverage?{datasets:s.coverage}:{})};

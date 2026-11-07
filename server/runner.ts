@@ -1,6 +1,8 @@
 import {abortableFetch,awsSend,collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,gcpRequester,type CollectOptions} from './collectors.js';
 import type {Normalized} from './normalize.js';
 import {FileSnapshotStore,processAlive,type SnapshotStore} from './store.js';
+import {KUBE_KINDS,clusterBindings,kubectl,normalizeKubernetes,readCluster,type Kubectl} from './kubernetes.js';
+import {finish} from './normalize.js';
 import {existsSync} from 'node:fs';
 import {validateSnapshot,type Coverage,type Dataset} from '../shared/schema.js';
 import {newStages,type CollectionStatus,type ProviderId,type ProviderState,type ProviderStatus,type Report,type Stage} from '../shared/collect.js';
@@ -75,12 +77,13 @@ const realDrivers:CollectorDrivers={
     collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(gcpRequester(client,options.signal),options);},
   },
 };
-let drivers=realDrivers;
+let drivers=realDrivers,kube:Kubectl=kubectl;
+export const configureKubectl=(next:Kubectl=kubectl)=>{kube=next;};
 export const configureCollector=(next:CollectorDrivers=realDrivers,nextLimits:Partial<CollectorLimits>={})=>{drivers=next;limits={...DEFAULT_LIMITS,...nextLimits};};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
 // What was read and what was not, per kind of data. Cost skipped by its own schedule keeps the state of the run that last read it.
 export const coverageOf=(result:Normalized,keptCost?:Coverage):Partial<Record<Dataset,Coverage>>=>{const g=result.gaps??{},cost=g.cost??keptCost??(result.cost?'ok':undefined);return{iam:g.iam??'ok',activity:g.activity??'ok',...(cost?{cost}:{})};};
-export const toSnapshot=(result:Normalized,costAt?:string,keptCost?:Coverage)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,coverage:coverageOf(result,keptCost),resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
+export const toSnapshot=(result:Normalized,costAt?:string,keptCost?:Coverage)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,coverage:coverageOf(result,keptCost),resources:result.resources,links:result.links,warnings:result.warnings,...(result.crossRefs?.length?{crossRefs:result.crossRefs}:{}),scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 // A process killed mid-run leaves its last status behind. Without this check the portal would show it running forever.
@@ -148,6 +151,18 @@ async function collect(store:SnapshotStore,log:(line:string)=>void):Promise<Coll
     }
     await persist(true);
   }));
+  // Kubernetes after the clouds: its objects are joined to cloud resources when snapshots merge, and a cluster that cannot be read keeps its last snapshot.
+  const bindings=(()=>{try{return clusterBindings();}catch{log('ATLAS_KUBERNETES 형식이 올바르지 않아 Kubernetes를 수집하지 않습니다.');return [];}})();
+  if(bindings.length){
+    status.kubernetes={state:'running',at:new Date().toISOString()};await persist(true);
+    try{
+      const parts=[],denied:string[]=[];
+      for(const b of bindings){const read=await withDeadline(signal=>readCluster(kube,b.context,signal),limits.collectMs,`Kubernetes ${b.context}`);if(read.denied.length===KUBE_KINDS.length)throw new Error(`${b.context}: 어떤 종류도 읽지 못했습니다 (${read.denied[0]})`);denied.push(...read.denied.map(d=>`${b.context} ${d}`));parts.push(normalizeKubernetes(b,read.items,read.denied));}
+      const merged=finish(parts.map(p=>({...p,crossRefs:undefined})));merged.crossRefs=parts.flatMap(p=>p.crossRefs);merged.iam=parts.flatMap(p=>p.iam??[]);
+      await store.save('kubernetes',toSnapshot(merged));
+      status.kubernetes={state:denied.length?'partial':'ok',at:new Date().toISOString(),resources:merged.resources.length,message:denied.length?`일부 종류를 읽지 못했습니다: ${denied.slice(0,3).join(', ')}`:undefined};log(`kubernetes: 개체 ${merged.resources.length}개 저장`);
+    }catch(e){status.kubernetes={state:AUTH_ERROR.test(String(e))?'unauthenticated':'failed',at:new Date().toISOString(),message:shortMessage(e)};log(`kubernetes: 실패, 기존 스냅샷을 유지합니다. ${shortMessage(e)}`);}
+  }
   status.running=false;status.finishedAt=new Date().toISOString();await writing;await store.writeStatus(status);
   return status;
 }
