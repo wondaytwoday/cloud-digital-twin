@@ -66,6 +66,10 @@ export const standard:Scenario={
       DescribeSubnets:{Subnets:[awsSubnet('subnet-tgw-a','tgw-attach-a','vpc-transit','10.20.0.0/28','ap-northeast-2a')]},
       DescribeTransitGateways:{TransitGateways:[{TransitGatewayId:'tgw-core',State:'available',Options:{AmazonSideAsn:64512},Tags:tag('tgw-core')}]},
       DescribeTransitGatewayVpcAttachments:{TransitGatewayVpcAttachments:[{TransitGatewayId:'tgw-core',VpcId:'vpc-transit',VpcOwnerId:'111122223333',State:'available'},{TransitGatewayId:'tgw-core',VpcId:'vpc-commerce',VpcOwnerId:'444455556666',State:'available'},{TransitGatewayId:'tgw-core',VpcId:'vpc-dev',VpcOwnerId:'777788889999',State:'available'}]},
+      // Production and development are kept apart by route table: neither table holds the other's range.
+      DescribeTransitGatewayRouteTables:{TransitGatewayRouteTables:[{TransitGatewayRouteTableId:'tgw-rtb-prod',TransitGatewayId:'tgw-core',State:'available'},{TransitGatewayRouteTableId:'tgw-rtb-dev',TransitGatewayId:'tgw-core',State:'available'}]},
+      GetTransitGatewayRouteTableAssociations:(i:{TransitGatewayRouteTableId:string})=>({Associations:(i.TransitGatewayRouteTableId==='tgw-rtb-prod'?[['vpc-commerce','vpc'],['vpc-transit','vpc'],['vpn-seoul','vpn']]:[['vpc-dev','vpc']]).map(([ResourceId,ResourceType])=>({ResourceId,ResourceType,TransitGatewayAttachmentId:`tgw-attach-${ResourceId}`,State:'associated'}))}),
+      SearchTransitGatewayRoutes:(i:{TransitGatewayRouteTableId:string})=>({Routes:(i.TransitGatewayRouteTableId==='tgw-rtb-prod'?[['10.21.0.0/16','vpc-commerce','vpc'],['10.20.0.0/16','vpc-transit','vpc'],['10.0.0.0/8','vpn-seoul','vpn']]:[['10.22.0.0/16','vpc-dev','vpc'],['10.0.0.0/8','vpn-seoul','vpn']]).map(([DestinationCidrBlock,ResourceId,ResourceType])=>({DestinationCidrBlock,State:'active',Type:'propagated',TransitGatewayAttachments:[{ResourceId,ResourceType,TransitGatewayAttachmentId:`tgw-attach-${ResourceId}`}]})),AdditionalRoutesAvailable:false}),
       DescribeVpnConnections:{VpnConnections:[{VpnConnectionId:'vpn-seoul',State:'available',Type:'ipsec.1',TransitGatewayId:'tgw-core',CustomerGatewayId:'cgw-seoul',VgwTelemetry:[{Status:'UP'},{Status:'DOWN'}],Tags:tag('vpn-seoul')}]},
     }},
     {account:'444455556666',label:'commerce-prod',region:'ap-northeast-2',api:{
@@ -92,6 +96,7 @@ export const standard:Scenario={
       DescribeSubnets:{Subnets:[awsSubnet('subnet-dev-a','dev-app-a','vpc-dev','10.22.1.0/24','ap-northeast-2a')]},
       DescribeInstances:{Reservations:[{Instances:[ec2('i-devapp','dev-app-01','t3.medium','subnet-dev-a','10.22.1.10','sg-dev','stopped')]}]},
       DescribeSecurityGroups:{SecurityGroups:[securityGroup('sg-dev','vpc-dev',[sgRule(22,'10.0.0.0/8')],egress)]},
+      DescribeRouteTables:{RouteTables:[awsRouteTable(['subnet-dev-a'],[{DestinationCidrBlock:'10.0.0.0/8',TransitGatewayId:'tgw-core'}],'vpc-dev')]},
       DescribeInstanceTypes:{InstanceTypes:instanceTypes},
     }},
   ],

@@ -130,10 +130,6 @@ test('AWS 6. a second ENI keeps its own subnet, groups and address',async()=>{
   // Same instance, other ENI: its own security group (sg-db, no egress rules) refuses to start the connection.
   assert.equal((await awsFlow('10.21.3.30','rds-orders',5432)).policies[0].verdict,'deny');
 });
-test('AWS: routing through a Transit Gateway is undecided while its route tables are not collected',async()=>{
-  const r=analyzeFlow(await demo,{from:await id('checkout-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
-  assert.equal(r.status,'unknown');assert.ok(kinds(r).includes('gateway'));assert.ok(r.gaps.some(g=>g.undecided&&/Transit Gateway 라우트 테이블/.test(g.text)));
-});
 
 // ---- GCP
 test('GCP 2. a firewall rule targets tags: of two instances side by side, only the tagged one admits',async()=>{
@@ -197,4 +193,32 @@ test('a firewall whose policy rules could not be read stays undecided',async()=>
   const s=structuredClone(await demo),afw=s.resources.find(r=>r.name==='afw-hub')!;afw.specs['정책 규칙']='미수집';
   const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='web-01')!.id,to:'8.8.8.8',protocol:'tcp',port:443});
   assert.equal(r.status,'unknown');assert.match(r.policies.find(p=>p.direction==='through')!.reason,/수집하지 못해/);
+});
+
+// ---- Transit Gateway route tables
+const withoutTgwRoute=(s:Snapshot,table:string,dest:string)=>{const tgw=s.resources.find(r=>r.name==='tgw-core')!;tgw.routes=tgw.routes.filter(r=>!(r.tags?.includes(table)&&r.destination===dest));return s;};
+test('TGW: the table the source VPC is associated with decides, and on-prem is reached through the VPN it names',async()=>{
+  const r=analyzeFlow(await demo,{from:await id('checkout-api-01'),to:'10.200.0.1',protocol:'tcp',port:443});
+  assert.equal(r.status,'allowed');assert.equal(r.completeness,'partial');
+  assert.ok(r.path.some(h=>/tgw-rtb-prod: 10\.0\.0\.0\/8 → vpn-seoul/.test(h.label)));assert.deepEqual(kinds(r).slice(-1),['onprem']);
+});
+test('TGW: an on-prem supernet propagated into the table sends dev-bound traffic to the VPN, which is reported, not assumed isolated',async()=>{
+  const r=await awsFlow('checkout-api-01','dev-app-01',22);
+  assert.equal(r.status,'unknown');assert.ok(r.gaps.some(g=>g.undecided&&/VPN·DX로 보내지만/.test(g.text)));
+});
+test('TGW: without a route in the source table the segment is isolated',async()=>{
+  const s=withoutTgwRoute(structuredClone(await demo),'tgw-rtb-prod','10.0.0.0/8'),r=await awsFlow('checkout-api-01','dev-app-01',22,s);
+  assert.equal(r.status,'blocked');assert.match(r.summary,/tgw-rtb-prod에 .* 경로가 없습니다/);
+});
+test('TGW: a request that arrives but has no route back is blocked on the reply',async()=>{
+  const s=structuredClone(await demo),tgw=s.resources.find(r=>r.name==='tgw-core')!;
+  tgw.routes=tgw.routes.filter(r=>!(r.tags?.includes('tgw-rtb-prod')&&r.destination==='10.0.0.0/8'));tgw.routes.push({destination:'10.22.0.0/16',nextHop:'vpc-dev',via:'vpc',origin:'user',tags:['tgw-rtb-prod']});
+  tgw.routes=tgw.routes.filter(r=>!(r.tags?.includes('tgw-rtb-dev')&&r.destination==='10.0.0.0/8'));
+  const r=await awsFlow('checkout-api-01','dev-app-01',22,s);
+  assert.equal(r.status,'blocked');assert.equal(r.returnPath.status,'blocked');assert.match(r.returnPath.notes[0],/tgw-rtb-dev에 .*돌아가는 경로가 없습니다/);
+});
+test('TGW: without collected route tables the answer stays undecided, as before',async()=>{
+  const s=structuredClone(await demo);delete s.resources.find(r=>r.name==='tgw-core')!.associations;
+  const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='checkout-api-01')!.id,to:'10.200.0.1',protocol:'tcp',port:443});
+  assert.equal(r.status,'unknown');assert.ok(r.gaps.some(g=>/라우트 테이블을 수집하지 않아/.test(g.text)));
 });

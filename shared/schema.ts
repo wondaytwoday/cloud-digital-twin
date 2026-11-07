@@ -17,6 +17,8 @@ export const ResourceSchema = z.object({
   routes: z.array(z.object({destination:z.string(),nextHop:z.string(),via:z.string(),nextHopIp:z.string().optional(),target:z.string().optional(),priority:z.number().optional(),origin:z.enum(['user','system','propagated']).optional(),tags:z.array(z.string()).optional()})).default([]),
   // Kubernetes label selectors (Service, NetworkPolicy) and GCP network tags, read as matching keys rather than free text.
   selector: z.record(z.string(), z.string()).optional(), netTags: z.array(z.string()).optional(),
+  // A router's own tables: which attached thing (a VPC, a VPN) uses which route table. Routes carry their table in tags.
+  associations: z.record(z.string(), z.string()).optional(),
   specs: z.record(z.string(), z.string()).default({}),
   // peers names what a rule matches beyond addresses (a security group, an application security group, a service tag, a pod selector);
   // the analyser evaluates the ones it understands and reports the rest as unevaluated rather than guessing.

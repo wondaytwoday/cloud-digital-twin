@@ -279,7 +279,9 @@ function awsRoutes(c:Ctx,subnet?:Resource,network?:Resource){
   for(const r of subnet?.routes??[])if(r.nextHop!=='local')out.push({prefix:r.destination,type:r.via,target:r.target,hop:r.nextHop,origin:r.origin??'user'});
   return out;
 }
+const tgwRoute=(tgw:Resource,table:string,to:Addr)=>{const target=addrRange(to);return tgw.routes.filter(r=>r.tags?.includes(table)).filter(r=>{const p=parseCidr(r.destination);return p&&target&&within(target,p);}).sort((a,b)=>prefixLen(b.destination)-prefixLen(a.destination))[0];};
 function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
+  let tgwReturn:{tgw:Resource;vpc:string}|undefined;
   const push=(p?:PolicyCheck)=>{if(p)res.policies.push(p);};
   const service=!!to.service&&!to.ip,src:Addr&{nic?:Resource}={ip:from.ip,nic:from.nic},dst:Addr&{nic?:Resource;service?:boolean}={ip:to.ip,cidr:to.ip?undefined:to.cidr,nic:to.nic,service};
   const qPort=q.port===undefined?undefined:{from:q.port,to:q.port};
@@ -303,10 +305,29 @@ function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
     res.path.push({id:peer.peer.id,label:`${from.network!.name} ↔ ${peer.peer.name} 피어링`,kind:'peering',evidence:peer.link.evidence});
   }else if(hop.startsWith('tgw-')){
     const tgw=c.s.resources.find(r=>r.kind==='gateway'&&r.nativeId.endsWith(`/${hop}`));res.path.push({id:tgw?.id,label:tgw?.name??hop,kind:'gateway',evidence:'Transit Gateway 연결'});
-    const attached=tgw?c.s.links.filter(l=>l.source===tgw.id&&l.kind==='attachment').map(l=>l.target):[];
-    if(to.zone==='onprem'){const sites=tgw?sitesBehind(c,tgw):[];if(!sites.some(x=>x.id===to.resource?.id)){undecided(res,'이 Transit Gateway 뒤에 목적지 사내망이 연결된 것을 확인하지 못했습니다.');return;}res.path.push({id:to.resource?.id,label:to.resource?.name??'사내망',kind:'onprem',evidence:'VPN·DX 연결 너머 (수동 등록한 사내망)',basis:'declared'});undecided(res,'Transit Gateway 라우트 테이블을 수집하지 않아 사내망으로 전달하는지 확정할 수 없습니다.');note(res,'사내망 쪽 라우팅과 방화벽은 수집 범위 밖입니다.');return;}
-    if(to.network&&!attached.includes(to.network.id)){undecided(res,`${to.network.name}이(가) 이 Transit Gateway에 연결된 것을 확인하지 못했습니다.`);return;}
-    undecided(res,'Transit Gateway 라우트 테이블(연결·전파)을 수집하지 않아 TGW가 이 대상으로 전달하는지 확정할 수 없습니다.');
+    if(!tgw?.associations){
+      // Route tables not collected (another account owns the TGW and was not read, or an older snapshot): only attachments are known.
+      const attached=tgw?c.s.links.filter(l=>l.source===tgw.id&&l.kind==='attachment').map(l=>l.target):[];
+      if(to.zone==='onprem'){const sites=tgw?sitesBehind(c,tgw):[];if(!sites.some(x=>x.id===to.resource?.id)){undecided(res,'이 Transit Gateway 뒤에 목적지 사내망이 연결된 것을 확인하지 못했습니다.');return;}res.path.push({id:to.resource?.id,label:to.resource?.name??'사내망',kind:'onprem',evidence:'VPN·DX 연결 너머 (수동 등록한 사내망)',basis:'declared'});undecided(res,'Transit Gateway 라우트 테이블을 수집하지 않아 사내망으로 전달하는지 확정할 수 없습니다.');note(res,'사내망 쪽 라우팅과 방화벽은 수집 범위 밖입니다.');return;}
+      if(to.network&&!attached.includes(to.network.id)){undecided(res,`${to.network.name}이(가) 이 Transit Gateway에 연결된 것을 확인하지 못했습니다.`);return;}
+      undecided(res,'Transit Gateway 라우트 테이블(연결·전파)을 수집하지 않아 TGW가 이 대상으로 전달하는지 확정할 수 없습니다.');
+    }else{
+      // The source VPC's attachment is associated with one table; that table alone decides where the TGW sends the packet.
+      const table=tgw.associations[from.network!.nativeId.split('/').pop()!];
+      if(!table){res.status='blocked';res.summary=`${from.network!.name}의 연결이 어떤 TGW 라우트 테이블에도 연결되지 않아 TGW가 전달하지 않습니다.`;return;}
+      const picked=tgwRoute(tgw,table,dst);
+      if(!picked){res.status='blocked';res.summary=`TGW 라우트 테이블 ${table}에 ${to.label}(으)로 가는 경로가 없습니다 (라우트 테이블로 분리된 세그먼트).`;return;}
+      res.path.push({label:`TGW 라우트 테이블 ${table}: ${picked.destination} → ${picked.nextHop}`,kind:'route',evidence:`${picked.origin==='propagated'?'전파된':'정적'} 경로`,basis:'configured'});
+      if(picked.via==='blackhole'){res.status='blocked';res.summary=`TGW 라우트 테이블 ${table}의 ${picked.destination} 경로가 블랙홀입니다.`;return;}
+      if(picked.via==='vpn'||picked.via==='direct-connect-gateway'){
+        if(to.zone!=='onprem'){undecided(res,'TGW가 VPN·DX로 보내지만 목적지는 사내망으로 수집되지 않았습니다.');return;}
+        res.path.push({id:to.resource?.id,label:to.resource?.name??'사내망',kind:'onprem',evidence:`${picked.nextHop} 너머 (수동 등록한 사내망)`,basis:'declared'});note(res,'사내망 쪽 라우팅과 방화벽은 수집 범위 밖입니다.');return;
+      }
+      if(picked.via!=='vpc'){undecided(res,`지원하지 않는 TGW 연결 유형 ${picked.via}`);return;}
+      const next=c.s.resources.find(r=>r.kind==='network'&&r.nativeId.endsWith(`/${picked.nextHop}`));
+      if(!next||!to.network||next.id!==to.network.id){undecided(res,`TGW는 ${picked.nextHop}(으)로 보내지만 목적지는 그 VPC에서 찾지 못했습니다.`);return;}
+      res.path.push({id:next.id,label:next.name,kind:'peering',evidence:'TGW 연결로 도착한 VPC'});tgwReturn={tgw,vpc:picked.nextHop};
+    }
   }else if(hop.startsWith('igw-')||hop.startsWith('nat-')){
     if(to.ip&&isPrivate(to.ip)){res.status='blocked';res.summary=`사설 주소 ${to.ip}을(를) ${hop}(으)로 보내는 경로뿐입니다.`;return;}
     if(hop.startsWith('igw-')&&!(from.nic?.publicIp??from.resource?.publicIp)){res.status='blocked';res.summary='인터넷 게이트웨이로 가는 경로지만 출발 ENI에 공인 IP가 없습니다.';return;}
@@ -317,6 +338,12 @@ function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
   // An RDS instance or load balancer carries its groups itself rather than on an ENI the collector sees.
   push(sgCheck(c,to.nic??to.resource,'Inbound',src,q,`도착 ${to.nic?`ENI ${to.nic.name}`:to.resource?.name??''}`));
   if(!to.ip&&to.cidr)res.conditions.push(`${to.label}의 주소를 수집하지 않아 ${to.cidr} 범위 전체로 판정했습니다. 범위 일부에만 맞는 규칙은 판단 불가로 남습니다.`);
+  // A reply through a TGW needs a route back twice: from the destination subnet to the TGW, and in the table the destination VPC is associated with.
+  if(tgwReturn&&from.ip){
+    const back=awsRoutes(c,to.subnet,to.network).filter(r=>{const p=parseCidr(r.prefix),t=addrRange({ip:from.ip});return p&&t&&within(t,p);}).sort((a,b)=>prefixLen(b.prefix)-prefixLen(a.prefix))[0];
+    const table=tgwReturn.tgw.associations?.[tgwReturn.vpc],viaTable=table?tgwRoute(tgwReturn.tgw,table,{ip:from.ip}):undefined;
+    if(!back||!back.hop.startsWith('tgw-')||!viaTable||viaTable.via==='blackhole'){res.returnPath={status:'blocked',notes:[!back||!back.hop.startsWith('tgw-')?`${to.subnet?.name??'도착 서브넷'}에 ${from.ip}(으)로 돌아가는 TGW 경로가 없습니다.`:`TGW 라우트 테이블 ${table??'(연결 없음)'}에 ${from.ip}(으)로 돌아가는 경로가 없습니다.`]};res.status='blocked';res.summary='요청은 전달되지만 응답이 돌아갈 경로가 없습니다.';return;}
+  }
   // Replies: security groups are stateful, NACLs are not, so the reply's ephemeral ports must pass both subnets' ACLs.
   if(!sameSubnet&&q.protocol!=='icmp'){
     const back=[naclCheck(c,to.subnet,'Outbound',src,q.protocol,EPHEMERAL,`응답: 도착 서브넷 NACL`),naclCheck(c,from.subnet,'Inbound',dst,q.protocol,EPHEMERAL,`응답: 출발 서브넷 NACL`)].filter(Boolean) as PolicyCheck[];

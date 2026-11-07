@@ -217,7 +217,14 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   for(const r of live(data.VpnGateways)){add(r,'VpnGatewayId','gateway','AWS::EC2::VPNGateway',{status:r.State??'미확인',specs:{'종류':'Virtual Private Gateway'}});for(const a of r.VpcAttachments??[])links.push(relation(id(r.VpnGatewayId),id(a.VpcId),'attachment','VPN Gateway 연결','vpnGateway.VpcAttachments'));}
   for(const r of data.InternetGateways??[]){const vpc=r.Attachments?.[0]?.VpcId;add(r,'InternetGatewayId','gateway','AWS::EC2::InternetGateway',{parent:vpc?id(vpc):undefined,status:r.Attachments?.[0]?.State??'미확인',specs:{'종류':'Internet Gateway'}});}
   for(const r of live(data.NatGateways))add(r,'NatGatewayId','nat','AWS::EC2::NatGateway',{parent:r.SubnetId?id(r.SubnetId):undefined,ip:r.NatGatewayAddresses?.[0]?.PrivateIp,status:r.State??'미확인',specs:{'종류':'NAT Gateway','연결':r.ConnectivityType??'public'}});
-  for(const r of live(data.TransitGateways))add(r,'TransitGatewayId','gateway','AWS::EC2::TransitGateway',{status:r.State??'미확인',specs:{'종류':'Transit Gateway','ASN':String(r.Options?.AmazonSideAsn??'미확인')}});
+  for(const r of live(data.TransitGateways)){
+    // Each attachment (a VPC, a VPN) is associated with one route table; each route names the attachment it sends to, or is a blackhole.
+    const tables=(data.TransitGatewayRouteTables??[]).filter((t:Raw)=>t.TransitGatewayId===r.TransitGatewayId),associations:Record<string,string>={},routes:Resource['routes']=[];
+    for(const t of tables){for(const a of t.associations??[])if(a.ResourceId)associations[a.ResourceId]=t.TransitGatewayRouteTableId;
+      for(const x of t.routes??[]){const hop=x.TransitGatewayAttachments?.[0];routes.push({destination:x.DestinationCidrBlock??x.PrefixListId??'미확인',nextHop:x.State==='blackhole'?'blackhole':hop?.ResourceId??'미확인',via:x.State==='blackhole'?'blackhole':hop?.ResourceType??'미확인',origin:x.Type==='propagated'?'propagated':'user',tags:[t.TransitGatewayRouteTableId]});}}
+    const truncated=tables.some((t:Raw)=>t.truncated);
+    add(r,'TransitGatewayId','gateway','AWS::EC2::TransitGateway',{status:r.State??'미확인',routes,...(tables.length?{associations}:{}),specs:{'종류':'Transit Gateway','ASN':String(r.Options?.AmazonSideAsn??'미확인'),'라우트 테이블':tables.length?`${tables.length}개${truncated?' (일부 경로 누락: 1,000개 초과)':''}`:'미수집'}});
+  }
   for(const r of live(data.TransitGatewayVpcAttachments))links.push(relation(id(r.TransitGatewayId),id(r.VpcId,r.VpcOwnerId??scope),'attachment','TGW attachment','transitGatewayVpcAttachment.VpcId / VpcOwnerId'));
   for(const r of data.TransitGatewayPeeringAttachments??[])if(r.State==='available')links.push(relation(id(r.RequesterTgwInfo.TransitGatewayId,r.RequesterTgwInfo.OwnerId??scope,r.RequesterTgwInfo.Region??region),id(r.AccepterTgwInfo.TransitGatewayId,r.AccepterTgwInfo.OwnerId??scope,r.AccepterTgwInfo.Region??region),'peering','TGW peering','transitGatewayPeeringAttachment'));
   for(const r of data.DirectConnectGateways??[]){

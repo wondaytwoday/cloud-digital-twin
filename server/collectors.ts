@@ -210,6 +210,13 @@ export async function collectAwsAccount(call:AwsCaller,account:string,region:str
     try{return await work();}catch(e){const text=`${(e as Error)?.name} ${(e as Error)?.message}`;if(AWS_AUTH_ERROR.test(text))throw e;if(!AWS_UNAVAILABLE.test(text))failed.push(what);return empty;}
   };
   for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables'],['DescribeVolumes','Volumes'],['DescribeVpcEndpoints','VpcEndpoints'],['DescribeNetworkAcls','NetworkAcls']] as const)data[key]=await read(operation,()=>awsPages(call,'ec2',operation,key,paged),[]);
+  // Transit Gateway route tables decide where a TGW sends traffic; they are read for the gateways this account owns.
+  data.TransitGatewayRouteTables=data.TransitGateways.length?await read('DescribeTransitGatewayRouteTables',()=>awsPages(call,'ec2','DescribeTransitGatewayRouteTables','TransitGatewayRouteTables',paged),[]):[];
+  for(const rt of data.TransitGatewayRouteTables){
+    rt.associations=await read('GetTransitGatewayRouteTableAssociations',()=>awsPages(call,'ec2','GetTransitGatewayRouteTableAssociations','Associations',{TransitGatewayRouteTableId:rt.TransitGatewayRouteTableId,...paged}),[]);
+    const found=await read('SearchTransitGatewayRoutes',async()=>call('ec2','SearchTransitGatewayRoutes',{TransitGatewayRouteTableId:rt.TransitGatewayRouteTableId,Filters:[{Name:'state',Values:['active','blackhole']}]}),{Routes:[]} as any);
+    rt.routes=found.Routes??[];rt.truncated=!!found.AdditionalRoutesAvailable;
+  }
   // These two operations take no MaxResults and return everything at once.
   data.VpnGateways=await read('DescribeVpnGateways',async()=>(await call('ec2','DescribeVpnGateways')).VpnGateways??[],[]);
   data.VpnConnections=await read('DescribeVpnConnections',async()=>(await call('ec2','DescribeVpnConnections')).VpnConnections??[],[]);
