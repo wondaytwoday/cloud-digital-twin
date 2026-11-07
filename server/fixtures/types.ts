@@ -9,4 +9,4 @@ export type AzureAssignment={scope:string;principalId:string;principalType:strin
 // kubernetes: clusters read through the Kubernetes API, as kubectl would return them.
 export type KubeFixture={binding:import('../kubernetes.js').ClusterBinding;items:import('../kubernetes.js').KubeList};
 // firewallPolicies: rule collection groups per policy ID, served as GET {policy}/ruleCollectionGroups returns them.
-export type Scenario={kubernetes?:KubeFixture[];azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[];firewallPolicies?:Record<string,Raw[]>};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree;routerStatus?:Record<string,Raw>};onprem?:Site[];flows?:{hops:string[];rate:string}[]};
+export type Scenario={kubernetes?:KubeFixture[];azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[];firewallPolicies?:Record<string,Raw[]>;serviceTags?:{name:string;prefixes:string[]}[]};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree;routerStatus?:Record<string,Raw>};onprem?:Site[];flows?:{hops:string[];rate:string}[]};

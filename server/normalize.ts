@@ -6,7 +6,7 @@ const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Numbe
 type Raw = Record<string, any>;
 export type Gap=Exclude<Coverage,'ok'>;
 // gaps names the kinds of data that could not be read, set by the collector that knows how many scopes it tried.
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];gaps?:Partial<Record<Dataset,Gap>>;crossRefs?:import('../shared/schema.js').CrossRef[];awsInventory?:{account:string;rows:Raw[]}}
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];gaps?:Partial<Record<Dataset,Gap>>;crossRefs?:import('../shared/schema.js').CrossRef[];serviceTags?:Record<string,string[]>;serviceTagsAt?:string;prefixLists?:Record<string,string[]>;awsInventory?:{account:string;rows:Raw[]}}
 // Several reads of one kind of data: all failed is a failure, some failed is partial. Undefined entries are reads that worked.
 export function combineGaps(states:(Gap|undefined)[]):Gap|undefined{
   const tried=states.length,failed=states.filter(s=>s==='failed').length;
@@ -30,6 +30,7 @@ const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+
 const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,r.ResourceType==='s3:bucket'?'bucket':'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
 // Collectors already total their own reads, so merging parts keeps the worst they report.
 const GAP_RANK:Record<Gap,number>={unconfigured:1,partial:2,failed:3};
+const rangesOf=(parts:Normalized[])=>{const tags=Object.assign({},...parts.map(p=>p.serviceTags??{})),lists=Object.assign({},...parts.map(p=>p.prefixLists??{})),at=parts.map(p=>p.serviceTagsAt).filter(Boolean).sort()[0];return{...(Object.keys(tags).length?{serviceTags:tags,...(at?{serviceTagsAt:at}:{})}:{}),...(Object.keys(lists).length?{prefixLists:lists}:{})};};
 function gapsOf(parts:Normalized[]):Pick<Normalized,'gaps'>{
   const out:NonNullable<Normalized['gaps']>={};
   for(const p of parts)for(const [k,v] of Object.entries(p.gaps??{}) as [Dataset,Gap|undefined][])if(v&&(!out[k]||GAP_RANK[v]>GAP_RANK[out[k]!]))out[k]=v;
@@ -59,7 +60,7 @@ export function finish(input:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()],...gapsOf(parts)};
+  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()],...gapsOf(parts),...rangesOf(parts)};
 }
 // Azure Firewall rules, classic (on the firewall) or from a firewall policy's rule collection groups, as ordered device rules.
 // direction carries the rule type (Network, Application, Nat) because the firewall processes them in that order; priority is group then collection.
@@ -260,7 +261,7 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
     const targets=resources.filter(r=>r.kind==='subnet'&&(subnets.includes(r.nativeId.split('/').pop())||((table.Associations??[]).some((a:Raw)=>a.Main)&&r.parent===id(table.VpcId)&&!explicit.has(r.nativeId.split('/').pop()))));
     for(const subnet of targets)for(const route of table.Routes??[]){if(route.State==='blackhole')continue;const hop=route.TransitGatewayId??route.NatGatewayId??route.VpcPeeringConnectionId??route.GatewayId??'미확인';subnet.routes.push({destination:route.DestinationCidrBlock??route.DestinationPrefixListId??'미확인',nextHop:hop,via:route.TransitGatewayId?'Transit Gateway':route.NatGatewayId?'NAT':route.VpcPeeringConnectionId?'Peering':hop==='local'?'VPC 내부':String(hop).startsWith('vpce-')?'Endpoint':String(hop).startsWith('igw-')?'Internet Gateway':String(hop).startsWith('vgw-')?'VPN Gateway':'Gateway',origin:route.Origin==='EnableVgwRoutePropagation'?'propagated':route.Origin==='CreateRouteTable'?'system':'user',target:hop==='local'?undefined:id(hop)});}
   }
-  return {resources,links,warnings:[],scopeLabels:label?{[scope]:label}:{}};
+  return {resources,links,warnings:[],scopeLabels:label?{[scope]:label}:{},...(data.PrefixLists&&Object.keys(data.PrefixLists).length?{prefixLists:data.PrefixLists}:{})};
 }
 export function normalizeGcp(assets:Raw[]):Normalized {
   const resources:Resource[]=[],links:Link[]=[],diskAssets=new Set(assets.filter(a=>a.assetType==='compute.googleapis.com/Disk').map(a=>a.name));

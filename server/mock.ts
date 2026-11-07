@@ -14,8 +14,9 @@ import { resolveCrossRefs } from '../shared/crossref.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
-const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date,policies:Record<string,any[]>={}):typeof fetch=>async(url,init)=>{
+const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date,policies:Record<string,any[]>={},serviceTags:{name:string;prefixes:string[]}[]=[]):typeof fetch=>async(url,init)=>{
   const target=String(url);
+  if(target.includes('/serviceTags'))return json({values:serviceTags.map(t=>({name:t.name,id:t.name,properties:{addressPrefixes:t.prefixes}}))});
   if(target.includes('/ruleCollectionGroups')){const id=decodeURIComponent(new URL(target).pathname.replace('/ruleCollectionGroups','')).toLowerCase(),groups=Object.entries(policies).find(([k])=>k.toLowerCase()===id)?.[1];return groups?json({value:groups}):new Response('{}',{status:404});}
   if(target.includes('directoryObjects/getByIds'))return json({value:JSON.parse(String(init?.body)).ids.map((id:string)=>({id,displayName:iam.directory[id]??id}))});
   if(target.includes('Microsoft.CostManagement/query')){const sub=target.match(/subscriptions\/([^/]+)/)![1];return json({properties:{columns:[{name:'Cost'},{name:'BillingMonth'},{name:'ServiceName'},{name:'Currency'}],rows:costPoints('azure',[sub],now).map(p=>[p.amount,`${p.month}-01T00:00:00`,p.service,'USD'])}});}
@@ -58,7 +59,7 @@ async function collectScenario(s:Scenario,now:Date){
   const parts:Normalized[]=[];
   if(s.azure){
     const subs=Object.keys(s.azure.subscriptions),iam=azureIam(subs,s.azure.subscriptions,s.azure.assignments),rows=[...s.azure.rows,...subs.flatMap(sub=>azureServices(sub,`rg-${seed(sub)}`,(s.azure!.subscriptions[sub]).toLowerCase().replace(/[^a-z0-9]+/g,'-')))];
-    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now,s.azure.firewallPolicies),{graphToken:async()=>'demo-token',withActivity:false}));
+    parts.push(await collectAzureWith(subs,async()=>'demo-token',azureTransport(rows,s.azure.subscriptions,s.azure.tree,iam,now,s.azure.firewallPolicies,s.azure.serviceTags),{graphToken:async()=>'demo-token',withActivity:false}));
   }
   for(const a of s.aws??[]){const merged={...a.api,...awsIamApi(a.account,a.label,now)};parts.push(await collectAwsAccount(awsTransport(merged),a.account,a.region,a.label));}
   const accounts=[...new Map((s.aws??[]).map(a=>[a.account,a])).values()];
@@ -87,7 +88,7 @@ async function collectScenario(s:Scenario,now:Date){
   return{...merged,unresolved:joined.unresolved};
 }
 export async function mockSnapshot(id:ScenarioId='standard'){
-  const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam,unresolved}=await collectScenario(scenario,clock);
+  const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam,unresolved,serviceTags,serviceTagsAt,prefixLists}=await collectScenario(scenario,clock);
   const named=(name:string)=>{const r=resources.find(x=>x.name===name);if(!r)throw new Error(`Fixture ${id}: unknown resource ${name}`);return r;};
   applySites(scenario.onprem??[],resources,links,warnings,scopeLabels);
   addSyntheticTelemetry(resources);
@@ -98,7 +99,7 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
   const now=Date.now();
-  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString(),...(unresolved?.length?{unresolved}:{})});
+  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString(),...(unresolved?.length?{unresolved}:{}),...(serviceTags?{serviceTags,serviceTagsAt}:{}),...(prefixLists?{prefixLists}:{})});
 }
 // A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
 function demoChanges(resources:Resource[],now:number){

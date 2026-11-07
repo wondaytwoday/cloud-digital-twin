@@ -83,7 +83,7 @@ export const configureCollector=(next:CollectorDrivers=realDrivers,nextLimits:Pa
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
 // What was read and what was not, per kind of data. Cost skipped by its own schedule keeps the state of the run that last read it.
 export const coverageOf=(result:Normalized,keptCost?:Coverage):Partial<Record<Dataset,Coverage>>=>{const g=result.gaps??{},cost=g.cost??keptCost??(result.cost?'ok':undefined);return{iam:g.iam??'ok',activity:g.activity??'ok',...(cost?{cost}:{})};};
-export const toSnapshot=(result:Normalized,costAt?:string,keptCost?:Coverage)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,coverage:coverageOf(result,keptCost),resources:result.resources,links:result.links,warnings:result.warnings,...(result.crossRefs?.length?{crossRefs:result.crossRefs}:{}),scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
+export const toSnapshot=(result:Normalized,costAt?:string,keptCost?:Coverage)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,coverage:coverageOf(result,keptCost),resources:result.resources,links:result.links,warnings:result.warnings,...(result.serviceTags?{serviceTags:result.serviceTags,serviceTagsAt:result.serviceTagsAt}:{}),...(result.prefixLists?{prefixLists:result.prefixLists}:{}),...(result.crossRefs?.length?{crossRefs:result.crossRefs}:{}),scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 // A process killed mid-run leaves its last status behind. Without this check the portal would show it running forever.
@@ -137,7 +137,7 @@ async function collect(store:SnapshotStore,log:(line:string)=>void):Promise<Coll
       // A damaged current file must not block the run that replaces it; only last run's cost is lost.
       const previous=await store.latest(p).catch(()=>{log(`${p}: 저장된 스냅샷을 읽지 못해 이전 비용 없이 새로 수집합니다.`);return null;}),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
       if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
-      const result=await withDeadline(signal=>driver.collect({withCost,report,signal}),limits.collectMs,'수집',track);
+      const result=await withDeadline(signal=>driver.collect({withCost,report,signal,cachedServiceTags:previous?.serviceTags&&previous.serviceTagsAt?{at:previous.serviceTagsAt,tags:previous.serviceTags}:undefined}),limits.collectMs,'수집',track);
       if(!withCost)result.cost=previous?.cost;
       const costAt=withCost?at():previous?.costAt;
       if(!result.resources.length&&result.incomplete?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');

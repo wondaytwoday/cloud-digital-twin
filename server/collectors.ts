@@ -2,7 +2,8 @@ import { combineGaps,finish,type FirewallPolicyRules,normalizeAwsIam,normalizeAz
 import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/schema.js';
 import {noReport,type Report} from '../shared/collect.js';
 // signal stops a run that timed out: every request after it fails at once instead of reaching the cloud.
-export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal};
+// cachedServiceTags: the previous run's service tag ranges, reused for a day because the full list is several megabytes.
+export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;cachedServiceTags?:{at:string;tags:Record<string,string[]>}};
 export const abortableFetch=(signal?:AbortSignal,base:typeof fetch=fetch):typeof fetch=>!signal?base:(async(input,init)=>{signal.throwIfAborted();return base(input,{...init,signal:init?.signal?AbortSignal.any([init.signal,signal]):signal});}) as typeof fetch;
 export const awsSend=async(client:{send:(command:any,options?:any)=>Promise<any>},command:unknown,signal?:AbortSignal)=>{signal?.throwIfAborted();return client.send(command,signal?{abortSignal:signal}:undefined);};
 // Change records cover a week: long enough to answer "who touched this", short enough to read in one pass.
@@ -129,6 +130,25 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
     }catch(e){policies.set(pid.toLowerCase(),{error:(e as Error).message});warnings.push(`Azure: 방화벽 정책 ${pid.split('/').pop()}의 규칙을 읽지 못했습니다 (${(e as Error).message}). 이 방화벽을 지나는 경로는 판단 불가로 남습니다.`);}
   }
   const part=normalizeAzure(rows,labels,policies);
+  // Service tags in NSG rules name Azure's published ranges; only the tags a rule uses are kept, refreshed at most daily.
+  const isTag=(t:string)=>/^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)?$/.test(t)&&!/^(any|internet|virtualnetwork|azureloadbalancer|asg)$/i.test(t);
+  const referenced=[...new Set(part.resources.filter(r=>/\/networksecuritygroups\//i.test(r.id)).flatMap(r=>r.rules.flatMap(x=>[x.source,x.destination])).flatMap(x=>x.split(/,\s*/)).filter(isTag))];
+  if(referenced.length){
+    const cached=options.cachedServiceTags,fresh=cached&&Date.now()-Date.parse(cached.at)<86_400_000&&referenced.every(t=>t in cached.tags);
+    if(fresh){part.serviceTags=Object.fromEntries(referenced.map(t=>[t,cached!.tags[t]]));part.serviceTagsAt=cached!.at;}
+    else try{
+      const location=rows.find(r=>r.location&&r.location!=='global')?.location??'koreacentral';
+      const r=await azureFetch(request,`https://management.azure.com/subscriptions/${encodeURIComponent(readable[0])}/providers/Microsoft.Network/locations/${location}/serviceTags?api-version=2023-09-01`,async()=>({headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(60_000)}));
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const all=new Map<string,string[]>(((await r.json()).values??[]).map((v:Raw)=>[String(v.name).toLowerCase(),v.properties?.addressPrefixes??[]]));
+      part.serviceTags=Object.fromEntries(referenced.filter(t=>all.has(t.toLowerCase())).map(t=>[t,all.get(t.toLowerCase())!]));part.serviceTagsAt=new Date().toISOString();
+      const missing=referenced.filter(t=>!all.has(t.toLowerCase()));if(missing.length)part.warnings.push(`Azure: 서비스 태그 ${missing.join(', ')}을(를) 목록에서 찾지 못했습니다.`);
+    }catch(e){
+      // A day-old list is still far closer than nothing; it is kept with its own date so the screen can say how old it is.
+      if(cached&&referenced.some(t=>t in cached.tags)){part.serviceTags=Object.fromEntries(referenced.filter(t=>t in cached.tags).map(t=>[t,cached.tags[t]]));part.serviceTagsAt=cached.at;part.warnings.push(`Azure: 서비스 태그 대역을 새로 읽지 못해 ${cached.at.slice(0,10)}에 읽은 목록을 씁니다 (${(e as Error).message}).`);}
+      else part.warnings.push(`Azure: 서비스 태그 대역을 읽지 못했습니다 (${(e as Error).message}). 태그를 쓰는 NSG 규칙은 판단 불가로 남습니다.`);
+    }
+  }
   report('resources',{state:'done',detail:`자원 ${count(part.resources.length)}개`});
   part.warnings.push(...warnings);part.incomplete=subscriptions.filter(x=>!readable.includes(x));
   if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);
@@ -211,6 +231,12 @@ export async function collectAwsAccount(call:AwsCaller,account:string,region:str
   };
   for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables'],['DescribeVolumes','Volumes'],['DescribeVpcEndpoints','VpcEndpoints'],['DescribeNetworkAcls','NetworkAcls']] as const)data[key]=await read(operation,()=>awsPages(call,'ec2',operation,key,paged),[]);
   // Transit Gateway route tables decide where a TGW sends traffic; they are read for the gateways this account owns.
+  // Security group rules may name managed prefix lists (AWS-managed ones such as S3, or customer lists); their entries are read once each.
+  data.PrefixLists={} as any;
+  for(const list of [...new Set(data.SecurityGroups.flatMap((g:any)=>[...(g.IpPermissions??[]),...(g.IpPermissionsEgress??[])]).flatMap((p:any)=>(p.PrefixListIds??[]).map((x:any)=>x.PrefixListId)))] as string[]){
+    const entries=await read('GetManagedPrefixListEntries',()=>awsPages(call,'ec2','GetManagedPrefixListEntries','Entries',{PrefixListId:list,...paged}),undefined as any);
+    if(entries)(data.PrefixLists as any)[list]=entries.map((e:any)=>e.Cidr).filter(Boolean);
+  }
   data.TransitGatewayRouteTables=data.TransitGateways.length?await read('DescribeTransitGatewayRouteTables',()=>awsPages(call,'ec2','DescribeTransitGatewayRouteTables','TransitGatewayRouteTables',paged),[]):[];
   for(const rt of data.TransitGatewayRouteTables){
     rt.associations=await read('GetTransitGatewayRouteTableAssociations',()=>awsPages(call,'ec2','GetTransitGatewayRouteTableAssociations','Associations',{TransitGatewayRouteTableId:rt.TransitGatewayRouteTableId,...paged}),[]);

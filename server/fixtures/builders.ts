@@ -18,7 +18,8 @@ const AZURE_DEFAULT_RULES=[defaultRule('AllowVnetInBound','Inbound','Allow','Vir
   defaultRule('AllowVnetOutBound','Outbound','Allow','VirtualNetwork','VirtualNetwork',65000),defaultRule('AllowInternetOutBound','Outbound','Allow','*','Internet',65001),defaultRule('DenyAllOutBound','Outbound','Deny','*','*',65500)];
 // Fixture rules are inbound: [name, direction, access, protocol, destination port, source prefix, priority].
 // A source of the form asg:<id> names an application security group instead of an address prefix.
-const nsgRule=([rule,direction,access,protocol,port,source,priority]:Rule)=>({name:rule,properties:{direction,access,protocol,sourcePortRange:'*',destinationPortRange:port,...(source.startsWith('asg:')?{sourceApplicationSecurityGroups:[{id:source.slice(4)}]}:{sourceAddressPrefix:source}),destinationAddressPrefix:'*',priority}});
+// For an outbound rule the sixth field is the destination.
+const nsgRule=([rule,direction,access,protocol,port,peer,priority]:Rule)=>({name:rule,properties:{direction,access,protocol,sourcePortRange:'*',destinationPortRange:port,...(direction==='Outbound'?{sourceAddressPrefix:'*',destinationAddressPrefix:peer}:{...(peer.startsWith('asg:')?{sourceApplicationSecurityGroups:[{id:peer.slice(4)}]}:{sourceAddressPrefix:peer}),destinationAddressPrefix:'*'}),priority}});
 export const nsg=(sub:string,rg:string,name:string,rules:Rule[],location?:string)=>azRow(sub,rg,'Network/networkSecurityGroups',name,{securityRules:rules.map(nsgRule),defaultSecurityRules:AZURE_DEFAULT_RULES},{},location);
 // What Resource Graph returns for a VM: the VM row with managed disk IDs, one row per disk with managedBy, and one row per NIC.
 // extra adds what real estates have and the first demos did not: more NICs, secondary IPs, a managed identity.

@@ -253,3 +253,30 @@ test('a firewall rule on a collected IP group uses its addresses; an uncollected
   const u=analyzeFlow(s,{from:s.resources.find(x=>x.name==='web-01')!.id,to:'8.8.8.8',protocol:'tcp',port:443});
   assert.equal(u.status,'unknown','an unreadable deny ahead of the allow could apply');
 });
+
+// ---- Azure service tags and AWS managed prefix lists
+test('an NSG rule naming a service tag matches by the tag\'s published ranges',async()=>{
+  const storage=await flow('api-prod-01','20.150.4.10',443),other=await flow('api-prod-01','8.8.8.8',443);
+  assert.equal(storage.status,'allowed');assert.equal(storage.policies.find(p=>p.name==='nsg-app')!.rule!.name,'AllowStorageOut');
+  assert.equal(other.status,'blocked');assert.equal(other.policies.find(p=>p.verdict==='deny')!.rule!.name,'DenyInternetOut');
+});
+test('service tag ranges that were not collected leave the tag rule undecided',async()=>{
+  const s=structuredClone(await demo);delete s.serviceTags;
+  const r=analyzeFlow(s,{from:s.resources.find(x=>x.name==='api-prod-01')!.id,to:'20.150.4.10',protocol:'tcp',port:443});
+  assert.equal(r.status,'unknown');assert.match(r.policies.find(p=>p.name==='nsg-app')!.reason,/Storage\.KoreaCentral/);
+});
+test('a security group rule naming a prefix list matches by its entries, and an unread list is undecided',async()=>{
+  const s3=await flow('batch-nightly-01','52.219.57.1',443),other=await flow('batch-nightly-01','8.8.8.8',443);
+  assert.equal(s3.policies.find(p=>p.name==='sg-batch')!.verdict,'allow');assert.equal(other.status,'blocked');
+  const s=structuredClone(await demo);delete s.prefixLists;
+  const u=analyzeFlow(s,{from:s.resources.find(x=>x.name==='batch-nightly-01')!.id,to:'52.219.57.1',protocol:'tcp',port:443});
+  assert.equal(u.status,'unknown');assert.match(u.policies.find(p=>p.name==='sg-batch')!.reason,/pl-78a54011/);
+});
+test('to S3 through a gateway endpoint, the prefix list in the subnet route is what the group rule names',async()=>{
+  const r=await flow('batch-nightly-01','commerce-prod-assets',443);
+  assert.equal(r.status,'allowed');assert.equal(r.policies.find(p=>p.name==='sg-batch')!.verdict,'allow');
+});
+test('a restricted operator keeps service tag and prefix list ranges, which are public',async()=>{
+  const s=await demo,limited=restrictSnapshot(s,[s.resources.find(r=>r.name==="api-prod-01")!.scope]);
+  assert.deepEqual(limited.serviceTags,s.serviceTags);assert.deepEqual(limited.prefixLists,s.prefixLists);
+});

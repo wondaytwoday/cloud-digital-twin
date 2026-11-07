@@ -77,6 +77,8 @@ export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
     changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>mine(c.scope))}:undefined,
     // Per kind of data and per cloud: it names no scope, and hiding it would make a failed read look like zero rows.
     coverage:snapshot.coverage,
+    // Published provider ranges, not scope data.
+    serviceTags:snapshot.serviceTags,serviceTagsAt:snapshot.serviceTagsAt,prefixLists:snapshot.prefixLists,
     // Cross references are resolved into links before a response is built, so none travel; an unresolved one is shown only for the user's own resource.
     crossRefs:undefined,unresolved:snapshot.unresolved?.filter(u=>ids.has(u.source)),
     // Collector warnings quote other scopes by ID and name, so none are passed on.

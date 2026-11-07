@@ -78,3 +78,23 @@ test('GCP router status supplies BGP routes, and a refused read is a warning tha
   const refused=await collectGcpWith('projects/p',request(true),{withActivity:false});
   assert.equal(refused.resources.find(r=>r.name==='rt')!.specs['동적 경로'],'수집 실패');assert.ok(refused.warnings.some(w=>/동적 경로를 읽지 못했습니다/.test(w)));
 });
+test('service tags: only the tags NSG rules use are kept, a fresh cache is reused, and a failed read falls back to the last list',async()=>{
+  const sub='00000000-0000-4000-8000-000000000001';
+  const nsgRow={id:`/subscriptions/${sub}/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg`,name:'nsg',type:'Microsoft.Network/networkSecurityGroups',subscriptionId:sub,resourceGroup:'rg',location:'koreacentral',properties:{securityRules:[{name:'out',properties:{direction:'Outbound',access:'Allow',protocol:'Tcp',sourcePortRange:'*',destinationPortRange:'443',sourceAddressPrefix:'VirtualNetwork',destinationAddressPrefix:'Storage.KoreaCentral',priority:100}}]}};
+  let tagCalls=0;
+  const transport=(fail:boolean)=>(async(u:unknown,init?:RequestInit)=>{const url=String(u);
+    if(url.includes('/serviceTags')){tagCalls++;assert.match(url,/locations\/koreacentral\/serviceTags/);return fail?json({},403):json({values:[{name:'Storage.KoreaCentral',properties:{addressPrefixes:['20.150.4.0/23']}},{name:'AzureCloud',properties:{addressPrefixes:['1.0.0.0/8']}}]});}
+    if(url.includes('ResourceGraph'))return json({data:String(init?.body).includes('authorizationresources')?[]:[nsgRow]});
+    if(url.includes('eventtypes'))return json({value:[]});if(url.includes('CostManagement'))return json({properties:{columns:[],rows:[]}});
+    return url.includes('/tenants')||url.includes('managementGroups')?json({value:[]}):json({displayName:'S',tenantId:'t'});}) as typeof fetch;
+  const first=await collectAzureWith([sub],async()=>'t',transport(false),{withActivity:false});
+  assert.deepEqual(first.serviceTags,{'Storage.KoreaCentral':['20.150.4.0/23']},'tags no rule names are not stored');assert.equal(tagCalls,1);
+  const cached={at:new Date(Date.now()-3_600_000).toISOString(),tags:first.serviceTags!};
+  const second=await collectAzureWith([sub],async()=>'t',transport(false),{withActivity:false,cachedServiceTags:cached});
+  assert.equal(tagCalls,1,'an hour-old list is not fetched again');assert.equal(second.serviceTagsAt,cached.at);
+  const stale={at:new Date(Date.now()-3*86_400_000).toISOString(),tags:first.serviceTags!};
+  const third=await collectAzureWith([sub],async()=>'t',transport(true),{withActivity:false,cachedServiceTags:stale});
+  assert.equal(tagCalls,2);assert.deepEqual(third.serviceTags,first.serviceTags);assert.equal(third.serviceTagsAt,stale.at);assert.ok(third.warnings.some(w=>/새로 읽지 못해/.test(w)));
+  const none=await collectAzureWith([sub],async()=>'t',transport(true),{withActivity:false});
+  assert.equal(none.serviceTags,undefined);assert.ok(none.warnings.some(w=>/서비스 태그 대역을 읽지 못했습니다/.test(w)));
+});

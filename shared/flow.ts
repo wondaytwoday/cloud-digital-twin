@@ -82,13 +82,16 @@ export function resolveEndpoint(s:Snapshot,ref:string,c:Ctx=index(s)):Endpoint{
 const AZURE_DEFAULTS:RuleRef[]=[
   {name:'AllowVnetInBound (기본 규칙, 문서 기준)',priority:'65000',action:'Allow',protocol:'*',ports:'*',source:'VirtualNetwork',destination:'VirtualNetwork'},{name:'AllowAzureLoadBalancerInBound (기본 규칙, 문서 기준)',priority:'65001',action:'Allow',protocol:'*',ports:'*',source:'AzureLoadBalancer',destination:'*'},{name:'DenyAllInBound (기본 규칙, 문서 기준)',priority:'65500',action:'Deny',protocol:'*',ports:'*',source:'*',destination:'*'}];
 const AZURE_DEFAULTS_OUT:RuleRef[]=[{name:'AllowVnetOutBound (기본 규칙, 문서 기준)',priority:'65000',action:'Allow',protocol:'*',ports:'*',source:'VirtualNetwork',destination:'VirtualNetwork'},{name:'AllowInternetOutBound (기본 규칙, 문서 기준)',priority:'65001',action:'Allow',protocol:'*',ports:'*',source:'*',destination:'Internet'},{name:'DenyAllOutBound (기본 규칙, 문서 기준)',priority:'65500',action:'Deny',protocol:'*',ports:'*',source:'*',destination:'*'}];
-type TagCtx={vnet:string[]};
+// serviceTags: Azure's published ranges for the tags rules use, when they were collected.
+type TagCtx={vnet:string[];serviceTags?:Record<string,string[]>};
 function azureAddr(token:string,a:Addr,tags:TagCtx):Tri{
   const t=token.trim();
   if(/^(\*|any|0\.0\.0\.0\/0)$/i.test(t))return true;
   if(/^virtualnetwork$/i.test(t)){const hits=tags.vnet.map(c=>cidrMatch(c,a));return hits.includes(true)?true:hits.includes('unknown')?'unknown':false;}
   if(/^internet$/i.test(t)){const r=addrRange(a);if(!r)return 'unknown';const inVnet=tags.vnet.some(c=>cidrMatch(c,a)!==false);return inVnet?false:a.ip?!isPrivate(a.ip):'unknown';}
   if(/^azureloadbalancer$/i.test(t))return a.ip==='168.63.129.16';
+  const tag=tags.serviceTags&&Object.entries(tags.serviceTags).find(([k])=>k.toLowerCase()===t.toLowerCase())?.[1];
+  if(tag){const hits=tag.map(c=>cidrMatch(c,a));return hits.includes(true)?true:hits.includes('unknown')?'unknown':false;}
   if(rangeOf(t))return cidrMatch(t,a);
   return 'unknown';
 }
@@ -172,7 +175,7 @@ function pickRoute(routes:Route[],to:Addr):{route?:Route;ambiguous?:string}{
 const undecided=(res:FlowResult,text:string)=>{res.gaps.push({text,undecided:true});if(res.status!=='blocked')res.status='unknown';};
 const note=(res:FlowResult,text:string)=>{res.gaps.push({text,undecided:false});res.completeness='partial';};
 function analyzeAzure(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
-  const tagsFor=(network?:Resource):TagCtx=>{if(!network)return{vnet:[]};const vnet=[...spaces(network),...peersOf(c,network).flatMap(p=>spaces(p.peer))];const gws=[gatewayIn(c,network),...peersOf(c,network).filter(p=>p.link.transit).map(p=>gatewayIn(c,p.peer))].filter(Boolean) as Resource[];for(const g of gws)for(const s of sitesBehind(c,g))vnet.push(...spaces(s));return{vnet};};
+  const tagsFor=(network?:Resource):TagCtx=>{if(!network)return{vnet:[],serviceTags:c.s.serviceTags};const vnet=[...spaces(network),...peersOf(c,network).flatMap(p=>spaces(p.peer))];const gws=[gatewayIn(c,network),...peersOf(c,network).filter(p=>p.link.transit).map(p=>gatewayIn(c,p.peer))].filter(Boolean) as Resource[];for(const g of gws)for(const s of sitesBehind(c,g))vnet.push(...spaces(s));return{vnet,serviceTags:c.s.serviceTags};};
   const src:Addr={ip:from.ip,cidr:from.ip?undefined:from.cidr,asgs:from.nic?.netTags},dst:Addr={ip:to.ip,cidr:to.ip?undefined:to.cidr,asgs:to.nic?.netTags};
   const check=(holder:Resource|undefined,direction:'Inbound'|'Outbound',at:string,network?:Resource)=>{for(const p of policiesOn(c,holder?.id))if(p.provider==='azure'&&p.kind==='firewall')res.policies.push(evaluateNsg(p,direction,src,dst,q,tagsFor(network),at));};
   // Outbound at the source: NIC first, then subnet (also a VM-level link from snapshots written before NICs existed).
@@ -247,14 +250,15 @@ function portsCover(ports:string,want:RangeQ):Tri{
   return parts.every(p=>p.to<want.from||p.from>want.to)?false:'unknown';
 }
 const EPHEMERAL={from:1024,to:65535};
-function sgCheck(c:Ctx,holder:Resource|undefined,direction:'Inbound'|'Outbound',peer:Addr&{nic?:Resource;service?:boolean},q:FlowQuery,at:string):PolicyCheck|undefined{
+// peer.lists: prefix lists the source subnet routes to a gateway endpoint, which is how a service destination is named in a group rule.
+function sgCheck(c:Ctx,holder:Resource|undefined,direction:'Inbound'|'Outbound',peer:Addr&{nic?:Resource;service?:boolean;lists?:string[]},q:FlowQuery,at:string):PolicyCheck|undefined{
   const eni=holder,groups=policiesOn(c,eni?.id).filter(p=>isType(p,'AWS::EC2::SecurityGroup'));if(!eni||!groups.length)return undefined;
   const peerGroups=new Set(policiesOn(c,peer.nic?.id).filter(p=>isType(p,'AWS::EC2::SecurityGroup')).map(p=>p.nativeId.split('/').pop()));
   const unevaluated:string[]=[];
   for(const g of groups)for(const rule of g.rules.filter(r=>r.direction===direction)){
     const tokens=(direction==='Inbound'?rule.source:rule.destination).split(/,\s*/).filter(Boolean),peers=(rule as {peers?:string[]}).peers??[];
     const addr:Tri[]=tokens.filter(t=>!t.startsWith('sg-')&&!t.startsWith('pl-')).map(t=>peer.service?(t==='0.0.0.0/0'?true:'unknown'):cidrMatch(t,peer));
-    const refs:Tri[]=peers.map(p=>p.startsWith('sg:')?peerGroups.has(p.slice(3)):'unknown');
+    const refs:Tri[]=peers.map(p=>{if(p.startsWith('sg:'))return peerGroups.has(p.slice(3));if(!p.startsWith('pl:'))return 'unknown';const id=p.slice(3);if(peer.service)return peer.lists?.includes(id)?true:'unknown';const cidrs=c.s.prefixLists?.[id];if(!cidrs)return 'unknown';const hits=cidrs.map(x=>cidrMatch(x,peer));return hits.includes(true)?true:hits.includes('unknown')?'unknown':false;});
     const m=and(protoMatch(rule.protocol,q.protocol),portMatch(rule.ports,q),[...addr,...refs].includes(true)?true:[...addr,...refs].includes('unknown')?'unknown':false);
     if(m===true)return{policy:g.id,name:groups.length>1?`보안 그룹 ${groups.length}개 (${groups.map(x=>x.name).join(', ')})`:g.name,at,direction:direction==='Inbound'?'inbound':'outbound',verdict:'allow',rule:{name:g.name,action:'Allow',protocol:rule.protocol,ports:rule.ports,source:rule.source,destination:rule.destination},reason:`${g.name}의 허용 규칙이 일치합니다. 보안 그룹은 ENI에 붙은 모든 그룹의 허용 규칙을 합쳐 평가합니다.`};
     if(m==='unknown')unevaluated.push(`${g.name}: ${tokens.join(', ')||peers.join(', ')}`);
@@ -287,7 +291,7 @@ const tgwRoute=(tgw:Resource,table:string,to:Addr)=>{const target=addrRange(to);
 function analyzeAws(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
   let tgwReturn:{tgw:Resource;vpc:string}|undefined;
   const push=(p?:PolicyCheck)=>{if(p)res.policies.push(p);};
-  const service=!!to.service&&!to.ip,src:Addr&{nic?:Resource}={ip:from.ip,nic:from.nic},dst:Addr&{nic?:Resource;service?:boolean}={ip:to.ip,cidr:to.ip?undefined:to.cidr,nic:to.nic,service};
+  const service=!!to.service&&!to.ip,src:Addr&{nic?:Resource}={ip:from.ip,nic:from.nic},dst:Addr&{nic?:Resource;service?:boolean;lists?:string[]}={ip:to.ip,cidr:to.ip?undefined:to.cidr,nic:to.nic,service,lists:(from.subnet?.routes??[]).filter(r=>r.destination.startsWith('pl-')).map(r=>r.destination)};
   const qPort=q.port===undefined?undefined:{from:q.port,to:q.port};
   push(sgCheck(c,from.nic,'Outbound',dst,q,`출발 ENI ${from.nic?.name??''}`));
   const sameSubnet=!!to.subnet&&to.subnet.id===from.subnet?.id;

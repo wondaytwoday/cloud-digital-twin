@@ -65,7 +65,7 @@
 | 라우트 선택 | ✅ 최장 접두사, 같으면 UDR 우선. 시스템 경로(VNet·피어링·게이트웨이 전송·기본 인터넷) 포함 | ✅ 최장 접두사, local = VPC CIDR. pcx / tgw / igw / nat / vgw / vpce | ✅ 최장 접두사 → 우선순위. 서브넷 경로, 태그 경로, 피어링 서브넷 경로 | – |
 | 경유 장비 | ✅ UDR 다음 홉 IP의 장비만 경로에 넣음. **Azure Firewall 정책 규칙 평가**(네트워크 규칙 우선순위, 기본 거부, 애플리케이션 규칙은 FQDN이라 판단 불가). NVA 내부 정책은 판단 불가 | ⚠️ Network Firewall·GWLB 미수집 | ⚠️ 다음 홉 Instance·ILB는 판단 불가 | – |
 | 비전이 피어링 | ✅ | ✅ | ✅ | – |
-| 정책 평가 | ✅ NSG: 우선순위, 기본 규칙, VirtualNetwork·Internet·AzureLoadBalancer 태그, **ASG(NIC 구성원)**. 기타 서비스 태그는 판단 불가 | ✅ SG(합집합, 상태 기반, SG 참조), NACL(번호 순, 상태 비저장, 응답 임시 포트) | ✅ VPC 방화벽: 대상 태그·SA, 출발 태그·SA, 우선순위, 같은 우선순위면 거부 우선, 암묵 규칙. 계층형·네트워크 방화벽 정책은 미수집 | ✅ NetworkPolicy: 선택 시 격리, 규칙 합집합, pod·ns·ipBlock 선택자. 엔진 미확인이면 차단을 확정하지 않음 |
+| 정책 평가 | ✅ NSG: 우선순위, 기본 규칙, VirtualNetwork·Internet·AzureLoadBalancer 태그, **ASG(NIC 구성원)**, **서비스 태그**(규칙이 쓰는 태그만 대역을 수집, 하루 캐시). 대역을 못 읽은 태그는 판단 불가 | ✅ SG(합집합, 상태 기반, SG 참조, **관리형 접두사 목록**: 항목 CIDR, 게이트웨이 엔드포인트로 가는 S3·DynamoDB는 서브넷 경로의 목록 ID), NACL(번호 순, 상태 비저장, 응답 임시 포트) | ✅ VPC 방화벽: 대상 태그·SA, 출발 태그·SA, 우선순위, 같은 우선순위면 거부 우선, 암묵 규칙. 계층형·네트워크 방화벽 정책은 미수집 | ✅ NetworkPolicy: 선택 시 격리, 규칙 합집합, pod·ns·ipBlock 선택자. 엔진 미확인이면 차단을 확정하지 않음 |
 | 응답 경로 | ✅ 비대칭(장비 우회) 검출 | ✅ NACL 임시 포트 | 상태 기반 | 상태 기반 |
 | 게이트웨이·사내망 | ✅ ER·VPN 게이트웨이, 게이트웨이 전송 | ✅ **TGW 라우트 테이블**(연결·전파·블랙홀, 응답 경로). 다른 계정 소유 TGW는 그 계정을 수집해야 함 | ✅ **Cloud Router 동적 경로**(getRouterStatus). 읽기 실패 시 판단 불가 | – |
 | 블록 스토리지 | ✅ 관리 디스크 연결 | ✅ EBS 연결 | ✅ PD (Disk 자산이 있을 때만) | ✅ Pod→PVC→PV→클라우드 디스크 |
@@ -99,8 +99,8 @@
 ## 4. 최소 수집 권한과 연결 절차
 
 ### 클라우드 (토폴로지 작업에서 추가된 호출)
-- **AWS:** `ec2:DescribeVolumes`, `ec2:DescribeVpcEndpoints`, `ec2:DescribeNetworkAcls`, `ec2:DescribeTransitGatewayRouteTables`, `ec2:GetTransitGatewayRouteTableAssociations`, `ec2:SearchTransitGatewayRoutes`. 모두 `ReadOnlyAccess`에 포함되며 요금이 없습니다.
-- **Azure:** 방화벽 정책마다 `GET {policy}/ruleCollectionGroups`(ARM, `Microsoft.Network/firewallPolicies/ruleCollectionGroups/read`, Reader에 포함). NIC·디스크·Private Endpoint·관리 ID는 Resource Graph가 이미 반환합니다.
+- **AWS:** `ec2:DescribeVolumes`, `ec2:DescribeVpcEndpoints`, `ec2:DescribeNetworkAcls`, `ec2:DescribeTransitGatewayRouteTables`, `ec2:GetTransitGatewayRouteTableAssociations`, `ec2:SearchTransitGatewayRoutes`, `ec2:GetManagedPrefixListEntries`(SG 규칙이 쓰는 목록만). 모두 `ReadOnlyAccess`에 포함되며 요금이 없습니다.
+- **Azure:** 방화벽 정책마다 `GET {policy}/ruleCollectionGroups`(ARM, `Microsoft.Network/firewallPolicies/ruleCollectionGroups/read`, Reader에 포함). NSG가 서비스 태그를 쓰면 `GET /subscriptions/{id}/providers/Microsoft.Network/locations/{region}/serviceTags`를 하루 한 번 호출합니다(Reader로 가능, 무료). 응답이 수 MB라 규칙이 쓰는 태그만 저장하고, 새로 못 읽으면 이전 목록을 날짜와 함께 씁니다. NIC·디스크·Private Endpoint·관리 ID는 Resource Graph가 이미 반환합니다.
 - **GCP:** Cloud Router마다 `routers.getRouterStatus`(`compute.routers.get`, `roles/compute.networkViewer`). Disk·Bucket 자산과 Router의 Cloud NAT 구성은 Asset Inventory에 포함됩니다.
 
 ### Kubernetes
@@ -209,7 +209,7 @@ rules:
 
 ## 9. 다음 단계
 1. 실계정 검증(5절)과 CSP 자체 연결 분석 결과 비교
-2. ~~Azure Firewall 정책, AWS TGW 라우트 테이블, GCP Cloud NAT·동적 경로 수집~~ (완료). ASG 구성원과 IP 그룹도 수집합니다. 다음 '판단 불가' 원인은 Azure Firewall 상위 정책, AWS Network Firewall, NSG의 서비스 태그(대역 목록 미수집)입니다.
+2. ~~Azure Firewall 정책, AWS TGW 라우트 테이블, GCP Cloud NAT·동적 경로 수집~~ (완료). ASG 구성원과 IP 그룹도 수집합니다. NSG 서비스 태그와 AWS 관리형 접두사 목록도 대역으로 펼칩니다. 다음 '판단 불가' 원인은 Azure Firewall 상위 정책 상속과 AWS Network Firewall입니다.
 3. LB 리스너·규칙 경로와 DNS 해석 증거(Private DNS 영역, Route 53 Resolver)
 4. 흐름 로그 연동(NSG/VNet flow logs, VPC Flow Logs, VPC Flow Logs for GCP)으로 관측 통신 상태 추가
 5. 이력 스냅샷 시점 선택과 비교 UI
