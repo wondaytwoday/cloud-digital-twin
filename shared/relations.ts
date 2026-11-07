@@ -19,7 +19,7 @@ export function identityEvidence(s:Snapshot,workload:Resource,target?:Resource):
   const chained=direct.flatMap(d=>d.to?.kind==='serviceaccount'?s.links.filter(l=>l.source===d.to!.id&&l.kind==='uses_identity').map(l=>({to:byId.get(l.target),via:`${d.via} → ${l.label}`})):[]);
   for(const {to,via} of [...direct,...chained]){
     if(!to)continue;
-    const pid=to.specs['principalId']?.toLowerCase(),name=to.specs['이메일']??to.name;
+    const pid=to.specs['principalId']?.toLowerCase(),name=to.specs['이메일']??to.specs['주체']??to.name;
     const assignments=s.iam.filter(a=>a.provider===to.provider&&((pid&&a.principalId?.toLowerCase()===pid)||a.principal===name||a.principal===to.specs['역할']));
     const onTarget=target?assignments.filter(a=>a.resourceScope?target.nativeId.toLowerCase().startsWith(a.resourceScope):a.scope===target.scope):[];
     out.push({identity:to,via,assignments,onTarget,unevaluated:to.kind==='serviceaccount'?['Kubernetes RBAC은 클러스터 API 권한이며 클라우드 자원 권한과 별개입니다.']:UNEVALUATED[to.provider]??[]});

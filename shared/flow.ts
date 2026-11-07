@@ -356,11 +356,63 @@ function analyzeGcp(c:Ctx,q:FlowQuery,from:Endpoint,to:Endpoint,res:FlowResult){
   res.policies.push(gcpFirewall(c,to.network,'INGRESS',to.resource?.kind==='compute'?to.resource:undefined,{ip:from.ip,instance},q,`도착 ${to.resource?.name??''} 인그레스`));
   res.returnPath={status:'allowed',notes:['VPC 방화벽 규칙은 상태 기반이라 허용된 연결의 응답을 따로 평가하지 않습니다.']};
 }
+// ---- Kubernetes: NetworkPolicy isolates a pod only once some policy selects it; then the union of their rules is what is allowed.
+const nsOfPod=(c:Ctx,pod:Resource)=>c.s.resources.find(r=>r.kind==='namespace'&&r.name===pod.specs['네임스페이스']&&r.nativeId.split('/')[1]===pod.nativeId.split('/')[1]);
+const labelsMatch=(sel:Record<string,string>,labels:Record<string,string>)=>Object.entries(sel).every(([k,v])=>labels[k]===v);
+function peerMatches(c:Ctx,peer:string,policyNs:string,other:Resource|undefined,otherIp?:string):Tri{
+  if(peer==='any')return true;
+  let pod:Tri=true,ns:Tri=true,cidr:Tri=true;
+  for(const part of peer.split('&')){
+    if(part.startsWith('cidr:')){const [range,except]=part.slice(5).split('!');cidr=otherIp?(cidrMatch(range,{ip:otherIp})===true&&!(except??'').split('|').filter(Boolean).some(e=>cidrMatch(e,{ip:otherIp})===true)):'unknown';}
+    else if(part.startsWith('pod:')){const sel=JSON.parse(part.slice(4));pod=other?.kind==='pod'?labelsMatch(sel,other.tags)&&(peer.includes('ns:')||other.specs['네임스페이스']===policyNs):false;}
+    else if(part.startsWith('ns:')){const sel=JSON.parse(part.slice(3)),n=other?.kind==='pod'?nsOfPod(c,other):undefined;ns=n?labelsMatch(sel,n.tags):other?.kind==='pod'?'unknown':false;}
+  }
+  return and(pod,ns,cidr);
+}
+function networkPolicies(c:Ctx,pod:Resource,direction:'Ingress'|'Egress',other:Resource|undefined,otherIp:string|undefined,port:number|undefined,enforced:boolean,at:string):PolicyCheck{
+  const selecting=policiesOn(c,pod.id).filter(p=>p.type==='k8s/NetworkPolicy'&&(p.appliesTo?.policyTypes??['Ingress']).includes(direction));
+  if(!selecting.length)return{name:`NetworkPolicy (${direction==='Ingress'?'인그레스':'이그레스'})`,at,direction:direction==='Ingress'?'inbound':'outbound',verdict:'allow',reason:`${pod.name}을(를) 선택한 ${direction} NetworkPolicy가 없어 격리되지 않습니다.`};
+  const unevaluated:string[]=[];
+  for(const p of selecting)for(const rule of p.rules.filter(r=>r.direction===direction)){
+    const who=(rule.peers??['any']).map(x=>peerMatches(c,x,p.appliesTo?.namespace??'',other,otherIp)),ports:Tri=rule.ports==='*'?true:port===undefined?'unknown':rule.ports.split(/,\s*/).some(x=>{const n=x.split('/')[0];return n==='*'||Number(n)===port;});
+    const m=and(who.includes(true)?true:who.includes('unknown')?'unknown':false,ports);
+    if(m===true)return{policy:p.id,name:p.name,at,direction:direction==='Ingress'?'inbound':'outbound',verdict:'allow',rule:{name:p.name,action:'Allow',protocol:rule.protocol,ports:rule.ports,source:rule.source,destination:rule.destination},reason:`${p.name}의 ${direction} 규칙이 허용합니다. 선택된 Pod에는 이를 선택한 모든 정책의 규칙 합집합이 적용됩니다.`};
+    if(m==='unknown')unevaluated.push(p.name);
+  }
+  const names=selecting.map(p=>p.name).join(', ');
+  if(unevaluated.length)return{policy:selecting[0].id,name:names,at,direction:direction==='Ingress'?'inbound':'outbound',verdict:'unknown',reason:`확정하지 못한 규칙이 있습니다: ${unevaluated.join(', ')}`,unevaluated};
+  // A policy that exists is only enforced if the cluster runs a policy engine; that is not assumed.
+  if(!enforced)return{policy:selecting[0].id,name:names,at,direction:direction==='Ingress'?'inbound':'outbound',verdict:'unknown',reason:`${names}이(가) 허용하지 않지만, 클러스터의 NetworkPolicy 엔진이 확인되지 않아 실제로 차단되는지 확정하지 않습니다.`};
+  return{policy:selecting[0].id,name:names,at,direction:direction==='Ingress'?'inbound':'outbound',verdict:'deny',reason:`${pod.name}을(를) 선택한 정책(${names}) 어느 것도 이 ${direction==='Ingress'?'출발지':'목적지'}와 포트를 허용하지 않습니다.`};
+}
+function analyzeKubernetes(c:Ctx,q:FlowQuery,from:Endpoint,res:FlowResult){
+  const src=from.resource!,target=c.byId.get(q.to),cluster=src.nativeId.split('/')[1];
+  if(!target||!['pod','k8sservice'].includes(target.kind)||target.nativeId.split('/')[1]!==cluster){undecided(res,'Pod에서 같은 클러스터 밖으로 가는 경로(노드 서브넷·NAT·클라우드 정책)는 아직 분석하지 않습니다.');return;}
+  const engine=c.s.resources.find(r=>r.kind==='cluster'&&(c.s.links.some(l=>l.kind==='contains'&&l.source===r.id&&c.byId.get(l.target)?.nativeId.split('/')[1]===cluster)))?.specs['NetworkPolicy 엔진'];
+  const enforced=!!engine&&!/없음|미수집/.test(engine);
+  let backends=[target],port=q.port;
+  if(target.kind==='k8sservice'){
+    backends=(c.out.get(target.id)??[]).filter(l=>l.kind==='forwards_to').map(l=>c.byId.get(l.target)).filter((p):p is Resource=>p?.kind==='pod');
+    // The Service port is translated to the pod's targetPort before any policy sees it.
+    const map=(target.specs['포트']??'').split(/,\s*/).map(x=>x.match(/^(\d+)\/\w+→(\d+)/)).find(m=>m&&Number(m[1])===q.port);if(map)port=Number(map[2]);
+    res.path.push({id:target.id,label:target.name,kind:'service',evidence:`EndpointSlice 백엔드 ${backends.length}개 · 논리적 전달 (kube-proxy·CNI가 DNAT, 패킷 홉 아님)${map?` · 포트 ${q.port}→${port}`:''}`,basis:'configured'});
+    if(!backends.length){res.status='blocked';res.summary=`${target.name}의 EndpointSlice에 준비된 백엔드가 없습니다.`;return;}
+  }
+  const dst=backends[0];
+  res.policies.push(networkPolicies(c,src,'Egress',dst,dst.ip,port,enforced,`출발 Pod ${src.name} 이그레스`));
+  res.policies.push(networkPolicies(c,dst,'Ingress',src,src.ip,port,enforced,`도착 Pod ${dst.name} 인그레스`));
+  if(backends.length>1)res.conditions.push(`백엔드 ${backends.length}개 중 ${dst.name} 기준으로 평가했습니다. 같은 워크로드라면 같은 정책이 적용됩니다.`);
+  res.path.push({id:dst.id,label:dst.name,kind:'destination',evidence:`${dst.ip??'IP 미수집'} · 노드 ${dst.specs['노드']??'?'}`});
+  note(res,'노드 사이의 CNI 데이터 경로와 노드 서브넷 NSG·보안 그룹은 이 분석에 포함하지 않았습니다.');
+  if(!enforced)note(res,`클러스터의 NetworkPolicy 엔진: ${engine??'미확인'}. 정책이 있어도 강제되는지 확인되지 않았습니다.`);
+  res.returnPath={status:'allowed',notes:['NetworkPolicy는 허용된 연결의 응답을 따로 평가하지 않습니다.']};
+}
 export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   const c=index(s),from=resolveEndpoint(s,q.from,c),to=resolveEndpoint(s,q.to,c);
   const res:FlowResult={query:q,status:'allowed',summary:'',from,to,path:[{id:from.resource?.id,label:from.label,kind:'source',evidence:from.nic?`${from.nic.name} · ${from.ip}`:from.ip??from.cidr??''}],policies:[],returnPath:{status:'unknown',notes:[]},gaps:[],conditions:[],observed:'not-integrated',dataAt:Object.fromEntries(s.connections.map(x=>[x.provider,x.collectedAt])),analyzedAt:now.toISOString(),completeness:'full'};
   if(s.mode==='mock')res.conditions.push('예시 데이터에 대한 분석입니다.');
   if(from.zone==='unknown'||to.zone==='unknown')undecided(res,`${from.zone==='unknown'?from.label:to.label}을(를) 수집된 자원이나 주소로 찾지 못했습니다.`);
+  else if(from.resource?.kind==='pod')analyzeKubernetes(c,q,from,res);
   else if(from.zone!=='cloud')undecided(res,'출발지가 클라우드 밖이면 그쪽 라우팅을 알 수 없어 분석하지 않습니다. 클라우드 쪽에서 출발하는 방향으로 분석하세요.');
   else if(from.provider==='aws'&&(to.provider==='aws'||to.zone==='internet'||to.zone==='onprem'))analyzeAws(c,q,from,to,res);
   else if(from.provider==='gcp'&&(to.provider==='gcp'||to.zone==='internet'||to.zone==='onprem'))analyzeGcp(c,q,from,to,res);
@@ -368,7 +420,7 @@ export function analyzeFlow(s:Snapshot,q:FlowQuery,now=new Date()):FlowResult{
   else if(from.provider==='azure')analyzeAzure(c,q,from,to,res);
   else undecided(res,`${from.provider} 경로 분석은 아직 지원하지 않습니다.`);
   if(to.zone!=='cloud'&&res.returnPath.notes.length===0)res.returnPath={status:'unknown',notes:['목적지가 수집 범위 밖이라 응답 경로를 확인하지 않습니다.']};
-  if(res.status!=='blocked'&&res.path[res.path.length-1]?.kind!=='destination'&&!['onprem','internet'].includes(res.path[res.path.length-1]?.kind))res.path.push({id:to.resource?.id,label:to.label,kind:to.resource?.kind==='endpoint'?'endpoint':'destination',evidence:to.nic?`${to.nic.name} · ${to.ip}`:to.ip??to.cidr??''});
+  if(res.status!=='blocked'&&from.resource?.kind!=='pod'&&res.path[res.path.length-1]?.kind!=='destination'&&!['onprem','internet'].includes(res.path[res.path.length-1]?.kind))res.path.push({id:to.resource?.id,label:to.label,kind:to.resource?.kind==='endpoint'?'endpoint':'destination',evidence:to.nic?`${to.nic.name} · ${to.ip}`:to.ip??to.cidr??''});
   if(to.service&&to.resource?.kind==='endpoint')res.path.push({id:to.service.id,label:to.service.name,kind:'service',evidence:'Private Link 연결',basis:'configured'});
   // A verdict is only as strong as its weakest part: one definite deny blocks, anything undecided makes the whole undecided.
   const denied=res.policies.find(p=>p.verdict==='deny');

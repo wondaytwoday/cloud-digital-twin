@@ -43,7 +43,9 @@ export const LinkSchema = z.object({id:z.string(),source:z.string(),target:z.str
 export type Link = z.infer<typeof LinkSchema>;
 // A relation whose target lives in another collection (a Kubernetes node's VM, a PV's cloud disk). Resolved when snapshots are merged;
 // one that finds nothing stays listed as unresolved instead of becoming an invented resource.
-export const CrossRefSchema = z.object({source:z.string(),kind:LinkKind,provider:z.enum(['azure','aws','gcp']),nativeId:z.string(),label:z.string(),evidence:z.string()});
+// match says how the target is found: its native ID (Azure IDs compared without case), the end of it (an AWS ID without account and region),
+// or a spec value (an identity's clientId or e-mail). reverse makes the target the link's source (a cluster contains a namespace).
+export const CrossRefSchema = z.object({source:z.string(),kind:LinkKind,provider:z.enum(['azure','aws','gcp']),nativeId:z.string(),match:z.enum(['id','suffix','clientId','email']).optional(),reverse:z.boolean().optional(),label:z.string(),evidence:z.string()});
 export type CrossRef = z.infer<typeof CrossRefSchema>;
 // Beyond inventory, each kind of data is read separately and can fail on its own; zero rows from a failed read must not look like zero findings.
 export const Dataset = z.enum(['iam','activity','cost']);

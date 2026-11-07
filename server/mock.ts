@@ -9,6 +9,8 @@ import { diffResources } from '../shared/diff.js';
 import { ResourceSchema, validateSnapshot, type Connection, type Link, type Resource } from '../shared/schema.js';
 import type { ScenarioId } from '../shared/scenarios.js';
 import { demoActivity } from './fixtures/activity.js';
+import { normalizeKubernetes } from './kubernetes.js';
+import { resolveCrossRefs } from '../shared/crossref.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
@@ -75,10 +77,15 @@ async function collectScenario(s:Scenario,now:Date){
     const assets=[...s.gcp.assets,...projects.flatMap(gcpServices),...(s.gcp.tree?gcpOrgAssets(s.gcp.tree,numbers):[])],request=gcpTransport(assets,policies,now);
     parts.push(await collectGcpWith(s.gcp.parent,request,{withActivity:false}),{resources:[],links:[],warnings:[],scopeLabels:{},cost:await collectGcpCost(request,'demo.billing.export',now)});
   }
-  return finish(parts);
+  const merged=finish(parts);
+  // Kubernetes objects come from a second collection and are joined to the cloud estate the same way a live merge joins them.
+  const kube=(s.kubernetes??[]).map(k=>normalizeKubernetes(k.binding,k.items));
+  merged.resources.push(...kube.flatMap(k=>k.resources));merged.links.push(...kube.flatMap(k=>k.links));merged.iam=[...(merged.iam??[]),...kube.flatMap(k=>k.iam??[])];merged.warnings.push(...kube.flatMap(k=>k.warnings));
+  const joined=resolveCrossRefs(merged.resources,kube.flatMap(k=>k.crossRefs));merged.links.push(...joined.links);
+  return{...merged,unresolved:joined.unresolved};
 }
 export async function mockSnapshot(id:ScenarioId='standard'){
-  const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam}=await collectScenario(scenario,clock);
+  const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam,unresolved}=await collectScenario(scenario,clock);
   const named=(name:string)=>{const r=resources.find(x=>x.name===name);if(!r)throw new Error(`Fixture ${id}: unknown resource ${name}`);return r;};
   applySites(scenario.onprem??[],resources,links,warnings,scopeLabels);
   addSyntheticTelemetry(resources);
@@ -89,7 +96,7 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
   const now=Date.now();
-  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
+  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString(),...(unresolved?.length?{unresolved}:{})});
 }
 // A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
 function demoChanges(resources:Resource[],now:number){

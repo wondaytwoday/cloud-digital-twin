@@ -76,7 +76,7 @@ test('every scenario validates, and only documented gaps lack an official icon',
     for(const r of s.resources){
       const key=iconKey(r);
       if(key)assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),`${id}: ${key}`);
-      else assert.ok(r.provider==='onprem'||r.kind==='external'||GLYPH_KINDS.has(r.kind)||r.type==='AWS::EC2::SecurityGroup'||r.type==='AWS::EC2::NetworkAcl'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
+      else assert.ok(r.provider==='onprem'||r.kind==='external'||GLYPH_KINDS.has(r.kind)||r.type==='AWS::EC2::SecurityGroup'||r.type==='AWS::EC2::NetworkAcl'||r.type.startsWith('k8s/')||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
     }
   }
   for(const key of [...Object.values(providerLogo),...Object.values(groupIcon).flatMap(v=>Object.values(v))])assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),key);

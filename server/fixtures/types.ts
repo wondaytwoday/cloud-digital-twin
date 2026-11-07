@@ -6,4 +6,6 @@ export type {Site} from '../onprem.js';
 import type {Site} from '../onprem.js';
 // assignments: role assignments beyond the per-subscription defaults, at any scope, for a principal ID the fixture also gives an identity.
 export type AzureAssignment={scope:string;principalId:string;principalType:string;role:string;name:string};
-export type Scenario={azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[]};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};
+// kubernetes: clusters read through the Kubernetes API, as kubectl would return them.
+export type KubeFixture={binding:import('../kubernetes.js').ClusterBinding;items:import('../kubernetes.js').KubeList};
+export type Scenario={kubernetes?:KubeFixture[];azure?:{subscriptions:Record<string,string>;rows:Raw[];tree?:OrgTree;assignments?:AzureAssignment[]};aws?:AwsAccount[];awsOrg?:OrgTree;gcp?:{parent:string;assets:Raw[];tree?:OrgTree};onprem?:Site[];flows?:{hops:string[];rate:string}[]};

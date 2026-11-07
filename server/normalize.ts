@@ -6,7 +6,7 @@ const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Numbe
 type Raw = Record<string, any>;
 export type Gap=Exclude<Coverage,'ok'>;
 // gaps names the kinds of data that could not be read, set by the collector that knows how many scopes it tried.
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];gaps?:Partial<Record<Dataset,Gap>>;awsInventory?:{account:string;rows:Raw[]}}
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];gaps?:Partial<Record<Dataset,Gap>>;crossRefs?:import('../shared/schema.js').CrossRef[];awsInventory?:{account:string;rows:Raw[]}}
 // Several reads of one kind of data: all failed is a failure, some failed is partial. Undefined entries are reads that worked.
 export function combineGaps(states:(Gap|undefined)[]):Gap|undefined{
   const tried=states.length,failed=states.filter(s=>s==='failed').length;
@@ -135,7 +135,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
     } else if(t==='microsoft.network/natgateways')add('nat',{parent:p.subnets?.[0]?.id?id(p.subnets[0].id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'NAT Gateway'}});
     else if(t==='microsoft.containerservice/managedclusters'){
       const pools=p.agentPoolProfiles??[],subnet=pools[0]?.vnetSubnetID;
-      add('cluster',{parent:subnet?id(subnet):undefined,status:p.powerState?.code??p.provisioningState??'미확인',specs:{'종류':'AKS','버전':p.kubernetesVersion??'미확인','노드':String(pools.reduce((s:number,x:Raw)=>s+(x.count??0),0))}});
+      add('cluster',{parent:subnet?id(subnet):undefined,status:p.powerState?.code??p.provisioningState??'미확인',specs:{'종류':'AKS','버전':p.kubernetesVersion??'미확인','노드':String(pools.reduce((s:number,x:Raw)=>s+(x.count??0),0)),'네트워크 플러그인':p.networkProfile?.networkPlugin??'미수집','NetworkPolicy 엔진':p.networkProfile?.networkPolicy??'없음 또는 미수집'}});
     }else if(!AZURE_CONSUMED.has(t))add('service',{status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
   }
   // Routes attach after the pass above so a UDR can reference a firewall from any row order.
