@@ -14,6 +14,7 @@ test('with no setup beyond login, the portal collects and fills itself in',async
   await expect(page.getByLabel('예시 아키텍처')).toHaveCount(0);
   await expect(page.locator('.onprem-note')).toBeVisible();
   await page.locator('.scope-open',{hasText:'Shop Prod'}).click();await page.waitForSelector('.react-flow__node');
+  await page.getByRole('button',{name:'워크로드',exact:true}).click();
   await expect(page.locator('.rc',{hasText:'shop-web-01'})).toBeVisible();
 });
 test('collection cannot be triggered cross-site or from mock mode',async({request})=>{

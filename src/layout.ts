@@ -1,8 +1,9 @@
+import {isAuxiliary,isNetworkResource} from '../shared/classification';
 import type {ElkNode} from 'elkjs/lib/elk-api';
 import type {Link,Resource,ResourceKind,Snapshot} from '../shared/schema';
 import {adjacency,distances,findPath,health,ingressIds} from '../shared/topology';
 export type Variant='provider'|'region'|'network'|'subnet';
-export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;expanded:Set<string>};
+export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;workloads?:boolean;expanded:Set<string>};
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
@@ -14,7 +15,7 @@ const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CA
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
 const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
-const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','firewall','external','subnet','network','onprem'];
+const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','dns','monitoring','security','logging','analytics','configuration','application','firewall','external','subnet','network','onprem'];
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
@@ -44,7 +45,7 @@ function buildItems(snapshot:Snapshot,f:Filter){
   for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(r.provider)??regionsOf.set(r.provider,new Set()).get(r.provider)!).add(r.region);
   const topLevel=(r:Resource)=>(regionsOf.get(r.provider)?.size??0)>=2&&regionsOf.get(r.provider)!.has(r.region)?ensure({id:regionId(r),parent:provider(r.provider),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):provider(r.provider);
   for(const r of keep.values()){
-    if(r.kind==='service'||(r.kind==='firewall'&&!f.policy))continue;
+    if(isAuxiliary(r)||(!f.workloads&&!isNetworkResource(r))||(r.kind==='service'&&f.workloads!==true)||(r.kind==='firewall'&&!f.policy))continue;
     if(r.provider==='onprem'){ensure({id:r.id,resource:r,label:r.name,provider:r.provider});continue;}
     const container=r.kind==='network'||r.kind==='subnet';
     ensure({id:r.id,parent:r.parent&&keep.has(r.parent)?r.parent:topLevel(r),resource:r,variant:container?r.kind as Variant:undefined,label:r.name,subtitle:r.cidr,provider:r.provider,outOfScope:outside.has(r.id)});

@@ -1,8 +1,8 @@
 import './env.js';
 import {parseArgs} from 'node:util';
-import {collectAzure,collectAws,collectGcp} from './collectors.js';
+import {collectAzure,collectAws,collectGcp,type CollectOptions} from './collectors.js';
 import {FileSnapshotStore} from './store.js';
-import {checkCredentials,PROVIDERS,runCollection,toSnapshot} from './runner.js';
+import {checkCredentials,PROVIDERS,runCollection,type ProviderId} from './runner.js';
 const {values}=parseArgs({options:{provider:{type:'string'},subscriptions:{type:'string'},regions:{type:'string'},parent:{type:'string'},roles:{type:'string'},check:{type:'boolean'},help:{type:'boolean'}}});
 if(values.help){console.log('npm run check                    클라우드별 자격 증명만 확인. 자원은 읽지 않음\nnpm run collect                  로그인된 클라우드를 찾아 볼 수 있는 범위를 모두 수집\nnpm run collect -- --provider azure --subscriptions <id,id>   범위 좁히기\nnpm run collect -- --provider aws --regions ap-northeast-2 [--roles 이름=arn,이름=arn]\nnpm run collect -- --provider gcp --parent projects/<id>');process.exit(0);}
 const list=(v?:string)=>v?.split(',').map(x=>x.trim()).filter(Boolean)??[];
@@ -25,8 +25,10 @@ try{
     if(p==='gcp'&&!/^(projects|folders|organizations)\/[a-zA-Z0-9-]+$/.test(values.parent??''))throw new Error('--parent projects/<id> 또는 folders/<id>, organizations/<id> 필요');
     const roles=list(values.roles).map(x=>{const [label,roleArn]=x.split('=');if(!label||!roleArn?.startsWith('arn:aws:iam::'))throw new Error('--roles는 이름=역할ARN 형식이어야 합니다.');return{label,roleArn};});
     console.log(`${p}: 지정한 범위에서 지원 자원을 읽습니다. 실패하면 기존 스냅샷을 유지합니다.`);
-    const snapshot=toSnapshot(p==='azure'?await collectAzure(subs):p==='aws'?await collectAws(regions,roles):await collectGcp(values.parent!),new Date().toISOString());
-    await new FileSnapshotStore().save(p,snapshot);
-    console.log(`저장: ${p} · ${snapshot.resources.length}개 자원 / ${snapshot.links.length}개 구성 관계`);
+    const provider=p as ProviderId;
+    const status=await runCollection(new FileSnapshotStore(),line=>console.log(line),{providers:[provider],collectors:{[provider]:(options:CollectOptions)=>p==='azure'?collectAzure(subs,options):p==='aws'?collectAws(regions,roles,options):collectGcp(values.parent!,options)}});
+    const result=status.providers[provider];
+    if(!['ok','partial'].includes(result.state))throw new Error(result.message??'수집 실패');
+    console.log(`저장: ${p} · ${result.resources??0}개 자원${result.state==='partial'?' · 일부 누락':''}`);
   }
 }catch(e){console.error(e instanceof Error?e.message:'수집 실패');process.exitCode=1;}

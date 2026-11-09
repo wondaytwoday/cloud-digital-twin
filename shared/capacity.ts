@@ -14,7 +14,13 @@ export const CATEGORIES=[
   {id:'container',label:'컨테이너',kinds:['cluster']},
   {id:'data',label:'데이터·스토리지',kinds:['database','storage']},
   {id:'network',label:'네트워크',kinds:['network','subnet','gateway','loadbalancer','nat','appliance','external','onprem']},
-  {id:'security',label:'보안 정책',kinds:['firewall']},
+  {id:'security',label:'보안·정책',kinds:['firewall','security']},
+  {id:'application',label:'애플리케이션',kinds:['application']},
+  {id:'dns',label:'DNS',kinds:['dns']},
+  {id:'monitoring',label:'모니터링·알림',kinds:['monitoring']},
+  {id:'logging',label:'로그·감사',kinds:['logging']},
+  {id:'analytics',label:'분석·데이터',kinds:['analytics']},
+  {id:'configuration',label:'구성 관리',kinds:['configuration']},
   {id:'service',label:'기타 서비스',kinds:['service']},
 ] as const satisfies readonly {id:string;label:string;kinds:readonly ResourceKind[]}[];
 export type CategoryId=typeof CATEGORIES[number]['id'];

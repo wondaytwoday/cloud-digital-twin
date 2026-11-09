@@ -1,3 +1,4 @@
+import {isNetworkResource} from '../shared/classification.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mockSnapshot} from '../server/mock.ts';
@@ -37,7 +38,7 @@ test('peering from both sides is one relation, and unreadable peers stay visible
   const {s,named}=await load(),hub=named('vnet-hub').id,spoke=named('vnet-platform-prod').id;
   assert.equal(s.links.filter(l=>l.kind==='peering'&&[l.source,l.target].includes(hub)&&[l.source,l.target].includes(spoke)).length,1);
   assert.equal(named('vnet-partner-erp').kind,'external');
-  assert.equal(named('vnet-partner-erp').status,'조회 권한 없음');
+  assert.equal(named('vnet-partner-erp').status,'다른 범위 (미수집)');
 });
 test('TGW attachments resolve to VPCs collected from other accounts',async()=>{
   const {s,named}=await load();
@@ -79,7 +80,7 @@ test('every scenario validates, and only documented gaps lack an official icon',
   for(const key of [...Object.values(providerLogo),...Object.values(groupIcon).flatMap(v=>Object.values(v))])assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),key);
 });
 test('simple scenarios stay small; enterprise is large and multi-region',async()=>{
-  assert.ok((await mockSnapshot('single-vm')).resources.filter(r=>r.kind!=='service').length<=6);
+  assert.ok((await mockSnapshot('single-vm')).resources.filter(isNetworkResource).length<=6);
   const s=await mockSnapshot('enterprise');
   assert.ok(s.resources.length>=500,`only ${s.resources.length}`);
   for(const p of ['azure','aws','gcp'])assert.ok(new Set(s.resources.filter(r=>r.provider===p&&r.kind!=='external').map(r=>r.region)).size>=2,p);
@@ -232,7 +233,7 @@ test('a denied AWS service keeps everything else and marks the account incomplet
   assert.equal(result.resources[0].name,'vpc-1');assert.deepEqual(result.incomplete,['111']);assert.match(result.warnings[0],/ListClusters.*|DescribeDBInstances/);
 });
 test('a service absent from a region is not a gap, and a dead credential still stops the run',async()=>{
-  const absent=async(service:string)=>{if(service==='eks')throw Object.assign(new Error('getaddrinfo ENOTFOUND eks.x'),{name:'Error'});return {};};
+  const absent=async(service:string)=>{if(service==='eks')throw Object.assign(new Error('not available in this region'),{name:'UnsupportedOperation'});return {};};
   assert.equal((await collectAwsAccount(absent as any,'111','r')).incomplete,undefined);
   const expired=async()=>{throw Object.assign(new Error('expired'),{name:'ExpiredToken'});};
   await assert.rejects(collectAwsAccount(expired as any,'111','r'),/expired/);
@@ -271,7 +272,7 @@ test('per-project GCP collection still groups projects under their folders',asyn
 test('listed accounts become read roles',()=>{
   assert.deepEqual(accountRoles(parseAccounts('two=222,333'),'AtlasReader'),[{label:'two',roleArn:'arn:aws:iam::222:role/AtlasReader'},{label:'333',roleArn:'arn:aws:iam::333:role/AtlasReader'}]);
 });
-const fakeResult=async(id:'web-tier'|'single-vm')=>{const s=await mockSnapshot(id);return{resources:s.resources.map(r=>({...r,metrics:undefined,iam:[]})),links:s.links.filter(l=>l.kind!=='simulation'),warnings:[],scopeLabels:s.scopeLabels,hierarchy:s.hierarchy};};
+const fakeResult=async(id:'web-tier'|'single-vm')=>{const s=await mockSnapshot(id);return{resources:s.resources.map(r=>({...r,metrics:undefined,iam:[]})),links:s.links.filter(l=>l.kind!=='simulation'),warnings:[],cost:[],scopeLabels:s.scopeLabels,hierarchy:s.hierarchy};};
 test('runner: clouds are independent and a failure keeps the last good snapshot',async()=>{
   const store=new FileSnapshotStore(await mkdtemp(path.join(tmpdir(),'atlas-')));let awsCalls=0;
   const drivers=(awsFails:boolean):CollectorDrivers=>({azure:{detect:async()=>'a',collect:()=>fakeResult('web-tier')},aws:{detect:async()=>'b',collect:async()=>{awsCalls++;if(awsFails)throw new Error('throttled');return fakeResult('single-vm');}},gcp:{detect:async()=>{throw new Error('Could not load the default credentials');},collect:async()=>{throw new Error('must not run');}}});
@@ -377,7 +378,7 @@ test('Resource Explorer fills the inventory without duplicating described types'
   const call=(async()=>({Resources:[{Arn:'arn:aws:s3:::b',ResourceType:'s3:bucket',Region:'r',OwningAccountId:'1'},{Arn:'arn:aws:ec2:r:1:vpc/v',ResourceType:'ec2:vpc',Region:'r',OwningAccountId:'1'}]})) as any;
   const {rows}=await collectAwsInventory(call);assert.equal(rows.length,1);
   const merged=finish([{resources:[],links:[],warnings:[],scopeLabels:{},awsInventory:{account:'1',rows}}]);
-  assert.deepEqual(merged.resources.map(r=>[r.name,r.kind,r.scope]),[['b','service','1']]);
+  assert.deepEqual(merged.resources.map(r=>[r.name,r.kind,r.scope]),[['b','storage','1']]);
   const denied=await collectAwsInventory((async()=>{throw Object.assign(new Error('x'),{name:'UnauthorizedException'});}) as any);
   assert.equal(denied.rows.length,0);assert.match(denied.warning!,/Resource Explorer/);
 });
@@ -404,7 +405,7 @@ test('scope restriction also covers cost and IAM',async()=>{
   assert.ok(r.cost.length>0&&r.cost.every(c=>c.scope===sub));assert.ok(r.iam.length>0&&r.iam.every(a=>a.scope===sub));
 });
 test('every scenario has cost and IAM flowing through the collectors, and inventory beyond the network',async()=>{
-  for(const {id} of scenarios){const s=await mockSnapshot(id);assert.ok(s.cost.length>0,`${id} cost`);assert.ok(s.iam.length>0,`${id} iam`);assert.ok(s.resources.some(r=>r.kind==='service'),`${id} service`);}
+  for(const {id} of scenarios){const s=await mockSnapshot(id);assert.ok(s.cost.length>0,`${id} cost`);assert.ok(s.iam.length>0,`${id} iam`);assert.ok(s.resources.some(r=>['service','application','security','analytics','logging'].includes(r.kind)),`${id} non-network inventory`);}
   const gcp=await mockSnapshot('standard');assert.ok(gcp.iam.some(a=>a.provider==='gcp'&&a.scope==='atlas-sandbox'&&a.external),'project numbers resolve to project IDs');
 });
 test('cost APIs run at most daily; other runs keep the last figures',async()=>{

@@ -1,3 +1,6 @@
+import {positiveSetting} from './async.js';
+import {retainIncomplete} from './reconcile.js';
+import {classificationSummary} from '../shared/classification.js';
 import {collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,type CollectOptions} from './collectors.js';
 import type {Normalized} from './normalize.js';
 import {FileSnapshotStore,type SnapshotStore} from './store.js';
@@ -10,7 +13,9 @@ export type CollectorDrivers=Record<ProviderId,ProviderDriver>;
 export const PROVIDERS:ProviderId[]=['azure','aws','gcp'];
 // Cost APIs bill per request or per byte scanned, so they run far less often than inventory.
 const COST_HOURS=()=>Number(process.env.ATLAS_COST_HOURS??24);
-const DETECT_TIMEOUT=30_000,COLLECT_TIMEOUT=15*60_000;
+const DETECT_TIMEOUT=30_000;
+const collectionTimeout=()=>positiveSetting(process.env.ATLAS_COLLECT_TIMEOUT_MIN,15,180)*60_000;
+const activeCollectors=new Map<ProviderId,Promise<Normalized>>();
 export const emptyStatus=():CollectionStatus=>({running:false,providers:{azure:{state:'idle'},aws:{state:'idle'},gcp:{state:'idle'}}});
 const withTimeout=<T>(work:Promise<T>,ms:number,what:string)=>{let timer:NodeJS.Timeout;return Promise.race([work,new Promise<never>((_,fail)=>{timer=setTimeout(()=>fail(new Error(`${what} 시간 초과`)),ms);})]).finally(()=>clearTimeout(timer));};
 // SDK errors can run to pages and quote request details; the portal only needs the first line.
@@ -61,13 +66,13 @@ const realDrivers:CollectorDrivers={
   },
   gcp:{
     detect:async()=>{const {GoogleAuth}=await import('google-auth-library'),auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}),client=await auth.getClient();await client.getAccessToken();return 'Application Default Credentials';},
-    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(async(url,init)=>{const response=await client.request({url,timeout:60_000,retryConfig:{retry:3},...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;},options);},
+    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(async(url,init)=>{const response=await client.request({url,timeout:60_000,signal:options.signal,retryConfig:{retry:url.startsWith('https://bigquery.googleapis.com/')?0:3},...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;},options);},
   },
 };
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set(result.resources.filter(r=>r.scope!=='external').map(r=>r.scope))]});
+export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
@@ -89,18 +94,20 @@ export async function checkCredentials(){return Promise.all(PROVIDERS.map(async 
   try{return{provider:p,ok:true,detail:`${login} · ${await withTimeout(scope(),DETECT_TIMEOUT,'범위 확인')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
 }));}
 // One run at a time. Providers run independently, so one cloud's failure neither blocks the others nor replaces its last good snapshot.
-export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{}):Promise<CollectionStatus>{
+export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{},options:{timeoutMs?:number;providers?:ProviderId[];collectors?:Partial<Record<ProviderId,ProviderDriver['collect']>>}={}):Promise<CollectionStatus>{
   if(current)return current;
   current=(async()=>{
     const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
-    for(const p of PROVIDERS)status.providers[p]={...status.providers[p],state:'running',message:undefined,stages:newStages(p)};
+    const selected=options.providers??PROVIDERS;
+    for(const p of selected)status.providers[p]={...status.providers[p],state:'running',message:undefined,stages:newStages(p)};
     // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
     let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
     const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
     await store.writeStatus(status);
-    await Promise.all(PROVIDERS.map(async p=>{
+    await Promise.all(selected.map(async p=>{
       const at=()=>new Date().toISOString(),driver=drivers[p];
-      const report:Report=(id,patch={})=>{const stage=status.providers[p].stages?.find(s=>s.id===id);if(!stage||(stage.state==='done'&&!patch.state))return;const before=stage.state;Object.assign(stage,{state:'running',...patch});if(stage.state!==before){log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);persist(true);}else persist();};
+      const report:Report=(id,patch={})=>{const stage=status.providers[p].stages?.find(s=>s.id===id);if(!stage||(stage.state==='done'&&!patch.state))return;if(patch.elapsedMs!==undefined)log(`${p}: ${patch.detail??stage.label} ${patch.elapsedMs}ms`);const before=stage.state;Object.assign(stage,{state:'running',...patch});if(stage.state!==before){log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);persist(true);}else persist();};
+      if(activeCollectors.has(p)){status.providers[p]={...status.providers[p],state:'failed',message:'이전 수집 요청의 취소를 기다리고 있습니다. 요청이 끝난 뒤 다시 수집하세요.',stages:settleStages(status.providers[p].stages,'failed')};await persist(true);return;}
       try{
         report('auth');
         const identity=await withTimeout(driver.detect(),DETECT_TIMEOUT,'로그인 확인');
@@ -108,16 +115,46 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
       report('auth',{state:'done',detail:identity});
       }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});status.providers[p]={state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
       try{
-        const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity,withCost=costAge>COST_HOURS()*3_600_000;
+        const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity;
+        const withCost=!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
         if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
-        const result=await withTimeout(driver.collect({withCost,report}),COLLECT_TIMEOUT,'수집');
-        if(!withCost)result.cost=previous?.cost;
-        const costAt=withCost?at():previous?.costAt;
-        if(!result.resources.length&&result.incomplete?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');
+        const controller=new AbortController();let checkpoint:Normalized|undefined,timedOut=false;
+        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,
+          report:(id,patch)=>{if(!controller.signal.aborted)report(id,patch);},
+          checkpoint:value=>{if(!controller.signal.aborted)checkpoint=structuredClone(value);},
+        }));
+        activeCollectors.set(p,job);
+        void job.then(()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);},()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);});
+        let result:Normalized,timer:NodeJS.Timeout|undefined;
+        try{
+          result=await Promise.race([job,new Promise<never>((_,reject)=>{timer=setTimeout(()=>{timedOut=true;controller.abort(new Error('수집 시간 초과'));reject(new Error('수집 시간 초과'));},options.timeoutMs??collectionTimeout());})]);
+        }catch(e){
+          if(!timedOut||!checkpoint||!checkpoint.collectedScopes?.length)throw e;
+          result=checkpoint;
+          result.warnings.push('AWS: 수집 시간 초과. 완료된 계정 결과를 저장하고 미완료 범위의 이전 결과를 유지합니다.');
+          report('resources',{state:'failed',detail:'수집 시간 초과 · 완료 계정 보존'});
+        }finally{if(timer)clearTimeout(timer);}
+        if(!result.resources.length&&result.incomplete?.length&&!result.collectedScopes?.length)throw new Error(result.warnings[0]??'읽을 수 있는 자원이 없습니다.');
+        const coverage=result.costCoverage?.find(c=>c.provider===p);
+        let costAt=previous?.costAt;
+        if(!withCost){result.cost=previous?.cost;result.costCoverage=previous?.costCoverage;}
+        else{
+          // Drivers without coverage metadata are supported, but absence of rows is not proof of a successful read.
+          const effective=coverage??{provider:p,state:timedOut?'failed' as const:result.cost!==undefined?'complete' as const:'unconfigured' as const,failedScopes:result.incomplete??[]};
+          result.costCoverage=[effective];
+          if(effective.state==='complete')costAt=at();
+          else if(effective.state==='partial'){
+            const failed=new Set(effective.failedScopes);
+            result.cost=[...result.cost??[],...previous?.cost.filter(c=>failed.has(c.scope))??[]];
+          }else result.cost=previous?.cost??result.cost;
+        }
+        result=retainIncomplete(result,previous);
         report('save');await store.save(p,toSnapshot(result,costAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
-        const missing=result.incomplete?.length??0;
-        status.providers[p]={...status.providers[p],state:missing?'partial':'ok',at:at(),resources:result.resources.length,message:missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:undefined,stages:settleStages(status.providers[p].stages,'done')};
-        log(`${p}: 자원 ${result.resources.length}개 저장${missing?` (일부 누락 ${missing})`:''}`);
+        const missing=result.incomplete?.length??0,costProblem=result.costCoverage?.find(c=>c.provider===p&&['failed','partial'].includes(c.state));
+        const message=[missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:'',costProblem?`비용 일부 누락${costProblem.failedScopes.length?` (${costProblem.failedScopes.length}개 범위)`:''}. 이전 비용이 있으면 유지하고 다음 수집에서 다시 조회합니다.`:'',timedOut?'수집 시간 초과로 완료된 계정만 갱신했습니다.':''].filter(Boolean).join(' ');
+        status.providers[p]={...status.providers[p],state:missing||costProblem||timedOut?'partial':'ok',at:at(),resources:result.resources.length,message:message||undefined,stages:settleStages(status.providers[p].stages,'done')};
+        log(`${p}: 자원 ${result.resources.length}개 저장${message?` · ${message}`:''}`);
+        const unknown=classificationSummary(result.resources);if(unknown.length)log(`${p}: 미분류 타입 상위 ${unknown.map(x=>`${x.type} ${x.count}개`).join(', ')}`);
       }catch(e){
         const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),message=auth?explainAuth(p,e):explainFailure(raw);
         status.providers[p]={...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);

@@ -14,7 +14,7 @@ export function ProgressBar({value,label,active}:{value:number;label:string;acti
   return <div className={`progress ${active?'is-active':''}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}><i style={{width:`${value}%`}}/></div>;
 }
 function StageRow({stage}:{stage:Stage}){
-  return <li className={`collect-stage is-${stage.state}`}>{stageIcon(stage.state)}<span className="stage-name">{stage.label}<span className="sr-only"> {STAGE_LABEL[stage.state]}</span></span><span className="stage-detail" title={stage.detail}>{stage.detail}{stage.state==='running'&&stage.total?` (${Math.min(stage.done??0,stage.total)}/${stage.total})`:''}</span></li>;
+  return <li className={`collect-stage is-${stage.state}`}>{stageIcon(stage.state)}<span className="stage-name">{stage.label}<span className="sr-only"> {STAGE_LABEL[stage.state]}</span></span><span className="stage-detail" title={stage.detail}>{stage.detail}{stage.elapsedMs!==undefined?` · ${elapsedText(stage.elapsedMs)}`:''}{stage.state==='running'&&stage.total?` (${Math.min(stage.done??0,stage.total)}/${stage.total})`:''}</span></li>;
 }
 // What is being read right now, per cloud, so a long run never looks like a hang.
 export function CollectProgress({state,onGuide}:{state:CollectState;onGuide?:()=>void}){

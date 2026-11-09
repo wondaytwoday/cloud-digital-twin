@@ -1,10 +1,12 @@
+import {classifyResource} from '../shared/classification.js';
+import type {CollectionGap,CostCoverage} from '../shared/schema.js';
 import type { Activity } from '../shared/schema.js';
 import { ResourceSchema, type CostRow, type HierarchyNode, type IamAssignment, type Resource, type Link, type Provider } from '../shared/schema.js';
 import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 // Disk sizes arrive per disk and sometimes as strings; an instance with none reported gets no disk entry rather than a zero.
 const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Number).filter(v=>v>0);return n.length?{'디스크':`${n.reduce((a,b)=>a+b,0)} GiB`}:{};};
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];awsInventory?:{account:string;rows:Raw[]}};
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];iamIncomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];collectedScopes?:string[];costCoverage?:CostCoverage[];collectionGaps?:CollectionGap[];awsInventory?:{account:string;rows:Raw[]}};
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
@@ -16,22 +18,33 @@ const AZURE_CONSUMED=new Set(['microsoft.network/networkinterfaces','microsoft.n
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
-const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,'service',r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
+const awsListed=({account,rows}:{account:string;rows:Raw[]})=>rows.map(r=>base('aws',`${account}/${r.Region??'global'}/${r.Arn}`,String(r.Arn).split(/[:/]/).pop()??r.Arn,classifyResource('aws',r.ResourceType??'aws').kind,r.ResourceType??'aws',r.OwningAccountId??account,r.Region||'global','AWS Resource Explorer',{auxiliary:classifyResource('aws',r.ResourceType??'aws').auxiliary,group:r.Region||'global',specs:{'서비스':r.ResourceType??r.Service??'미확인'}}));
 export function finish(input:Normalized[]):Normalized {
   const parts=input.map(p=>p.awsInventory?{...p,resources:[...p.resources,...awsListed(p.awsInventory)]}:p);
-  const resources=[...new Map(parts.flatMap(p=>p.resources).map(r=>[r.id,r])).values()];
+  const resources=[...new Map(parts.flatMap(p=>p.resources).map(r=>[r.id,{...r,specs:{...r.specs}}])).values()];
+  const collectionGaps=parts.flatMap(p=>p.collectionGaps??[]);
+  const collected=new Set(parts.flatMap(p=>[...p.resources.filter(r=>r.scope!=='external').map(r=>`${r.provider}:${r.scope}`),...(p.collectedScopes??[]).flatMap(scope=>{
+    const provider=p.resources.find(r=>r.scope===scope)?.provider??p.hierarchy?.find(n=>n.scope===scope)?.provider;
+    return provider?[`${provider}:${scope}`]:[];
+  })]));
   const warnings=parts.flatMap(p=>p.warnings),ids=new Set(resources.map(r=>r.id));
   // A TGW shared through RAM appears in member accounts without its owner, so attachments resolve by region and ID.
   const shared=new Map(resources.flatMap(r=>{const key=awsSharedKey(r.id);return key?[[key,r.id] as const]:[];}));
   const canonical=(id:string)=>ids.has(id)?id:shared.get(awsSharedKey(id)??'')??id;
   const links=parts.flatMap(p=>p.links).map(l=>{const source=canonical(l.source),target=canonical(l.target);return source===l.source&&target===l.target?l:{...l,id:`${l.kind}:${source}:${target}`,source,target};});
-  for(const r of resources) if(r.parent&&!ids.has(r.parent)){warnings.push(`${r.name}: 상위 리소스 미수집`);delete r.parent;}
+  for(const r of resources) if(r.parent&&!ids.has(r.parent)){warnings.push(`${r.name}: 상위 리소스 미수집`);r.specs['미수집 상위 참조']=r.parent;delete r.parent;}
   const resolved=links.filter(e=>{
     if(e.kind==='policy'&&!(ids.has(e.source)&&ids.has(e.target))){warnings.push(`${e.label}: 참조 대상 미수집 (${e.target})`);return false;}
     for(const end of [e.source,e.target])if(!ids.has(end)){
       const [provider,...rest]=end.split(':'),native=rest.join(':');ids.add(end);
-      resources.push(base(provider as Provider,native,native.split('/').pop()??native,'external','Unresolved reference','external','미확인','리소스 참조로만 확인',{status:'조회 권한 없음'}));
-      warnings.push(`${native.split('/').pop()}: 참조는 있으나 조회 권한이 없는 외부 리소스로 표시합니다.`);
+      const scope=provider==='aws'?native.split('/')[0]:provider==='azure'?native.match(/\/subscriptions\/([^/]+)/i)?.[1]:native.match(/projects\/([^/]+)/)?.[1];
+      const operation=provider==='aws'?native.includes('/subnet-')?'DescribeSubnets':native.includes('/vpc-')?'DescribeVpcs':native.includes('/tgw-')?'DescribeTransitGateways':undefined:undefined;
+      const region=provider==='aws'?native.split('/')[1]:undefined;
+      const denied=scope&&operation&&collectionGaps.some(g=>g.provider===provider&&g.scope===scope&&(!g.region||g.region===region)&&g.operation===operation&&g.reason==='denied');
+      const reason=denied?'denied':scope&&!collected.has(`${provider}:${scope}`)?'uncollected':'unknown';
+      const status=reason==='denied'?'권한 없음':reason==='uncollected'?'다른 범위 (미수집)':'참조 대상 미수집 · 사유 미확인';
+      resources.push(base(provider as Provider,native,native.split('/').pop()??native,'external','Unresolved reference','external','미확인','리소스 참조로만 확인',{status,reference:{reason,scope}}));
+      warnings.push(`${native.split('/').pop()}: ${status}. 참조만 표시합니다.`);
     }
     return true;
   });
@@ -41,7 +54,7 @@ export function finish(input:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>p.incomplete??[]))],cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
+  return {resources,links:[...unique.values()],warnings,scopeLabels,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>[...p.incomplete??[],...p.iamIncomplete??[]]))],iamIncomplete:[...new Set(parts.flatMap(p=>p.iamIncomplete??[]))],collectedScopes:parts.some(p=>p.collectedScopes!==undefined)?[...new Set(parts.flatMap(p=>p.collectedScopes??[]))]:undefined,collectionGaps,costCoverage:parts.flatMap(p=>p.costCoverage??[]),cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
 }
 export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
   const resources:Resource[]=[], links:Link[]=[];
@@ -89,7 +102,7 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
     } else if(t==='microsoft.sql/servers'){
       const pe=privateEndpoints.get(native);
       add('database',{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.state??'미확인',specs:{'종류':'Azure SQL','버전':p.version??'미확인','연결':pe?'Private Endpoint':'공용 엔드포인트'}});
-    }else if(!AZURE_CONSUMED.has(t))add('service',{status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
+    }else if(!AZURE_CONSUMED.has(t))add(classifyResource('azure',t).kind,{auxiliary:classifyResource('azure',t).auxiliary,status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
   }
   // Routes attach after the pass above so a UDR can reference a firewall from any row order.
   const routeTables=rows.filter(r=>r.type.toLowerCase()==='microsoft.network/routetables'),byAddress=new Map(resources.filter(r=>r.kind==='appliance'&&r.ip).map(r=>[r.ip!,r]));
@@ -180,7 +193,7 @@ export function normalizeGcp(assets:Raw[]):Normalized {
       if(p.router)links.push(relation(id(a.name),id(p.router),'attachment','VPN BGP','vpnTunnel.router'));
     } else if(t==='redis.googleapis.com/Instance')add('database',{parent:p.authorizedNetwork?id(p.authorizedNetwork):undefined,ip:p.host,status:p.state==='READY'?'available':p.state??'미확인',specs:{'종류':'Memorystore','티어':p.tier??'미확인'}});
     else if(t==='sqladmin.googleapis.com/Instance')add('database',{parent:p.settings?.ipConfiguration?.privateNetwork?id(p.settings.ipConfiguration.privateNetwork):undefined,ip:p.ipAddresses?.[0]?.ipAddress,status:p.state??'미확인',specs:{'종류':'Cloud SQL','버전':p.databaseVersion??'미확인','티어':p.settings?.tier??'미확인'}});
-    else if(t!=='compute.googleapis.com/Route'&&!t.startsWith('cloudresourcemanager.'))add('service',{status:p.state??p.status??'구성 수집됨',specs:{'서비스':t}});
+    else if(t!=='compute.googleapis.com/Route'&&!t.startsWith('cloudresourcemanager.'))add(classifyResource('gcp',t).kind,{auxiliary:classifyResource('gcp',t).auxiliary,status:p.state??p.status??'구성 수집됨',specs:{'서비스':t}});
   }
   for(const a of assets)if(a.assetType==='compute.googleapis.com/Route'){
     const p=a.resource?.data??{},network=resources.find(r=>r.id===id(p.network??''));if(!network)continue;
