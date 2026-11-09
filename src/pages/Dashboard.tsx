@@ -1,7 +1,7 @@
 import {CostNotice} from '../CostNotice';
 import {costIssues} from '../../shared/collectionView';
 import {useEffect,useMemo,useState} from 'react';
-import {ArrowRight,Boxes,KeyRound,Minus,Network,PenLine,Plus,ShieldAlert,Users} from 'lucide-react';
+import {ArrowRight,Boxes,Info,KeyRound,Minus,Network,PenLine,Plus,ShieldAlert,Users} from 'lucide-react';
 import type {AuditEvent,Snapshot} from '../../shared/schema';
 import {money,summarizeCost} from '../../shared/cost';
 import {useCostCurrency} from '../currency';
@@ -46,6 +46,8 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const changes=(snapshot.changes?.items??[]).filter(c=>inScope(focus,c.provider,c.scope));
   const partialCost=costIssues(snapshot,focus).length>0;
   const headline=cost.projected??cost.currentTotal,delta=cost.previousTotal?(headline-cost.previousTotal)/cost.previousTotal:null;
+  const hasCost=cost.currentMonth!==null;
+  const costHint=!hasCost?(cost.dropped.length?'환율 미설정 · 비용 보기에서 환율 입력':'비용 데이터 없음'):cost.dropped.length?'환율 없는 통화 제외':partialCost?'일부 누락 · 비용 수집 확인':delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`;
   const warnCount=real.filter(r=>health(r.status)==='warn').length;
   const byCloud=present.map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries(CATEGORIES.map(c=>[c.id,resources.filter(r=>r.provider===p&&r.kind!=='subnet'&&categoryOf(r.kind)===c.id).length]))}));
   const dailyActivity=week.map(d=>({x:d.slice(5).replace('-','/'),...Object.fromEntries(present.map(p=>[p,activity.filter(a=>a.provider===p&&a.at.startsWith(d)).length]))}));
@@ -54,10 +56,11 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   return <div className="page"><header className="page-head"><div><h1>통합 대시보드</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. 자원, 사용률, 비용, IAM, 기록 모두 실제 값이 아닙니다.':`수집 시각 ${new Date(snapshot.collectedAt).toLocaleString('ko-KR')}`}</p></div>
       <div className="page-actions"><ul className="conn-chips" aria-label="클라우드 연결">{snapshot.connections.filter(c=>c.provider!=='onprem').map(c=><li key={c.provider} className={`conn-${c.status}`}><ProviderMark provider={c.provider}/>{PROVIDER_LABEL[c.provider]}<small>{({demo:'예시',collected:'수집됨',partial:'일부',missing:'미연결',failed:'실패',unauthenticated:'로그인 필요',running:'수집 중'} as Record<string,string>)[c.status]}</small></li>)}</ul><button className="button primary" onClick={()=>go('map')}><Network size={15}/>토폴로지 보기</button></div></header>
     <CostNotice snapshot={snapshot} focus={focus}/>
+    {cost.dropped.length>0&&<div className="notice warn page-notice" role="status"><Info size={15} aria-hidden="true"/><p>환율이 없어 {cost.dropped.map(d=>`${d.providers.map(p=>PROVIDER_LABEL[p]??p).join('·')}의 ${d.currency} 비용 ${d.count}건`).join(', ')}을 비용 합계에서 뺐습니다. 비용 보기에서 환율을 입력하면 포함됩니다.</p></div>}
     <section className="kpi-row" aria-label="주요 지표">
       <Kpi label="리소스" value={real.length.toLocaleString('ko-KR')} hint={warnCount?`이상 ${warnCount}개`:`범위 ${new Set(resources.map(r=>r.scope)).size}개`} tone={warnCount?'bad':undefined} onClick={()=>go('inventory')}/>
       <Kpi label="VM" value={String(fleet.count)} hint={`실행 ${fleet.running} · vCPU ${fleet.vcpu} · ${gib(fleet.memoryGiB)}`} onClick={()=>go('inventory')}/>
-      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={partialCost?'일부 누락 · 비용 수집 확인':delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} onClick={()=>go('cost')}/>
+      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={hasCost?fmt(headline):'—'} hint={costHint} onClick={()=>go('cost')}/>
       <Kpi label="조치 필요" value={String(urgent)} hint={`전체 ${list.length}건 · 긴급·높음`} tone={urgent?'bad':undefined} onClick={()=>go('findings')}/>
       <Kpi label="공인 노출 후보" value={String(exposed.length)} hint={`넓은 인바운드 ${wide}개`} tone={exposed.length?'warn':undefined} onClick={()=>go('security')}/>
       <Kpi label="특권 주체" value={String(privileged)} hint={`외부 ${external} · 전체 ${principals.size}`} tone={external?'warn':undefined} onClick={()=>go('iam')}/>
@@ -67,7 +70,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
       <Card title="클라우드별 리소스" sub="분류별" to="inventory" go={go} className="span-2"><Columns xKey="cloud" height={190} data={byCloud} series={CATEGORIES.map(c=>({key:c.id,label:c.label,color:CATEGORY_COLOR[c.id]}))}/></Card>
       <Card title="리소스 상태" to="inventory" go={go}><Donut data={HEALTH.map(h=>({key:h.key,label:h.label,value:real.filter(r=>health(r.status)===h.key).length,color:h.color}))} unit="자원" onPick={()=>go('inventory')}/></Card>
       <Card title="월별 비용" sub={currency==='KRW'?'원화':'달러'} to="cost" go={go} className="span-2"><CostTrend summary={cost} compact/></Card>
-      <Card title="클라우드별 비용" sub={cost.projected!==null?'이번 달 예상':'최근 월'} to="cost" go={go}><Donut data={Object.entries(cost.providerTotals).map(([p,t])=>({key:p,label:PROVIDER_LABEL[p]??p,value:t.projected??t.current,color:PROVIDER_COLOR[p]}))} format={fmt} center={money(headline,currency).replace(/\s/g,'')}/></Card>
+      <Card title="클라우드별 비용" sub={cost.projected!==null?'이번 달 예상':'최근 월'} to="cost" go={go}><Donut data={Object.entries(cost.providerTotals).map(([p,t])=>({key:p,label:PROVIDER_LABEL[p]??p,value:t.projected??t.current,color:PROVIDER_COLOR[p]}))} format={fmt} center={hasCost?money(headline,currency).replace(/\s/g,''):'—'}/></Card>
       <Card title="우선 조치" sub={`${list.length}건`} to="findings" go={go} className="span-2"><FindingList items={list} onOpen={openFinding} limit={6}/></Card>
       <Card title="조치 심각도" to="findings" go={go}><Donut data={(Object.keys(SEVERITY) as Severity[]).map(s=>({key:s,label:SEVERITY[s],value:list.filter(f=>f.severity===s).length,color:SEVERITY_COLOR[s]}))} unit="항목" onPick={()=>go('findings')}/></Card>
       <Card title="보안" sub="노출과 권한" to="security" go={go}><div className="viz-stack">

@@ -35,9 +35,11 @@ export async function retry<T>(work:(attempt:number)=>Promise<T>,options:{signal
     }
   }
 }
-export async function fetchRetry(url:string,init:RequestInit,request:typeof fetch,options:{signal?:AbortSignal;wait?:Wait}={}){
+export async function fetchRetry(url:string,init:RequestInit,request:typeof fetch,options:{signal?:AbortSignal;wait?:Wait;timeoutMs?:number}={}){
   return retry(async attempt=>{
-    const signal=options.signal&&init.signal?AbortSignal.any([options.signal,init.signal]):options.signal??init.signal;
+    // Retry-After waits do not consume the next request's timeout budget.
+    const signals=[options.signal,init.signal,options.timeoutMs===undefined?undefined:AbortSignal.timeout(options.timeoutMs)].filter((s):s is AbortSignal=>!!s);
+    const signal=signals.length>1?AbortSignal.any(signals):signals[0];
     const response=await request(url,{...init,signal});
     if((response.status===429||response.status>=500)&&attempt<3){
       await response.body?.cancel();

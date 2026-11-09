@@ -5,7 +5,7 @@ export type Fx={base:string;rates:Record<string,number>;source:string};
 export function parseFx(env:Record<string,string|undefined>):Fx|undefined{
   const raw=env.ATLAS_FX_RATES?.trim();if(!raw)return undefined;
   const base=(env.ATLAS_COST_CURRENCY??'KRW').trim().toUpperCase(),rates:Record<string,number>={};
-  for(const part of raw.split(',')){const [code,value]=part.split('=').map(x=>x?.trim());const n=Number(value);if(/^[A-Za-z]{3}$/.test(code??'')&&n>0)rates[code.toUpperCase()]=n;}
+  for(const part of raw.split(',')){const [code,value]=part.split('=').map(x=>x?.trim());const n=Number(value);if(/^[A-Za-z]{3}$/.test(code??'')&&Number.isFinite(n)&&n>0)rates[code.toUpperCase()]=n;}
   return Object.keys(rates).length&&/^[A-Z]{3}$/.test(base)?{base,rates,source:'ATLAS_FX_RATES'}:undefined;
 }
 // Rows in a currency with no rate stay as they are, so the summary can still say the currencies are mixed.
