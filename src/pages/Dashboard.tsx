@@ -1,3 +1,5 @@
+import {CostNotice} from '../CostNotice';
+import {costIssues} from '../../shared/collectionView';
 import {useEffect,useMemo,useState} from 'react';
 import {ArrowRight,Boxes,KeyRound,Minus,Network,PenLine,Plus,ShieldAlert,Users} from 'lucide-react';
 import type {AuditEvent,Snapshot} from '../../shared/schema';
@@ -16,7 +18,7 @@ export type Go=(view:'findings'|'changes'|'map'|'iam'|'cost'|'network'|'security
 const changeIcon={added:Plus,removed:Minus,changed:PenLine};
 const SEVERITY:Record<Severity,string>={critical:'긴급',high:'높음',medium:'보통',info:'참고'};
 const HEALTH=[{key:'ok',label:'정상',color:'var(--path)'},{key:'warn',label:'이상',color:'var(--warn)'},{key:'stopped',label:'중지',color:'var(--faint)'},{key:'unknown',label:'권한 없음',color:'var(--amber)'},{key:'neutral',label:'구성만 수집',color:'var(--line-strong)'}] as const;
-const CATEGORY_COLOR:Record<string,string>={compute:'var(--accent)',container:'#7c93c9',data:'var(--path)',network:'var(--peering)',security:'var(--amber)',service:'var(--line-strong)'};
+const CATEGORY_COLOR:Record<string,string>={compute:'var(--accent)',container:'#7c93c9',data:'var(--path)',network:'var(--peering)',security:'var(--amber)',service:'var(--line-strong)',application:'var(--accent)',dns:'var(--peering)',monitoring:'var(--amber)',logging:'var(--faint)',analytics:'var(--path)',configuration:'var(--muted)'};
 const gib=(v:number)=>v>=1024?`${(v/1024).toFixed(1)} TiB`:`${Math.round(v)} GiB`;
 const days7=(now=Date.now())=>Array.from({length:7},(_,i)=>new Date(now-(6-i)*86_400_000).toISOString().slice(0,10));
 // Admins see who used the portal; others simply get no card, since the log is restricted on the server.
@@ -42,6 +44,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const peerings=snapshot.links.filter(l=>l.kind==='peering'&&resources.some(r=>r.id===l.source));
   const activity=snapshot.activity.filter(a=>inScope(focus,a.provider,a.scope)),week=days7();
   const changes=(snapshot.changes?.items??[]).filter(c=>inScope(focus,c.provider,c.scope));
+  const partialCost=costIssues(snapshot,focus).length>0;
   const headline=cost.projected??cost.currentTotal,delta=cost.previousTotal?(headline-cost.previousTotal)/cost.previousTotal:null;
   const warnCount=real.filter(r=>health(r.status)==='warn').length;
   const byCloud=present.map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries(CATEGORIES.map(c=>[c.id,resources.filter(r=>r.provider===p&&r.kind!=='subnet'&&categoryOf(r.kind)===c.id).length]))}));
@@ -50,10 +53,11 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const failedLogins=portal?.filter(e=>e.action==='login_failed').length??0;
   return <div className="page"><header className="page-head"><div><h1>통합 대시보드</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. 자원, 사용률, 비용, IAM, 기록 모두 실제 값이 아닙니다.':`수집 시각 ${new Date(snapshot.collectedAt).toLocaleString('ko-KR')}`}</p></div>
       <div className="page-actions"><ul className="conn-chips" aria-label="클라우드 연결">{snapshot.connections.filter(c=>c.provider!=='onprem').map(c=><li key={c.provider} className={`conn-${c.status}`}><ProviderMark provider={c.provider}/>{PROVIDER_LABEL[c.provider]}<small>{({demo:'예시',collected:'수집됨',partial:'일부',missing:'미연결',failed:'실패',unauthenticated:'로그인 필요',running:'수집 중'} as Record<string,string>)[c.status]}</small></li>)}</ul><button className="button primary" onClick={()=>go('map')}><Network size={15}/>토폴로지 보기</button></div></header>
+    <CostNotice snapshot={snapshot} focus={focus}/>
     <section className="kpi-row" aria-label="주요 지표">
       <Kpi label="리소스" value={real.length.toLocaleString('ko-KR')} hint={warnCount?`이상 ${warnCount}개`:`범위 ${new Set(resources.map(r=>r.scope)).size}개`} tone={warnCount?'bad':undefined} onClick={()=>go('inventory')}/>
       <Kpi label="VM" value={String(fleet.count)} hint={`실행 ${fleet.running} · vCPU ${fleet.vcpu} · ${gib(fleet.memoryGiB)}`} onClick={()=>go('inventory')}/>
-      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} onClick={()=>go('cost')}/>
+      <Kpi label={cost.projected!==null?'이번 달 예상 비용':'최근 월 비용'} value={fmt(headline)} hint={partialCost?'일부 누락 · 비용 수집 확인':delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`} onClick={()=>go('cost')}/>
       <Kpi label="조치 필요" value={String(urgent)} hint={`전체 ${list.length}건 · 긴급·높음`} tone={urgent?'bad':undefined} onClick={()=>go('findings')}/>
       <Kpi label="공인 노출 후보" value={String(exposed.length)} hint={`넓은 인바운드 ${wide}개`} tone={exposed.length?'warn':undefined} onClick={()=>go('security')}/>
       <Kpi label="특권 주체" value={String(privileged)} hint={`외부 ${external} · 전체 ${principals.size}`} tone={external?'warn':undefined} onClick={()=>go('iam')}/>

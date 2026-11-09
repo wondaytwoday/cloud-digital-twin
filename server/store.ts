@@ -1,4 +1,4 @@
-import {mkdir,readdir,readFile,rename,rm,writeFile} from 'node:fs/promises';
+import {copyFile,mkdir,readdir,readFile,rename,rm,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {validateSnapshot,type Snapshot} from '../shared/schema.js';
@@ -25,8 +25,12 @@ export class FileSnapshotStore implements SnapshotStore{
     const current=path.join(this.root,`${provider}.json`),dir=path.join(this.root,'history',provider);
     await mkdir(dir,{recursive:true,mode:0o700});
     const existing=await this.latest(provider);
-    if(existing)await rename(current,path.join(dir,`${existing.collectedAt.replace(/[:.]/g,'-')}.json`));
-    await writeFile(`${current}.tmp`,JSON.stringify(snapshot,null,2),{mode:0o600});await rename(`${current}.tmp`,current);
+    const temporary=`${current}.${randomUUID()}.tmp`;
+    try{
+      await writeFile(temporary,JSON.stringify(validateSnapshot(snapshot),null,2),{mode:0o600});
+      if(existing)await copyFile(current,path.join(dir,`${existing.collectedAt.replace(/[:.]/g,'-')}.json`));
+      await rename(temporary,current);
+    }finally{await rm(temporary,{force:true});}
     for(const old of (await this.history(provider)).slice(0,-HISTORY_LIMIT))await rm(path.join(dir,old));
   }
 }

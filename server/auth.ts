@@ -42,9 +42,15 @@ export function sessionRoutes(app:import('express').Express){
 // Server-side, so a restricted user's browser never receives other scopes at all.
 export function restrictSnapshot(snapshot:Snapshot,scopes:string[]):Snapshot{
   if(scopes.includes('*'))return snapshot;
-  const allowed=new Set(scopes),resources=snapshot.resources.filter(r=>allowed.has(r.scope)),ids=new Set(resources.map(r=>r.id));
+  const allowed=new Set(scopes),resources=snapshot.resources.filter(r=>allowed.has(r.scope)).map(r=>{
+    const specs={...r.specs};delete specs['미수집 상위 참조'];return{...r,specs};
+  }),ids=new Set(resources.map(r=>r.id));
   for(const r of resources)if(r.parent&&!ids.has(r.parent))delete r.parent;
   const keep=new Set<string>();const nodes=new Map(snapshot.hierarchy.map(n=>[n.id,n]));
   for(const n of snapshot.hierarchy)if(n.scope&&allowed.has(n.scope))for(let c:typeof n|undefined=n;c;c=c.parent?nodes.get(c.parent):undefined)keep.add(c.id);
-  return{...snapshot,resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),cost:snapshot.cost.filter(c=>allowed.has(c.scope)),activity:snapshot.activity.filter(a=>allowed.has(a.scope)),iam:snapshot.iam.filter(a=>allowed.has(a.scope)),scopes:snapshot.scopes.filter(s=>allowed.has(s)),connections:[],warnings:[],changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>allowed.has(c.scope))}:undefined,scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>allowed.has(k)))};
+  const costCoverage=snapshot.costCoverage
+    .map(c=>({...c,failedScopes:c.failedScopes.filter(s=>allowed.has(s))}))
+    .filter(c=>resources.some(r=>r.provider===c.provider)||snapshot.cost.some(r=>r.provider===c.provider&&allowed.has(r.scope)))
+    .map(c=>({...c,state:c.state==='partial'&&!c.failedScopes.length?'complete' as const:c.state}));
+  return{...snapshot,costCoverage,collectionGaps:snapshot.collectionGaps.filter(g=>allowed.has(g.scope)),incomplete:snapshot.incomplete.filter(s=>allowed.has(s)),resources,links:snapshot.links.filter(l=>ids.has(l.source)&&ids.has(l.target)),hierarchy:snapshot.hierarchy.filter(n=>keep.has(n.id)),cost:snapshot.cost.filter(c=>allowed.has(c.scope)),activity:snapshot.activity.filter(a=>allowed.has(a.scope)),iam:snapshot.iam.filter(a=>allowed.has(a.scope)),scopes:snapshot.scopes.filter(s=>allowed.has(s)),connections:[],warnings:[],changes:snapshot.changes?{since:snapshot.changes.since,items:snapshot.changes.items.filter(c=>allowed.has(c.scope))}:undefined,scopeLabels:Object.fromEntries(Object.entries(snapshot.scopeLabels).filter(([k])=>allowed.has(k)))};
 }
