@@ -5,8 +5,10 @@ import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/
 import {noReport,type Report} from '../shared/collect.js';
 import {enrichAzureSizes,enrichGcpSizes} from './sku-lookup.js';
 import {costCoverageMessage} from '../shared/collectionView.js';
+import {requestAdvice} from './request-error.js';
+import type {RequestGate} from './request-gate.js';
 import {costFailureReason} from './cost-failure.js';
-export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void;scopeCollectedAt?:Record<string,string>};
+export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void;scopeCollectedAt?:Record<string,string>;requests?:RequestGate};
 // Change records cover a week: long enough to answer "who touched this", short enough to read in one pass.
 const ACTIVITY_DAYS=7,ACTIVITY_CAP=2000;
 const activitySince=(now=new Date())=>new Date(now.getTime()-ACTIVITY_DAYS*86_400_000);
@@ -16,7 +18,7 @@ const SIX_MONTHS=6;
 // Whole months up to today, the window every provider's cost query uses.
 export function costWindow(now=new Date(),months=SIX_MONTHS){const start=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()-(months-1),1));return{start:start.toISOString().slice(0,10),end:new Date(now.getTime()+86_400_000).toISOString().slice(0,10)};}
 // Injectable HTTP boundary permits contract tests and the demo mode without credentials or live calls.
-const AZURE_RESOURCES='Resources | project id, name, type, location, subscriptionId, resourceGroup, properties, tags, sku | order by id asc';
+const AZURE_RESOURCES='Resources | project id, name, type, location, subscriptionId, resourceGroup, properties, tags, sku, identity | order by id asc';
 const AZURE_IAM="authorizationresources | where type =~ 'microsoft.authorization/roleassignments' or type =~ 'microsoft.authorization/roledefinitions' | project id, type, properties, subscriptionId | order by id asc";
 export async function azurePages(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,query=AZURE_RESOURCES,onRows:(total:number)=>void=()=>{},options:Pick<CollectOptions,'signal'|'wait'>={}){
   const rows:Record<string,any>[]=[],seen=new Set<string>();let next:string|undefined;
@@ -103,7 +105,7 @@ export async function azureActivity(subscriptions:string[],token:()=>Promise<str
 }
 export async function collectAzureWith(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,options:CollectOptions&{graphToken?:()=>Promise<string>}={}):Promise<Normalized>{
   const originalRequest=request;
-  request=(url,init={})=>{options.signal?.throwIfAborted();return originalRequest(url,{...init,signal:options.signal&&init.signal?AbortSignal.any([options.signal,init.signal]):options.signal??init.signal});};
+  request=(url,init={})=>{options.signal?.throwIfAborted();const work=()=>originalRequest(url,{...init,signal:options.signal&&init.signal?AbortSignal.any([options.signal,init.signal]):options.signal??init.signal});return retry(()=>options.requests?options.requests.run(work,options.signal):work(),{...options,attempts:3});};
   // Explicit scope checks prevent ARG silently succeeding with only some subscriptions.
   const labels:Record<string,string>={},tenantIds=new Set<string>(),readable:string[]=[],warnings:string[]=[],report=options.report??noReport;let checked=0;
   for(const sub of subscriptions){report('scopes',{detail:'구독 접근 확인',done:checked++,total:subscriptions.length});const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok){warnings.push(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status}), 건너뜁니다.`);continue;}readable.push(sub);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
@@ -123,8 +125,8 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
     let names=new Map<string,string>();
     try{names=await azureDisplayNames(ids,options.graphToken,request);}catch{part.warnings.push('Azure: Microsoft Graph 조회 권한이 없어 IAM 주체를 ID로 표시합니다.');}
     part.iam=normalizeAzureIam(rows,names);report('iam',{state:'done',detail:`할당 ${count(part.iam.length)}건`});
-  }catch(e){part.iamIncomplete=[...readable];part.warnings.push(`Azure: 역할 할당을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('iam',{state:'failed',detail:'권한을 확인하세요'});}
-  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`Azure: 변경 기록(Activity Log)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);report('activity',{state:'failed',detail:'Reader 권한을 확인하세요'});}}else report('activity',{state:'skipped'});
+  }catch(e){part.iamIncomplete=[...readable];part.warnings.push(requestAdvice('Azure IAM',e,'Reader'));report('iam',{state:'failed',detail:requestAdvice('Azure IAM',e,'Reader')});}
+  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(requestAdvice('Azure Activity Log',e,'Reader'));report('activity',{state:'failed',detail:requestAdvice('Azure Activity Log',e,'Reader')});}}else report('activity',{state:'skipped'});
   if(options.withCost!==false){
     const {rows,failed}=await azureCost(readable,token,request,undefined,(done,total)=>report('cost',{detail:'Cost Management 조회',done,total}),options);
     const failedScopes=[...new Set([...part.incomplete,...failed])];
@@ -136,11 +138,15 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
 }
 // Everything the signed-in identity can see, so nobody has to type subscription IDs.
 // Sign-in passing says nothing about roles or the network path to ARM, so each failure here names its own fix.
-export async function discoverAzureSubscriptions(token:()=>Promise<string>,request:typeof fetch=fetch){
+export async function discoverAzureSubscriptions(token:()=>Promise<string>,request:typeof fetch=fetch,options?:Pick<CollectOptions,'signal'|'wait'|'requests'>){
   const found:string[]=[],inactive:string[]=[];let url:string|undefined='https://management.azure.com/subscriptions?api-version=2022-12-01';
   while(url){
     let r:Response;
-    try{r=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});}catch(e){throw new Error(azureNetworkMessage(e));}
+    try{
+      const init={headers:{Authorization:`Bearer ${await token()}`}};
+      const bounded:typeof fetch=(url,init)=>options?.requests?options.requests.run(()=>request(url,init),options.signal):request(url,init);
+      r=options?await fetchRetry(url,init,bounded,{...options,timeoutMs:30_000}):await bounded(url,{...init,signal:AbortSignal.timeout(30_000)});
+    }catch(e){throw new Error(azureNetworkMessage(e));}
     if(!r.ok){const body:any=await r.json().catch(()=>({}));throw new Error(azureListMessage(r.status,body?.error));}
     const body:any=await r.json();
     for(const s of body.value??[])s.state==='Enabled'?found.push(s.subscriptionId):inactive.push(s.state);
@@ -149,11 +155,7 @@ export async function discoverAzureSubscriptions(token:()=>Promise<string>,reque
   if(!found.length)throw new Error(inactive.length?`Azure: 구독 ${inactive.length}개가 보이지만 활성 상태가 아닙니다 (${[...new Set(inactive)].join(', ')}).`:'Azure: 로그인은 됐지만 이 서비스 주체에 역할이 할당된 구독이 없습니다. 구독이나 테넌트 루트 관리 그룹에 Reader 역할을 할당하세요. 할당 직후에는 반영까지 몇 분 걸릴 수 있습니다.');
   return found;
 }
-function azureNetworkMessage(e:unknown){
-  const err=e as any,code=err?.cause?.code??err?.code??(err?.name==='TimeoutError'?'시간 초과':err?.message);
-  if(/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(String(code)))return `Azure: management.azure.com 인증서를 신뢰하지 못했습니다 (${code}). 사내 TLS 검사가 있으면 셸에서 NODE_EXTRA_CA_CERTS에 회사 루트 인증서 경로를 지정하세요.`;
-  return `Azure: management.azure.com에 연결하지 못했습니다 (${code}). 프록시를 거쳐야 하는 네트워크면 HTTPS_PROXY를 설정하세요.`;
-}
+function azureNetworkMessage(e:unknown){return requestAdvice('Azure',e);}
 function azureListMessage(status:number,error?:{code?:string;message?:string}){
   const detail=[error?.code,error?.message?.split('\n')[0].slice(0,160)].filter(Boolean).join(': ');
   if(status===401)return `Azure 구독 목록 조회를 거부했습니다 (401${detail?` ${detail}`:''}). AZURE_TENANT_ID가 구독이 있는 테넌트인지 확인하세요.`;
@@ -163,7 +165,7 @@ function azureListMessage(status:number,error?:{code?:string;message?:string}){
 export async function collectAzure(subscriptions:string[]=[],options:CollectOptions={}):Promise<Normalized>{
   const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),token=async()=>(await credential.getToken('https://management.azure.com/.default')).token;
   options.report?.('scopes',{detail:'구독 목록 조회'});
-  const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token);
+  const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token,fetch,options);
   return collectAzureWith(targets,token,fetch,{...options,graphToken:async()=>(await credential.getToken('https://graph.microsoft.com/.default')).token});
 }
 // Management events from CloudTrail's free 90-day history; read-only calls are filtered out at the source.
@@ -199,7 +201,7 @@ export async function collectAwsAccount(call:AwsCaller,account:string,region:str
   const read=async<T>(what:string,work:()=>Promise<T>,empty:T):Promise<T>=>{
     try{return await work();}catch(e){const text=`${(e as Error)?.name} ${(e as Error)?.message}`;if(AWS_AUTH_ERROR.test(text))throw e;const unavailable=AWS_UNAVAILABLE.test(text);if(!unavailable)failed.push(what);collectionGaps.push({provider:'aws',scope:account,region,operation:what,reason:/AccessDenied|UnauthorizedOperation|Forbidden/i.test(text)?'denied':unavailable?'unavailable':'failed',code:String((e as any)?.code??(e as any)?.cause?.code??(e as Error)?.name??'Error').slice(0,80)});return empty;}
   };
-  for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables']] as const)data[key]=await read(operation,()=>awsPages(call,'ec2',operation,key,paged),[]);
+  for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeSecurityGroupRules','SecurityGroupRules'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables']] as const)data[key]=await read(operation,()=>awsPages(call,'ec2',operation,key,paged),[]);
   // These two operations take no MaxResults and return everything at once.
   data.VpnGateways=await read('DescribeVpnGateways',async()=>(await call('ec2','DescribeVpnGateways')).VpnGateways??[],[]);
   data.VpnConnections=await read('DescribeVpnConnections',async()=>(await call('ec2','DescribeVpnConnections')).VpnConnections??[],[]);
@@ -376,7 +378,8 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
   const single=async(module:any,Client:string,region:string,credentials:any,operation:string,input:any)=>{
     options.signal?.throwIfAborted();
     const client=new module[Client]({region,maxAttempts:Client==='CostExplorerClient'?1:3,credentials});
-    try{return await client.send(new module[`${operation}Command`](input),{abortSignal:Client==='CostExplorerClient'?AbortSignal.any([...(options.signal?[options.signal]:[]),AbortSignal.timeout(60_000)]):options.signal});}finally{client.destroy();}
+    const send=()=>client.send(new module[`${operation}Command`](input),{abortSignal:Client==='CostExplorerClient'?AbortSignal.any([...(options.signal?[options.signal]:[]),AbortSignal.timeout(60_000)]):options.signal});
+    try{return await (options.requests?options.requests.run(send,options.signal):send());}finally{client.destroy();}
   };
   return collectAwsWith({
     identity:async()=>{const {Account}=await single(sts,'STSClient',home,undefined,'GetCallerIdentity',{});if(!Account)throw new Error('AWS 계정 ID를 확인할 수 없습니다.');return Account;},
@@ -478,7 +481,7 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
     ...(part.hierarchy??[]).filter(n=>n.kind==='project'&&n.scope).map(n=>n.scope!),
   ])];
   report('iam',{detail:parent});
-  try{part.iam=normalizeGcpIam(await gcpPages(parent,request,GCP_HIERARCHY_TYPES,'IAM_POLICY'),projectNumbers,parent.startsWith('projects/')?parent.split('/')[1]:undefined,org.domain);}
+  try{part.iam=normalizeGcpIam(await gcpPages(parent,request,[...GCP_HIERARCHY_TYPES,'compute.googleapis.com/Instance','storage.googleapis.com/Bucket','run.googleapis.com/Service','secretmanager.googleapis.com/Secret'],'IAM_POLICY'),projectNumbers,parent.startsWith('projects/')?parent.split('/')[1]:undefined,org.domain,new Map(part.resources.map(r=>[r.nativeId,r.scope])));}
   catch(e){
     options.signal?.throwIfAborted();
     // IAM scopes use project IDs, but organization and folder IDs omit prefixes.
@@ -493,7 +496,7 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
     // An organization's own log holds only org-level changes; each project keeps its own.
     const names=parent.startsWith('projects/')?[parent]:[parent,...(part.hierarchy??[]).filter(n=>n.kind==='project').map(n=>`projects/${n.nativeId}`)];
     report('activity',{detail:'감사 로그 조회'});
-    try{part.activity=await gcpActivity(names,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(`GCP: 변경 기록(감사 로그)을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}). roles/logging.viewer가 필요합니다.`);report('activity',{state:'failed',detail:'logging.viewer 권한을 확인하세요'});}
+    try{part.activity=await gcpActivity(names,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(requestAdvice('GCP 감사 로그',e,'roles/logging.viewer'));report('activity',{state:'failed',detail:requestAdvice('GCP 감사 로그',e,'roles/logging.viewer')});}
   }
   const result=finish([part]);result.warnings.push('GCP: Asset Inventory의 최종 일관성 데이터. Cloud Router 관계는 구성 참조이며 패킷 경유 경로가 아닙니다.');return result;
 }
@@ -534,7 +537,12 @@ async function gcpBilling(request:GcpRequest,scopes:string[],options:CollectOpti
   if(options.withCost!==false){
     if(table){
       report('cost',{detail:'BigQuery 조회'});
-      try{cost=await collectGcpCost(request,table,undefined,options);costCoverage=[{provider:'gcp',state:'complete',failedScopes:[]}];report('cost',{state:'done',detail:`${count(cost.length)}행`});}
+      try{
+        cost=await collectGcpCost(request,table,undefined,options);
+        const pending=cost.length===0&&process.env.ATLAS_GCP_ALLOW_EMPTY_COST!=='1';
+        costCoverage=[{provider:'gcp',state:pending?'pending':'complete',failedScopes:[],...(pending?{reason:'waiting-data' as const}:{})}];
+        report('cost',{state:pending?'skipped':'done',detail:pending?'결제 내보내기 데이터 대기 중 · 다음 수집에서 재조회':`${count(cost.length)}행`});
+      }
       catch(e){options.signal?.throwIfAborted();costCoverage=[{provider:'gcp',state:'failed',failedScopes:scopes}];warnings.push('GCP: 비용 일부 누락. BigQuery 결제 내보내기 조회를 완료하지 못했습니다. 다음 수집에서 다시 조회합니다.');report('cost',{state:'failed',detail:'결제 내보내기 조회 실패'});}
     }else{costCoverage=[{provider:'gcp',state:'unconfigured',failedScopes:[]}];warnings.push('GCP: 비용은 BigQuery 결제 내보내기로만 읽을 수 있습니다. 테이블을 ATLAS_GCP_BILLING_TABLE에 지정하세요.');report('cost',{state:'skipped',detail:'ATLAS_GCP_BILLING_TABLE 미설정'});}
   }

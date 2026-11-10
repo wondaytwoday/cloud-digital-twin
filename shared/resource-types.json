@@ -1,0 +1,905 @@
+{
+  "azure:microsoft.portal/dashboards": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/datacollectionendpoints": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.alertsmanagement/smartdetectoralertrules": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/datacollectionruleassociations": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/dnszones": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/privatednszones": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/dnsresolvers": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/privatednszones/virtualnetworklinks": {
+    "kind": "dns",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/dnszones/a": {
+    "kind": "dns",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/privatednszones/a": {
+    "kind": "dns",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/components": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.operationalinsights/workspaces": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/metricalerts": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/scheduledqueryrules": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/activitylogalerts": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/actiongroups": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/diagnosticsettings": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.insights/datacollectionrules": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.keyvault/vaults": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.network/firewallpolicies": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.network/applicationsecuritygroups": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.managedidentity/userassignedidentities": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.authorization/policyassignments": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.network/firewallpolicies/rulecollectiongroups": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.authorization/policydefinitions": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.security/automations": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.eventhub/namespaces": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.storage/storageaccounts/blobservices": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/networkwatchers/flowlogs": {
+    "kind": "logging",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.network/networkwatchers": {
+    "kind": "logging",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "azure:microsoft.datafactory/factories": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.synapse/workspaces": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.databricks/workspaces": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.kusto/clusters": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.powerbidedicated/capacities": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.compute/virtualmachines/extensions": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "azure:microsoft.resources/deployments": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "azure:microsoft.automation/automationaccounts": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "azure:microsoft.web/serverfarms": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "azure:microsoft.recoveryservices/vaults/backuppolicies": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "azure:microsoft.compute/disks": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.storage/storageaccounts/fileservices": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.web/sites": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.compute/virtualmachinescalesets": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.app/containerapps": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.containerinstance/containergroups": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.sql/servers/databases": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.dbforpostgresql/flexibleservers": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "azure:microsoft.dbformysql/flexibleservers": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:security-group-rule": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:network-acl": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:network-acl-entry": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticache:user": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticache:usergroup": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticache:user-group": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ssm:association": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:rds:pg": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:rds:db-pg": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:rds:cluster-pg": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:rds:og": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:rds:subgrp": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:elasticache:parametergroup": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:elasticache:parameter-group": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:elasticache:subnetgroup": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:elasticache:subnet-group": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ec2:dhcp-options": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ec2:route-table-association": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ec2:transit-gateway-route-table-association": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ec2:transit-gateway-route-table-propagation": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:events:rule": {
+    "kind": "application",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:events:event-bus": {
+    "kind": "application",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:scheduler:schedule": {
+    "kind": "application",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:ec2:vpc-endpoint": {
+    "kind": "endpoint",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:vpc-endpoint-service": {
+    "kind": "endpoint",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:network-interface": {
+    "kind": "endpoint",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:cloudwatch:metric-stream": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:application-autoscaling:scalable-target": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:autoscaling:scalingpolicy": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:sqs:queue": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:apigateway:restapis": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:apigateway:apis": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticloadbalancing:targetgroup": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:route53:hostedzone": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:route53resolver:resolver-endpoint": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:route53resolver:resolver-rule": {
+    "kind": "dns",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:route53resolver:resolver-rule-association": {
+    "kind": "dns",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:cloudwatch:dashboard": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:cloudwatch:alarm": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:sns:topic": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:kms:key": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:secretsmanager:secret": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:iam:role": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:iam:policy": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:acm:certificate": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:wafv2:webacl": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:guardduty:detector": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:config:config-rule": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:config:configuration-recorder": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:securityhub:hub": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:logs:log-group": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:cloudtrail:trail": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:ec2:flow-log": {
+    "kind": "logging",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:logs:log-stream": {
+    "kind": "logging",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:athena:workgroup": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:glue:database": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:glue:table": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:redshift:cluster": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:kinesis:stream": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:quicksight:analysis": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:quicksight:dataset": {
+    "kind": "analytics",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:quicksight:datasource": {
+    "kind": "analytics",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:quicksight:data-set": {
+    "kind": "analytics",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:quicksight:data-source": {
+    "kind": "analytics",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "aws:cloudformation:stack": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:cloudformation:stackset": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:cloudformation:stack-set": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ssm:document": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ssm:parameter": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:ec2:launch-template": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "aws:s3:bucket": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:volume": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticfilesystem:file-system": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:backup:backup-vault": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:lambda:function": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ecs:service": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ecs:task": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:dynamodb:table": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:elasticache:cluster": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:rds:cluster": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ecs:cluster": {
+    "kind": "cluster",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:monitoring.googleapis.com/dashboard": {
+    "kind": "monitoring",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:iam.googleapis.com/serviceaccountkey": {
+    "kind": "security",
+    "auxiliary": true,
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:compute.googleapis.com/instancesettings": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:compute.googleapis.com/project": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:compute.googleapis.com/metadata": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:dns.googleapis.com/managedzone": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:dns.googleapis.com/policy": {
+    "kind": "dns",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:monitoring.googleapis.com/alertpolicy": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:monitoring.googleapis.com/notificationchannel": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:monitoring.googleapis.com/uptimecheckconfig": {
+    "kind": "monitoring",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:cloudkms.googleapis.com/cryptokey": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:cloudkms.googleapis.com/keyring": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:secretmanager.googleapis.com/secret": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:iam.googleapis.com/serviceaccount": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:compute.googleapis.com/securitypolicy": {
+    "kind": "security",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:logging.googleapis.com/logbucket": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:logging.googleapis.com/logsink": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:pubsub.googleapis.com/topic": {
+    "kind": "logging",
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:logging.googleapis.com/logmetric": {
+    "kind": "logging",
+    "auxiliary": true,
+    "tier": 2,
+    "reason": "부속 구성은 타입별 개수와 제한된 예시로 요약"
+  },
+  "gcp:bigquery.googleapis.com/dataset": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:bigquery.googleapis.com/table": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:dataflow.googleapis.com/job": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:dataproc.googleapis.com/cluster": {
+    "kind": "analytics",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:serviceusage.googleapis.com/service": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:compute.googleapis.com/instancetemplate": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:deploymentmanager.googleapis.com/deployment": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:cloudbuild.googleapis.com/buildtrigger": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 3,
+    "reason": "개별 설정 레코드는 기본 수집에서 요약하고 상세 모드에서 원본 보존"
+  },
+  "gcp:storage.googleapis.com/bucket": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:compute.googleapis.com/disk": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:file.googleapis.com/instance": {
+    "kind": "storage",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:run.googleapis.com/service": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:cloudfunctions.googleapis.com/cloudfunction": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:appengine.googleapis.com/service": {
+    "kind": "application",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:firestore.googleapis.com/database": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "gcp:spanner.googleapis.com/instance": {
+    "kind": "database",
+    "tier": 1,
+    "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  }
+}

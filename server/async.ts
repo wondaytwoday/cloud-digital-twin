@@ -1,4 +1,5 @@
 import {setTimeout as pause} from 'node:timers/promises';
+import {connectionTimeout} from './request-error.js';
 
 export type Wait=(ms:number,signal?:AbortSignal)=>Promise<void>;
 export const wait:Wait=async(ms,signal)=>{await pause(ms,undefined,{signal});};
@@ -8,7 +9,7 @@ export const positiveSetting=(value:string|undefined,fallback:number,max:number)
 const statusOf=(e:any)=>Number(e?.status??e?.response?.status??e?.$metadata?.httpStatusCode);
 export const retryable=(e:unknown)=>{
   const status=statusOf(e),name=(e as Error)?.name??'';
-  return status===429||status>=500||/Throttl|RequestLimitExceeded|TooManyRequests|ServiceUnavailable/.test(name)||
+  return status===429||status>=500||connectionTimeout(e)||/Throttl|RequestLimitExceeded|TooManyRequests|ServiceUnavailable/.test(name)||
     (e instanceof TypeError&&/fetch|network/i.test(e.message));
 };
 export function retryDelay(headers:Headers|undefined,attempt:number,now=Date.now()){

@@ -43,6 +43,8 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const networks=resources.filter(r=>r.kind==='network'),hybrid=hybridLinks(snapshot.resources,snapshot.links).filter(h=>inScope(focus,h.target.provider,h.target.scope)),overlaps=cidrOverlaps(snapshot.resources).filter(o=>inScope(focus,o.a.provider,o.a.scope)||inScope(focus,o.b.provider,o.b.scope));
   const peerings=snapshot.links.filter(l=>l.kind==='peering'&&resources.some(r=>r.id===l.source));
   const activity=snapshot.activity.filter(a=>inScope(focus,a.provider,a.scope)),week=days7();
+  const activityGroups=snapshot.presentation?.activitySummary?.filter(a=>inScope(focus,a.provider,a.scope));
+  const activityCount=activityGroups?activityGroups.reduce((n,a)=>n+a.count,0):activity.length,deleteCount=activityGroups?activityGroups.filter(a=>a.kind==='delete').reduce((n,a)=>n+a.count,0):activity.filter(a=>a.kind==='delete').length;
   const changes=(snapshot.changes?.items??[]).filter(c=>inScope(focus,c.provider,c.scope));
   const partialCost=costIssues(snapshot,focus).length>0;
   const headline=cost.projected??cost.currentTotal,delta=cost.previousTotal?(headline-cost.previousTotal)/cost.previousTotal:null;
@@ -50,7 +52,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
   const costHint=!hasCost?(cost.dropped.length?'환율 미설정 · 비용 보기에서 환율 입력':'비용 데이터 없음'):cost.dropped.length?'환율 없는 통화 제외':partialCost?'일부 누락 · 비용 수집 확인':delta===null?'지난달 데이터 없음':`지난달 대비 ${delta>0?'+':''}${Math.round(delta*100)}%`;
   const warnCount=real.filter(r=>health(r.status)==='warn').length;
   const byCloud=present.map(p=>({cloud:PROVIDER_LABEL[p],...Object.fromEntries(CATEGORIES.map(c=>[c.id,resources.filter(r=>r.provider===p&&r.kind!=='subnet'&&categoryOf(r.kind)===c.id).length]))}));
-  const dailyActivity=week.map(d=>({x:d.slice(5).replace('-','/'),...Object.fromEntries(present.map(p=>[p,activity.filter(a=>a.provider===p&&a.at.startsWith(d)).length]))}));
+  const dailyActivity=week.map(d=>({x:d.slice(5).replace('-','/'),...Object.fromEntries(present.map(p=>[p,activityGroups?activityGroups.filter(a=>a.provider===p&&a.day===d).reduce((n,a)=>n+a.count,0):activity.filter(a=>a.provider===p&&a.at.startsWith(d)).length]))}));
   const logins=portal?week.map(d=>new Set(portal.filter(e=>e.at.startsWith(d)&&(e.action==='login'||e.action==='view')).map(e=>e.actor)).size):[];
   const failedLogins=portal?.filter(e=>e.action==='login_failed').length??0;
   return <div className="page"><header className="page-head"><div><h1>통합 대시보드</h1><p>{snapshot.mode==='mock'?'예시 데이터입니다. 자원, 사용률, 비용, IAM, 기록 모두 실제 값이 아닙니다.':`수집 시각 ${new Date(snapshot.collectedAt).toLocaleString('ko-KR')}`}</p></div>
@@ -64,7 +66,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
       <Kpi label="조치 필요" value={String(urgent)} hint={`전체 ${list.length}건 · 긴급·높음`} tone={urgent?'bad':undefined} onClick={()=>go('findings')}/>
       <Kpi label="공인 노출 후보" value={String(exposed.length)} hint={`넓은 인바운드 ${wide}개`} tone={exposed.length?'warn':undefined} onClick={()=>go('security')}/>
       <Kpi label="특권 주체" value={String(privileged)} hint={`외부 ${external} · 전체 ${principals.size}`} tone={external?'warn':undefined} onClick={()=>go('iam')}/>
-      <Kpi label="클라우드 변경" value={String(activity.length)} hint={`최근 7일 · 삭제 ${activity.filter(a=>a.kind==='delete').length}`} onClick={()=>go('audit')}/>
+      <Kpi label="클라우드 변경" value={String(activityCount)} hint={`최근 7일 · 삭제 ${deleteCount}`} onClick={()=>go('audit')}/>
     </section>
     <div className="dash-grid">
       <Card title="클라우드별 리소스" sub="분류별" to="inventory" go={go} className="span-2"><Columns xKey="cloud" height={190} data={byCloud} series={CATEGORIES.map(c=>({key:c.id,label:c.label,color:CATEGORY_COLOR[c.id]}))}/></Card>
@@ -85,7 +87,7 @@ export function Dashboard({snapshot,focus,list,go,openFinding}:{snapshot:Snapsho
         <Stat icon={Network} label="주소 대역 중복" value={overlaps.length} tone={overlaps.length?'warn':undefined}/></div></Card>
       <Card title="VM 용량" sub="실행 중 기준" to="inventory" go={go}><table className="data-table compact-table"><thead><tr><th>클라우드</th><th className="num">VM</th><th className="num">vCPU</th><th className="num">메모리</th><th className="num">GPU</th></tr></thead><tbody>{present.map(p=>{const t=fleetTotals(vms.filter(v=>v.provider===p));return <tr key={p}><td><span className="cell-mark"><i style={{background:PROVIDER_COLOR[p]}}/>{PROVIDER_LABEL[p]}</span></td><td className="num">{t.running}/{t.count}</td><td className="num">{t.vcpu}</td><td className="num">{gib(t.memoryGiB)}</td><td className="num">{t.gpus}</td></tr>;})}</tbody></table>
         {vms.some(v=>v.metrics)&&<><p className="muted small viz-gap">평균 사용률 {snapshot.mode==='mock'?'(예시)':''}</p><ShareBar format={v=>`${v}%`} parts={[{key:'cpu',label:'CPU',value:Math.round(vms.filter(v=>v.metrics).reduce((n,v)=>n+v.metrics!.cpu,0)/vms.filter(v=>v.metrics).length),color:'var(--accent)'},{key:'mem',label:'메모리',value:Math.round(vms.filter(v=>v.metrics).reduce((n,v)=>n+v.metrics!.memory,0)/vms.filter(v=>v.metrics).length),color:'var(--path)'}]}/></>}</Card>
-      <Card title="클라우드 변경 기록" sub="최근 7일 · 누가 무엇을 바꿨나" to="audit" go={go} className="span-2">{activity.length?<Columns data={dailyActivity} height={170} series={present.map(p=>({key:p,label:PROVIDER_LABEL[p],color:PROVIDER_COLOR[p]}))}/>:<p className="muted small">아직 수집한 변경 기록이 없습니다.</p>}</Card>
+      <Card title="클라우드 변경 기록" sub="최근 7일 · 누가 무엇을 바꿨나" to="audit" go={go} className="span-2">{activityCount?<Columns data={dailyActivity} height={170} series={present.map(p=>({key:p,label:PROVIDER_LABEL[p],color:PROVIDER_COLOR[p]}))}/>:<p className="muted small">아직 수집한 변경 기록이 없습니다.</p>}</Card>
       {portal?<Card title="포털 접근" sub="최근 7일" to="audit" go={go}><div className="viz-stack"><Stat icon={Users} label="접속한 사람" value={new Set(portal.filter(e=>e.action==='login'||e.action==='view').map(e=>e.actor)).size}/><p className="muted small">일별 접속자</p><Spark values={logins} height={48}/><Stat icon={ShieldAlert} label="로그인 실패·거부" value={failedLogins+(portal.filter(e=>e.action==='denied').length)} tone={failedLogins?'warn':undefined}/></div></Card>
         :<Card title="최근 변경" sub="수집 회차 비교" to="changes" go={go}><ChangeList changes={changes}/></Card>}
       {portal&&<Card title="최근 변경" sub="수집 회차 비교" to="changes" go={go} className="span-3"><ChangeList changes={changes}/></Card>}
