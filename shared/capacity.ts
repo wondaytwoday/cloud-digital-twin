@@ -8,12 +8,24 @@ export function capacityOf(r:Resource):Capacity{
   const s=r.specs,gpu=s['GPU'];
   return{vcpu:number(s['vCPU']),memoryGiB:number(s['메모리']),diskGiB:number(s['디스크']),gpus:gpuCount(gpu),gpuModel:gpuCount(gpu)?gpu.replace(/^\s*\d+\s*×\s*/,''):undefined,size:s['인스턴스']};
 }
+// Explain excluded capacity separately from known fallback values and stopped VMs.
+export function capacityIssues(vms:Resource[]){
+  const counts=new Map<string,number>();
+  for(const r of vms){
+    if(health(r.status)==='stopped')continue;
+    const c=capacityOf(r),fallback=r.specs['크기 조회']==='내장표 폴백';
+    if(!fallback&&c.vcpu!==undefined&&c.memoryGiB!==undefined)continue;
+    const reason=fallback?`내장표 폴백 (${r.specs['크기 조회 사유']??'API 미조회'})`:r.specs['크기 조회 사유']??r.specs['크기 조회']??'크기 조회 정보 없음';
+    counts.set(reason,(counts.get(reason)??0)+1);
+  }
+  return [...counts].map(([reason,count])=>({reason,count}));
+}
 // Categories follow how an operator looks for things, not the collector's kind list.
 export const CATEGORIES=[
   {id:'compute',label:'컴퓨팅',kinds:['compute']},
   {id:'container',label:'컨테이너',kinds:['cluster']},
   {id:'data',label:'데이터·스토리지',kinds:['database','storage']},
-  {id:'network',label:'네트워크',kinds:['network','subnet','gateway','loadbalancer','nat','appliance','external','onprem']},
+  {id:'network',label:'네트워크',kinds:['network','subnet','endpoint','gateway','loadbalancer','nat','appliance','external','onprem']},
   {id:'security',label:'보안·정책',kinds:['firewall','security']},
   {id:'application',label:'애플리케이션',kinds:['application']},
   {id:'dns',label:'DNS',kinds:['dns']},

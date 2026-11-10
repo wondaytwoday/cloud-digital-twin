@@ -31,3 +31,10 @@ test('the whole map is not a tall sliver',async()=>{
   const {width,height}=box(await layout('enterprise',0));
   assert.ok(width/height>0.9,`aspect ${(width/height).toFixed(2)}`);
 });
+test('a network endpoint is a visible leaf, never a VPC or subnet boundary',async()=>{
+  const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-10T00:00:00Z',resources:[{id:'aws:fake-endpoint',nativeId:'fake-endpoint',name:'fake-endpoint',provider:'aws',kind:'endpoint',type:'ec2:vpc-endpoint',scope:'111111111111',region:'r',source:'fake Resource Explorer'}],links:[],scopes:['111111111111'],warnings:[]});
+  const topology=await computeTopology(snapshot,{provider:'all',scopes:null,policy:false,flow:false,expanded:defaultExpanded(snapshot,2)});
+  const node=topology.nodes.find(n=>n.id==='aws:fake-endpoint')!;
+  assert.ok(node);assert.equal(node.item.variant,undefined);assert.equal(node.expandable,false);
+  assert.equal(topology.edges.length,0,'inventory classification does not invent paths');
+});

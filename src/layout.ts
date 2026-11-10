@@ -15,7 +15,7 @@ const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CA
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
 const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
-const kindOrder:ResourceKind[]=['gateway','appliance','loadbalancer','nat','cluster','compute','database','storage','service','dns','monitoring','security','logging','analytics','configuration','application','firewall','external','subnet','network','onprem'];
+const kindOrder:ResourceKind[]=['gateway','endpoint','appliance','loadbalancer','nat','cluster','compute','database','storage','service','dns','monitoring','security','logging','analytics','configuration','application','firewall','external','subnet','network','onprem'];
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;

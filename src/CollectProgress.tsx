@@ -28,6 +28,7 @@ export function CollectProgress({state,onGuide}:{state:CollectState;onGuide?:()=
       {run?.state==='running'&&<ProgressBar value={Math.round(providerProgress(run.stages)*100)} label={`${c.name} 수집 진행률`} active/>}
       {show?<ol className="stage-list">{run.stages!.map(s=><StageRow key={s.id} stage={s}/>)}</ol>:null}
       {run?.message&&<p className={`collect-message ${run.state==='failed'||run.state==='unauthenticated'?'is-problem':''}`}>{run.message}</p>}
+      {!!run?.slowStages?.length&&!state.running&&<details><summary>느린 수집 구간 상위 {run.slowStages.length}개</summary><ul>{run.slowStages.map((s,i)=><li key={`${s.id}:${i}`}>{s.detail} · {elapsedText(s.elapsedMs)}</li>)}</ul></details>}
       {run?.state==='unauthenticated'&&<div className="code-box"><pre>{c.command}</pre></div>}
     </section>})}
     {onGuide&&<button className="link-button small" onClick={onGuide}>자격 증명 설정 방법 보기</button>}

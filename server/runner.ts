@@ -1,5 +1,6 @@
 import {positiveSetting} from './async.js';
 import {retainIncomplete} from './reconcile.js';
+import {costCoverageMessage} from '../shared/collectionView.js';
 import {classificationSummary} from '../shared/classification.js';
 import {collectAws,collectAzure,collectGcpAuto,discoverAzureSubscriptions,type CollectOptions} from './collectors.js';
 import type {Normalized} from './normalize.js';
@@ -72,7 +73,7 @@ const realDrivers:CollectorDrivers={
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string)=>validateSnapshot({version:1,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
+export const toSnapshot=(result:Normalized,costAt?:string,scopeCollectedAt:Record<string,string>={})=>validateSnapshot({version:1,scopeCollectedAt,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
@@ -99,14 +100,29 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
   current=(async()=>{
     const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
     const selected=options.providers??PROVIDERS;
-    for(const p of selected)status.providers[p]={...status.providers[p],state:'running',message:undefined,stages:newStages(p)};
+    for(const p of selected)status.providers[p]={...status.providers[p],state:'running',message:undefined,slowStages:[],stages:newStages(p)};
     // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
     let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
     const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
     await store.writeStatus(status);
     await Promise.all(selected.map(async p=>{
       const at=()=>new Date().toISOString(),driver=drivers[p];
-      const report:Report=(id,patch={})=>{const stage=status.providers[p].stages?.find(s=>s.id===id);if(!stage||(stage.state==='done'&&!patch.state))return;if(patch.elapsedMs!==undefined)log(`${p}: ${patch.detail??stage.label} ${patch.elapsedMs}ms`);const before=stage.state;Object.assign(stage,{state:'running',...patch});if(stage.state!==before){log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);persist(true);}else persist();};
+      const report:Report=(id,patch={})=>{
+        const stage=status.providers[p].stages?.find(s=>s.id===id);
+        if(!stage||(stage.state==='done'&&!patch.state))return;
+        if(patch.elapsedMs!==undefined){
+          const slow=status.providers[p].slowStages??[];
+          status.providers[p].slowStages=[...slow,{id,detail:patch.detail??stage.label,elapsedMs:patch.elapsedMs}]
+            .sort((a,b)=>b.elapsedMs-a.elapsedMs).slice(0,5);
+          log(`${p}: ${patch.detail??stage.label} ${patch.elapsedMs}ms`);
+        }
+        const before=stage.state;
+        Object.assign(stage,{state:'running',...patch});
+        if(stage.state!==before){
+          log(`${p}: ${stage.label} ${stage.state==='running'?'시작':stage.state==='done'?'완료':stage.state==='skipped'?'건너뜀':'실패'}${stage.detail?` (${stage.detail})`:''}`);
+          persist(true);
+        }else persist();
+      };
       if(activeCollectors.has(p)){status.providers[p]={...status.providers[p],state:'failed',message:'이전 수집 요청의 취소를 기다리고 있습니다. 요청이 끝난 뒤 다시 수집하세요.',stages:settleStages(status.providers[p].stages,'failed')};await persist(true);return;}
       try{
         report('auth');
@@ -114,14 +130,16 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
         status.providers[p]={...status.providers[p],state:'running',identity};
       report('auth',{state:'done',detail:identity});
       }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});status.providers[p]={state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
+      let latestCheckpoint:Normalized|undefined;
       try{
         const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity;
-        const withCost=!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
+        const withCost=!previous?.costCoverage.some(c=>c.provider===p)||!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
         if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
+        const scopeCollectedAt:Record<string,string>={...Object.fromEntries((previous?.scopes??[]).filter(s=>!previous?.incomplete.includes(s)).map(s=>[s,previous!.collectedAt])),...previous?.scopeCollectedAt};
         const controller=new AbortController();let checkpoint:Normalized|undefined,timedOut=false;
-        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,
+        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,scopeCollectedAt,
           report:(id,patch)=>{if(!controller.signal.aborted)report(id,patch);},
-          checkpoint:value=>{if(!controller.signal.aborted)checkpoint=structuredClone(value);},
+          checkpoint:value=>{if(!controller.signal.aborted){checkpoint=structuredClone(value);latestCheckpoint=checkpoint;}},
         }));
         activeCollectors.set(p,job);
         void job.then(()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);},()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);});
@@ -140,7 +158,7 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
         if(!withCost){result.cost=previous?.cost;result.costCoverage=previous?.costCoverage;}
         else{
           // Drivers without coverage metadata are supported, but absence of rows is not proof of a successful read.
-          const effective=coverage??{provider:p,state:timedOut?'failed' as const:result.cost!==undefined?'complete' as const:'unconfigured' as const,failedScopes:result.incomplete??[]};
+          const effective=coverage??{provider:p,state:timedOut?'failed' as const:result.cost!==undefined?'complete' as const:'unconfigured' as const,failedScopes:p==='aws'?[]:result.incomplete??[],...(timedOut?{reason:'skipped-timeout' as const,...(p==='aws'?{unit:'organization' as const}:{})}:{})};
           result.costCoverage=[effective];
           if(effective.state==='complete')costAt=at();
           else if(effective.state==='partial'){
@@ -148,15 +166,23 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
             result.cost=[...result.cost??[],...previous?.cost.filter(c=>failed.has(c.scope))??[]];
           }else result.cost=previous?.cost??result.cost;
         }
+        for(const scope of result.collectedScopes??[])scopeCollectedAt[scope]=at();
+        const progress=result.accountProgress;
         result=retainIncomplete(result,previous);
-        report('save');await store.save(p,toSnapshot(result,costAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
+        // Drop timestamps for scopes no longer in the discovered/saved collection.
+        const kept=new Set([...result.collectedScopes??[],...result.incomplete??[]]);
+        for(const scope of Object.keys(scopeCollectedAt))if(!kept.has(scope))delete scopeCollectedAt[scope];
+        report('save');await store.save(p,toSnapshot(result,costAt,scopeCollectedAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
         const missing=result.incomplete?.length??0,costProblem=result.costCoverage?.find(c=>c.provider===p&&['failed','partial'].includes(c.state));
-        const message=[missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:'',costProblem?`비용 일부 누락${costProblem.failedScopes.length?` (${costProblem.failedScopes.length}개 범위)`:''}. 이전 비용이 있으면 유지하고 다음 수집에서 다시 조회합니다.`:'',timedOut?'수집 시간 초과로 완료된 계정만 갱신했습니다.':''].filter(Boolean).join(' ');
+        const message=[missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:'',costProblem?`비용 일부 누락 · ${costCoverageMessage(costProblem)} 이전 비용이 있으면 유지합니다.`:'',timedOut?`수집 시간 초과 · 완료 ${progress?.completed??0} / 전체 ${progress?.total??0}계정. 다음 수집에서 미수집·오래된 계정부터 이어서 진행합니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`:''].filter(Boolean).join(' ');
         status.providers[p]={...status.providers[p],state:missing||costProblem||timedOut?'partial':'ok',at:at(),resources:result.resources.length,message:message||undefined,stages:settleStages(status.providers[p].stages,'done')};
         log(`${p}: 자원 ${result.resources.length}개 저장${message?` · ${message}`:''}`);
         const unknown=classificationSummary(result.resources);if(unknown.length)log(`${p}: 미분류 타입 상위 ${unknown.map(x=>`${x.type} ${x.count}개`).join(', ')}`);
       }catch(e){
-        const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),message=auth?explainAuth(p,e):explainFailure(raw);
+        const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),baseMessage=auth?explainAuth(p,e):explainFailure(raw);
+        const pendingCost=latestCheckpoint?.costCoverage?.find(c=>c.state!=='complete');
+        const message=/수집 시간 초과/.test(raw)&&pendingCost?`${baseMessage}. ${costCoverageMessage(pendingCost)}`:baseMessage;
+        if(/수집 시간 초과/.test(raw)&&pendingCost)report('cost',{state:'failed',detail:costCoverageMessage(pendingCost)});
         status.providers[p]={...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);
       }
       await persist(true);

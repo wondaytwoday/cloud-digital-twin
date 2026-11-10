@@ -6,7 +6,7 @@ import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 // Disk sizes arrive per disk and sometimes as strings; an instance with none reported gets no disk entry rather than a zero.
 const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Number).filter(v=>v>0);return n.length?{'디스크':`${n.reduce((a,b)=>a+b,0)} GiB`}:{};};
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];iamIncomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];collectedScopes?:string[];costCoverage?:CostCoverage[];collectionGaps?:CollectionGap[];awsInventory?:{account:string;rows:Raw[]}};
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];iamIncomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];collectedScopes?:string[];costCoverage?:CostCoverage[];collectionGaps?:CollectionGap[];accountProgress?:{completed:number;total:number};awsInventory?:{account:string;rows:Raw[]}};
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
