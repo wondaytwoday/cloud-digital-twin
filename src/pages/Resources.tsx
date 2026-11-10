@@ -6,7 +6,7 @@ import {ArrowDown,ArrowUp,ArrowUpRight,Cpu,HardDrive,MemoryStick,Server,Boxes,Ga
 import type {Resource,Snapshot} from '../../shared/schema';
 import {inScope,type Focus} from '../../shared/hierarchy';
 import {health,type Health} from '../../shared/topology';
-import {CATEGORIES,capacityOf,categoryOf,countBy,fleetTotals,statusCounts,type CategoryId} from '../../shared/capacity';
+import {CATEGORIES,capacityOf,capacityIssues,categoryOf,countBy,fleetTotals,statusCounts,type CategoryId} from '../../shared/capacity';
 import {kindNames,ResourceIcon} from '../graph';
 import {Card,CardAction,CardContent,CardDescription,CardHeader,CardTitle} from '@/ui/components/card';
 import {ChartContainer,ChartLegend,ChartLegendContent,ChartTooltip,ChartTooltipContent,type ChartConfig} from '@/ui/components/chart';
@@ -128,10 +128,11 @@ export function ResourcesPage({snapshot,focus,query,onOpen}:{snapshot:Snapshot;f
   const q=query.trim().toLowerCase(),live=snapshot.mode==='live';
   const scoped=useMemo(()=>snapshot.resources.filter(r=>inScope(focus,r.provider,r.scope)&&(showAuxiliary||!isAuxiliary(r))&&(!q||`${r.name} ${r.ip??''} ${r.cidr??''} ${r.type} ${snapshot.scopeLabels[r.scope]??''}`.toLowerCase().includes(q))),[snapshot,focus,q,showAuxiliary]);
   const rows=category==='all'?scoped:scoped.filter(r=>categoryOf(r.kind)===category);
-  const vms=scoped.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms),states=statusCounts(scoped);
+  const vms=scoped.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms),sizeIssues=capacityIssues(vms),states=statusCounts(scoped);
   const counts=Object.fromEntries(CATEGORIES.map(c=>[c.id,scoped.filter(r=>categoryOf(r.kind)===c.id).length]));
   return <div className="page"><header className="page-head"><div><h1>리소스</h1><p>{live?'':'예시 데이터입니다. '}종류별 현황과 VM 용량·사용률을 봅니다. 이름을 누르면 토폴로지에서 위치를 보여줍니다.</p></div><div className="page-actions">{q&&<Badge variant="secondary">검색: {query}</Badge>}<label><input type="checkbox" checked={showAuxiliary} onChange={e=>setShowAuxiliary(e.target.checked)}/> 구성 부속물 포함</label></div></header>
     <CollectionNotice snapshot={snapshot} focus={focus}/>
+    {sizeIssues.length>0&&<div className="notice warn page-notice" role="status"><p><strong>VM 용량 확인 필요 · </strong>{sizeIssues.map(c=>`${c.reason} ${c.count}대`).join(' / ')}. 실행 중 VM에서 확인되지 않은 vCPU·메모리 값은 합계에서 제외됩니다. 자원 상세의 크기 조회 사유를 확인하세요.</p></div>}
     <div className="shad grid grid-cols-[minmax(0,1fr)] gap-3">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6" aria-label="리소스 지표">
         <Kpi icon={Boxes} label="전체 리소스" value={num(scoped.length)} hint={states.warn?`이상 ${states.warn}개`:'이상 없음'} tone={states.warn?'bad':undefined}/>

@@ -4,6 +4,9 @@ type Classification={kind:ResourceKind;auxiliary?:boolean};
 // Exact provider types live here; unknown types remain visible as unclassified services.
 const groups:Record<string,{kind:ResourceKind;auxiliary?:boolean;types:string[]}[]>={
   azure:[
+    // Alert/dashboard/DCR endpoints are monitoring; rule associations configure their targets.
+    {kind:'monitoring',types:['microsoft.portal/dashboards','microsoft.insights/datacollectionendpoints']},
+    {kind:'monitoring',auxiliary:true,types:['microsoft.alertsmanagement/smartdetectoralertrules','microsoft.insights/datacollectionruleassociations']},
     {kind:'dns',types:['microsoft.network/dnszones','microsoft.network/privatednszones','microsoft.network/dnsresolvers']},
     {kind:'dns',auxiliary:true,types:['microsoft.network/privatednszones/virtualnetworklinks','microsoft.network/dnszones/a','microsoft.network/privatednszones/a']},
     {kind:'monitoring',types:['microsoft.insights/components','microsoft.operationalinsights/workspaces']},
@@ -19,6 +22,16 @@ const groups:Record<string,{kind:ResourceKind;auxiliary?:boolean;types:string[]}
     {kind:'database',types:['microsoft.sql/servers/databases','microsoft.dbforpostgresql/flexibleservers','microsoft.dbformysql/flexibleservers']},
   ],
   aws:[
+    // SG rules are policy records, not independently traversable network devices.
+    {kind:'security',auxiliary:true,types:['ec2:security-group-rule','ec2:network-acl','ec2:network-acl-entry','elasticache:user','elasticache:usergroup','elasticache:user-group']},
+    // Associations and parameter groups configure existing resources; retain them for audit.
+    {kind:'configuration',auxiliary:true,types:['ssm:association','rds:pg','rds:db-pg','rds:cluster-pg','rds:og','rds:subgrp','elasticache:parametergroup','elasticache:parameter-group','elasticache:subnetgroup','elasticache:subnet-group','ec2:dhcp-options','ec2:route-table-association','ec2:transit-gateway-route-table-association','ec2:transit-gateway-route-table-propagation']},
+    // EventBridge rules route events; these are application settings rather than hosts.
+    {kind:'application',auxiliary:true,types:['events:rule','events:event-bus','scheduler:schedule']},
+    // Endpoints/ENIs are network resources; Resource Explorer alone proves no parent or route.
+    {kind:'endpoint',types:['ec2:vpc-endpoint','ec2:vpc-endpoint-service','ec2:network-interface']},
+    {kind:'monitoring',auxiliary:true,types:['cloudwatch:metric-stream','application-autoscaling:scalable-target','autoscaling:scalingpolicy']},
+    {kind:'application',types:['sqs:queue','apigateway:restapis','apigateway:apis','elasticloadbalancing:targetgroup']},
     {kind:'dns',types:['route53:hostedzone','route53resolver:resolver-endpoint']},
     {kind:'dns',auxiliary:true,types:['route53resolver:resolver-rule','route53resolver:resolver-rule-association']},
     {kind:'monitoring',types:['cloudwatch:dashboard']},
@@ -36,6 +49,10 @@ const groups:Record<string,{kind:ResourceKind;auxiliary?:boolean;types:string[]}
     {kind:'cluster',types:['ecs:cluster']},
   ],
   gcp:[
+    // Monitoring dashboards are views; service account keys and settings are child configuration.
+    {kind:'monitoring',types:['monitoring.googleapis.com/dashboard']},
+    {kind:'security',auxiliary:true,types:['iam.googleapis.com/serviceaccountkey']},
+    {kind:'configuration',auxiliary:true,types:['compute.googleapis.com/instancesettings','compute.googleapis.com/project','compute.googleapis.com/metadata']},
     {kind:'dns',types:['dns.googleapis.com/managedzone','dns.googleapis.com/policy']},
     {kind:'monitoring',auxiliary:true,types:['monitoring.googleapis.com/alertpolicy','monitoring.googleapis.com/notificationchannel','monitoring.googleapis.com/uptimecheckconfig']},
     {kind:'security',types:['cloudkms.googleapis.com/cryptokey','cloudkms.googleapis.com/keyring','secretmanager.googleapis.com/secret','iam.googleapis.com/serviceaccount','compute.googleapis.com/securitypolicy']},
@@ -51,7 +68,7 @@ const groups:Record<string,{kind:ResourceKind;auxiliary?:boolean;types:string[]}
 export const RESOURCE_CLASSIFICATIONS=new Map(Object.entries(groups).flatMap(([provider,entries])=>entries.flatMap(({types,...classification})=>types.map(type=>[`${provider}:${type.toLowerCase()}`,classification] as const))));
 export const classifyResource=(provider:Provider,type:string):Classification=>RESOURCE_CLASSIFICATIONS.get(`${provider}:${type.toLowerCase()}`)??{kind:'service'};
 export const isAuxiliary=(r:Pick<Resource,'provider'|'type'|'auxiliary'>)=>r.auxiliary??classifyResource(r.provider,r.type).auxiliary??false;
-const NETWORK_KINDS=new Set<ResourceKind>(['network','subnet','gateway','appliance','loadbalancer','nat','onprem','external','firewall']);
+const NETWORK_KINDS=new Set<ResourceKind>(['network','subnet','endpoint','gateway','appliance','loadbalancer','nat','onprem','external','firewall']);
 export const isNetworkResource=(r:Pick<Resource,'kind'>)=>NETWORK_KINDS.has(r.kind);
 export const classificationSummary=(resources:Resource[])=>{
   const counts=new Map<string,number>();

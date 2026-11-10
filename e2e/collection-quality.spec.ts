@@ -1,5 +1,6 @@
 import {expect,test,type Page} from '@playwright/test';
-import type {Snapshot} from '../shared/schema';
+import {validateSnapshot,type Snapshot} from '../shared/schema';
+const fakeLiveSnapshot=()=>validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-10T00:00:00Z',resources:[],links:[],warnings:[],scopes:['111111111111'],cost:[{provider:'aws',scope:'111111111111',service:'fake-compute',month:'2026-11',amount:10,currency:'USD'}]});
 const inject=async(page:Page,change:(snapshot:Snapshot)=>void)=>{
   await page.route('**/api/topology?*',async route=>{
     const response=await route.fetch(),snapshot=await response.json() as Snapshot;
@@ -53,4 +54,55 @@ test('an empty AWS map explains the denied API instead of implying no resources 
   await page.getByText('조회하지 못한 API 1건 · 사유 보기').click();
   await expect(page.locator('.collection-notice')).toContainText('DescribeVpcs: 권한 없음');
   await expect(page.getByRole('button',{name:'연결 방법 보기'})).toBeVisible();
+});
+
+test('organization billing failures explain their cause without counting each member account',async({page})=>{
+  let reason:'denied'|'throttled'|'network'|'skipped-timeout'='denied';
+  await inject(page,s=>{s.cost=[];s.costCoverage=[{provider:'aws',state:'failed',unit:'organization',reason,failedScopes:[]}];});
+  for(const [value,label] of [['denied','ce:GetCostAndUsage'],['throttled','속도 제한'],['network','프록시·DNS·인증서'],['skipped-timeout','전체 수집 시간 초과']] as const){
+    reason=value;await page.goto('/?view=cost&scope=provider:aws');
+    const notice=page.getByRole('status').filter({hasText:'비용 일부 누락'});
+    await expect(notice).toContainText('조직 단위 비용 조회 1건');await expect(notice).toContainText(label);
+    await expect(notice).not.toContainText('개 범위');
+  }
+});
+
+test('legacy cached cost is labeled unverified until coverage exists',async({page})=>{
+  await page.route('**/api/topology*',route=>route.fulfill({json:fakeLiveSnapshot()}));
+  await page.goto('/?view=cost');
+  await expect(page.getByRole('status').filter({hasText:'비용 일부 누락'})).toContainText('완전성 검증 안 됨');
+  await expect(page.locator('.kpi-row')).toContainText('일부 누락');
+});
+
+test('unknown VM capacity distinguishes permission errors, unknown sizes and fallback values',async({page})=>{
+  await inject(page,s=>{
+    const base=s.resources.find(r=>r.kind==='compute')!;
+    for(const [id,lookup,cause,vcpu] of [['denied','조회 실패: 권한 또는 API 설정 확인','조회 실패: 권한 또는 API 설정 확인','미확인'],['unknown','알 수 없는 크기','알 수 없는 크기','미확인'],['fallback','내장표 폴백','조회 실패: 속도 제한','2']]){
+      s.resources.push({...base,id:`fake-size-${id}`,name:`fake-size-${id}`,parent:undefined,status:'running',specs:{'인스턴스':'fake-size','vCPU':vcpu,'메모리':vcpu==='2'?'4 GiB':'미확인','크기 조회':lookup,'크기 조회 사유':cause}});
+    }
+  });
+  await page.goto('/?view=inventory');
+  const notice=page.getByRole('status').filter({hasText:'VM 용량 확인 필요'});
+  await expect(notice).toContainText('권한 또는 API 설정 확인 1대');
+  await expect(notice).toContainText('알 수 없는 크기 1대');
+  await expect(notice).toContainText('내장표 폴백 (조회 실패: 속도 제한) 1대');
+  await page.screenshot({path:'/tmp/atlas-issue4-size.png'});
+});
+
+test('security group rules use the shared auxiliary classification and remain inspectable',async({page})=>{
+  await inject(page,s=>{const base=s.resources.find(r=>r.provider==='aws')!;s.resources.push({...base,id:'fake-sg-rule',name:'fake-sg-child-rule',kind:'security',type:'ec2:security-group-rule',parent:undefined,auxiliary:undefined});});
+  await page.goto('/?view=inventory');
+  await expect(page.getByText('fake-sg-child-rule',{exact:true})).toHaveCount(0);
+  await page.getByRole('checkbox',{name:'구성 부속물 포함'}).check();
+  await page.getByRole('tab',{name:/보안·정책/}).click();
+  await expect(page.getByText('fake-sg-child-rule',{exact:true})).toBeVisible();
+});
+
+test('collection status shows account continuation and slow stages after a bounded run',async({page})=>{
+  await page.route('**/api/topology*',route=>route.fulfill({json:fakeLiveSnapshot()}));
+  await page.route('**/api/collect/status',route=>route.fulfill({json:{enabled:true,running:false,finishedAt:'2026-11-10T00:00:00Z',providers:{azure:{state:'idle'},gcp:{state:'idle'},aws:{state:'partial',resources:1,message:'수집 시간 초과 · 완료 1 / 전체 3계정. 다음 수집에서 미수집·오래된 계정부터 이어서 진행합니다.',slowStages:[{id:'resources',detail:'가짜 계정 · 나머지 서비스 목록',elapsedMs:12000}]}}}}));
+  await page.goto('/?view=scopes');await page.getByLabel('수집 상태 보기',{exact:true}).click();
+  const pop=page.locator('.collect-pop');await expect(pop).toContainText('완료 1 / 전체 3계정');
+  await pop.getByText('느린 수집 구간 상위 1개').click();await expect(pop).toContainText('나머지 서비스 목록 · 12초');
+  await page.screenshot({path:'/tmp/atlas-issue4-status.png'});
 });

@@ -3,7 +3,7 @@ export type ProviderState='idle'|'running'|'ok'|'partial'|'failed'|'unauthentica
 export type StageId='auth'|'scopes'|'resources'|'iam'|'activity'|'cost'|'save';
 export type StageState='pending'|'running'|'done'|'skipped'|'failed';
 export type Stage={id:StageId;label:string;state:StageState;detail?:string;done?:number;total?:number;elapsedMs?:number};
-export type ProviderStatus={state:ProviderState;message?:string;at?:string;resources?:number;identity?:string;stages?:Stage[]};
+export type ProviderStatus={state:ProviderState;message?:string;at?:string;resources?:number;identity?:string;stages?:Stage[];slowStages?:{id:StageId;detail:string;elapsedMs:number}[]};
 export type CollectionStatus={running:boolean;startedAt?:string;finishedAt?:string;pid?:number;providers:Record<ProviderId,ProviderStatus>};
 export type Report=(stage:StageId,patch?:Partial<Pick<Stage,'state'|'detail'|'done'|'total'|'elapsedMs'>>)=>void;
 export const noReport:Report=()=>{};

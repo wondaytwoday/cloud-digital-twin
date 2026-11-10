@@ -30,7 +30,9 @@ test('fixtures survive pagination and normalization across every provider',async
   for(const n of ['vnet-hub','afw-hub','sql-platform','aks-platform','tgw-core','rds-orders','alb-checkout','vpc-shared','gke-analytics','sql-analytics','sandbox-01'])assert.ok(named(n),n);
   assert.equal(named('sql-platform').parent,s.resources.find(r=>r.kind==='subnet'&&r.name==='data'&&r.provider==='azure')!.id);
   assert.equal(named('checkout-api-01').specs['vCPU'],'4');
-  assert.equal(named('worker-gpu-01').specs['GPU'],'1 × NVIDIA T4');
+  // Resource SKUs supplies GPU count but no model; do not invent a live model from the offline table.
+  assert.equal(named('worker-gpu-01').specs['GPU'],'1 × GPU (모델 미제공)');
+  assert.equal(named('worker-gpu-01').specs['크기 조회'],'Azure Resource SKUs');
   assert.equal(named('warehouse-01').status,'deallocated');
   assert.equal(named('vpn-seoul').status,'degraded');
 });

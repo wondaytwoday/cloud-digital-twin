@@ -9,11 +9,13 @@ import { diffResources } from '../shared/diff.js';
 import { ResourceSchema, validateSnapshot, type Connection, type Link, type Resource } from '../shared/schema.js';
 import type { ScenarioId } from '../shared/scenarios.js';
 import { demoActivity } from './fixtures/activity.js';
+import {azureSkus,gcpMachines} from './skus.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
 const PAGE=12;
 // Fake HTTP/SDK boundaries: demo data walks the same pagination and normalization code as live collection.
 const azureTransport=(rows:any[],names:Record<string,string>,tree:OrgTree|undefined,iam:{rows:any[];directory:Record<string,string>},now:Date):typeof fetch=>async(url,init)=>{
   const target=String(url);
+  if(target.includes('/providers/Microsoft.Compute/skus?'))return json({value:Object.entries(azureSkus).map(([name,s])=>({name,resourceType:'virtualMachines',capabilities:[{name:'vCPUs',value:String(s.vcpu)},{name:'MemoryGB',value:String(s.memoryGiB)},...(s.gpu?[{name:'GPUs',value:s.gpu.split(' ')[0]}]:[])]}))});
   if(target.includes('directoryObjects/getByIds'))return json({value:JSON.parse(String(init?.body)).ids.map((id:string)=>({id,displayName:iam.directory[id]??id}))});
   if(target.includes('Microsoft.CostManagement/query')){const sub=target.match(/subscriptions\/([^/]+)/)![1];return json({properties:{columns:[{name:'Cost'},{name:'BillingMonth'},{name:'ServiceName'},{name:'Currency'}],rows:costPoints('azure',[sub],now).map(p=>[p.amount,`${p.month}-01T00:00:00`,p.service,'USD'])}});}
   if(target.includes('/tenants?'))return tree?json({value:[{tenantId:tree.id,displayName:tree.name}]}):new Response('{}',{status:403});
@@ -30,6 +32,7 @@ const awsTransport=(api:Record<string,any>):AwsCaller=>async(_service,operation,
   return {[key]:rows.slice(offset,end),...(end<rows.length?{NextToken:String(end)}:{})};
 };
 const gcpTransport=(all:any[],policies:any[],now:Date):GcpRequest=>async(url,init)=>{
+  if(url.startsWith('https://compute.googleapis.com/compute/v1/')&&url.includes('/machineTypes/')){const s=gcpMachines[url.split('/').pop()!];return s?{guestCpus:s.vcpu,memoryMb:s.memoryGiB*1024}:{};}
   if(url.includes('bigquery.googleapis.com')){const scopes=[...new Set(all.filter(a=>!String(a.assetType).startsWith('cloudresourcemanager')).map(a=>String(a.name).match(/projects\/([^/]+)/)?.[1]).filter((x):x is string=>!!x))];return {jobComplete:true,rows:costPoints('gcp',scopes,now).map(p=>({f:[{v:p.month.replace('-','')},{v:p.scope},{v:p.service},{v:'USD'},{v:String(p.amount)}]}))};}
   const params=new URL(url).searchParams,types=new Set(params.getAll('assetTypes')),source=params.get('contentType')==='IAM_POLICY'?policies:all,assets=source.filter(a=>!types.size||types.has(a.assetType)),offset=Number(params.get('pageToken')??0),end=offset+PAGE;
   return {readTime:now.toISOString(),assets:assets.slice(offset,end),...(end<assets.length?{nextPageToken:String(end)}:{})};

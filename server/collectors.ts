@@ -3,7 +3,10 @@ import {CostRowSchema,type CollectionGap,type CostCoverage} from '../shared/sche
 import { finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
 import type { Activity, CostRow, HierarchyNode, IamAssignment } from '../shared/schema.js';
 import {noReport,type Report} from '../shared/collect.js';
-export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void};
+import {enrichAzureSizes,enrichGcpSizes} from './sku-lookup.js';
+import {costCoverageMessage} from '../shared/collectionView.js';
+import {costFailureReason} from './cost-failure.js';
+export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void;scopeCollectedAt?:Record<string,string>};
 // Change records cover a week: long enough to answer "who touched this", short enough to read in one pass.
 const ACTIVITY_DAYS=7,ACTIVITY_CAP=2000;
 const activitySince=(now=new Date())=>new Date(now.getTime()-ACTIVITY_DAYS*86_400_000);
@@ -107,6 +110,7 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
   if(!readable.length)throw new Error(warnings[0]??'Azure: 읽을 수 있는 구독이 없습니다.');
   report('scopes',{state:'done',detail:`구독 ${readable.length}개`});report('resources',{detail:'Resource Graph 조회'});
   const part=normalizeAzure(await azurePages(readable,token,request,AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`}),options),labels);
+  await enrichAzureSizes(part.resources,token,request,options);
   report('resources',{state:'done',detail:`자원 ${count(part.resources.length)}개`});
   part.warnings.push(...warnings);part.incomplete=subscriptions.filter(x=>!readable.includes(x));
   if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);
@@ -290,14 +294,33 @@ export async function collectAwsWith(runtime:AwsRuntime,regions:string[]=[],role
   const current=await runtime.identity(),roleName=process.env.ATLAS_AWS_ROLE_NAME,listed=parseAccounts(process.env.ATLAS_AWS_ACCOUNTS);
   const accounts=listed.length?listed:(hierarchy??[]).filter(n=>n.kind==='account').map(n=>({id:n.scope!,name:n.name}));
   const orgRoles=roleName&&!roles.length?accountRoles(accounts.some(a=>a.id===current)?accounts:[...accounts,{id:current,name:current}],roleName):[];
-  const targets=roles.length?roles:roleName?orgRoles:[undefined];
+  const targets=roles.length?[...roles]:roleName?orgRoles:[undefined];
   const idOf=(role:AwsRole|undefined)=>role?.roleArn.match(/::(\d+):/)?.[1]??role?.label??current;
+  // Missing scopes sort first; ties retain discovery order. Only successful runs advance age.
+  targets.sort((a,b)=>(Date.parse(options.scopeCollectedAt?.[idOf(a)]??'')||0)-(Date.parse(options.scopeCollectedAt?.[idOf(b)]??'')||0));
   const pending=new Set(targets.map(idOf));let regionsDone=0,accountsDone=0;
-  const result=()=>({...finish([...parts,{resources:[],links:[],warnings:[...warnings],scopeLabels:{},hierarchy,incomplete:[...new Set([...incomplete,...pending])],cost,costCoverage}]),collectedScopes:[...completed]});
+  const result=()=>({...finish([...parts,{resources:[],links:[],warnings:[...warnings],scopeLabels:{},hierarchy,incomplete:[...new Set([...incomplete,...pending])],cost,costCoverage}]),collectedScopes:[...completed],accountProgress:{completed:completed.size,total:targets.length}});
   const checkpoint=()=>options.checkpoint?.(result());
   report('scopes',{state:'done',detail:`계정 ${targets.length}개`});
   const accountLimit=Math.floor(positiveSetting(process.env.ATLAS_AWS_ACCOUNT_CONCURRENCY,3,8));
   const regionLimit=Math.floor(positiveSetting(process.env.ATLAS_AWS_REGION_CONCURRENCY,4,8));
+  // One organization-wide query uses the signed-in billing identity, independently of member roles.
+  if(options.withCost!==false){
+    costCoverage=[{provider:'aws',state:'failed',failedScopes:[],unit:'organization',reason:'skipped-timeout'}];
+    checkpoint();
+    report('cost',{detail:'조직 단위 Cost Explorer 조회'});
+    try{
+      cost=await runtime.cost();costCoverage=[{provider:'aws',state:'complete',failedScopes:[],unit:'organization'}];
+      report('cost',{state:'done',detail:`${count(cost.length)}행`});
+    }catch(e){
+      options.signal?.throwIfAborted();
+      costCoverage=[{provider:'aws',state:'failed',failedScopes:[],unit:'organization',reason:costFailureReason(e)}];
+      warnings.push(`AWS: ${costCoverageMessage(costCoverage[0])}`);
+      report('cost',{state:'failed',detail:costCoverageMessage(costCoverage[0])});
+    }
+    checkpoint();
+  }
+  report('resources',{detail:`완료 0 / 전체 ${targets.length}계정 · 첫 수집은 여러 회차가 필요할 수 있습니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`});
   await mapLimit(targets,accountLimit,async role=>{
     const id=idOf(role),who=role?.label??id,started=Date.now();
     try{
@@ -344,11 +367,7 @@ export async function collectAwsWith(runtime:AwsRuntime,regions:string[]=[],role
   report('iam',{state:'done'});report('activity',options.withActivity===false?{state:'skipped'}:{state:'done'});
   if(!hierarchy&&!listed.length)warnings.push('AWS: Organizations를 읽지 못해 계정을 평면으로 표시합니다. 관리 계정 또는 위임 관리자 권한이 필요합니다.');
   if(!roles.length&&!roleName&&accounts.some(a=>a.id!==current))warnings.push('AWS: 조직의 다른 계정은 미수집입니다. ATLAS_AWS_ROLE_NAME에 읽기 전용 역할을 지정하세요.');
-  if(options.withCost!==false){
-    report('cost',{detail:'Cost Explorer 조회'});
-    try{cost=await runtime.cost();costCoverage=[{provider:'aws',state:'complete',failedScopes:[]}];report('cost',{state:'done',detail:`${count(cost.length)}행`});}
-    catch(e){options.signal?.throwIfAborted();costCoverage=[{provider:'aws',state:'failed',failedScopes:[...new Set(targets.map(idOf))]}];warnings.push('AWS: 비용 일부 누락. Cost Explorer 속도 제한·네트워크·ce:GetCostAndUsage 권한을 확인하세요. 다음 수집에서 다시 조회합니다.');report('cost',{state:'failed',detail:'비용 조회 실패'});}
-  }
+
   return result();
 }
 export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:CollectOptions={}):Promise<Normalized>{
@@ -357,7 +376,7 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
   const single=async(module:any,Client:string,region:string,credentials:any,operation:string,input:any)=>{
     options.signal?.throwIfAborted();
     const client=new module[Client]({region,maxAttempts:Client==='CostExplorerClient'?1:3,credentials});
-    try{return await client.send(new module[`${operation}Command`](input),{abortSignal:options.signal});}finally{client.destroy();}
+    try{return await client.send(new module[`${operation}Command`](input),{abortSignal:Client==='CostExplorerClient'?AbortSignal.any([...(options.signal?[options.signal]:[]),AbortSignal.timeout(60_000)]):options.signal});}finally{client.destroy();}
   };
   return collectAwsWith({
     identity:async()=>{const {Account}=await single(sts,'STSClient',home,undefined,'GetCallerIdentity',{});if(!Account)throw new Error('AWS 계정 ID를 확인할 수 없습니다.');return Account;},
@@ -443,6 +462,7 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
   const report=options.report??noReport;
   report('resources',{detail:parent});
   const part=normalizeGcp(await gcpPages(parent,request,[],'RESOURCE',n=>report('resources',{detail:`${parent} · 자원 ${count(n)}개 읽음`})));
+  await enrichGcpSizes(part.resources,request,options);
   const projectNumbers=new Map<string,string>(),org:{domain?:string}={};
   if(!parent.startsWith('projects/'))try{part.hierarchy=await gcpHierarchy(parent,request,projectNumbers,org);}catch(e){part.warnings.push(`GCP: 조직 계층을 읽지 못해 프로젝트를 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
   // Empty projects are successful reads too. Keep their scope and tree node even
