@@ -10,6 +10,21 @@ import {FileSnapshotStore,type SnapshotStore} from './store.js';
 import {applySites,readSites} from './onprem.js';
 import {requireAccess,requireAdmin,restrictSnapshot,sessionRoutes,type AccessEntry} from './auth.js';
 import {collectorEnabled,readCollectionStatus,runCollection,type ProviderState} from './runner.js';
+import {compactInventory} from './inventory.js';
+import {sendPrivateJson} from './http-json.js';
+import {snapshotCache} from './snapshot-cache.js';
+import {projectSnapshot} from '../shared/presentation.js';
+const apiStores=new Map<string,FileSnapshotStore>();
+const apiStore=()=>{const root=process.env.SNAPSHOT_DIR??'data';let store=apiStores.get(root);if(!store){store=new FileSnapshotStore(root);apiStores.set(root,store);if(apiStores.size>8)apiStores.delete(apiStores.keys().next().value!);}return store;};
+const cachedLiveSnapshot=snapshotCache(liveSnapshot);
+const representations=new WeakMap<Snapshot,Map<string,object>>();
+function representation(snapshot:Snapshot,access:AccessEntry|undefined,part:string,fx:ReturnType<typeof parseFx>){
+  let values=representations.get(snapshot);if(!values){values=new Map();representations.set(snapshot,values);}
+  const key=JSON.stringify([access?.scopes??['*'],part,fx]);let value=values.get(key);
+  if(!value){value={...projectSnapshot(access?restrictSnapshot(snapshot,access.scopes):snapshot,part),fx};values.set(key,value);if(values.size>32)values.delete(values.keys().next().value!);}
+  return value;
+}
+const mockCache=new Map<string,{at:number;value:Promise<Snapshot>}>();
 const app=express();
 if(process.env.DATA_MODE&&!['mock','live'].includes(process.env.DATA_MODE))throw new Error('DATA_MODE must be mock or live');
 app.disable('x-powered-by');
@@ -27,12 +42,23 @@ export async function liveSnapshot(store:SnapshotStore=new FileSnapshotStore()){
     snapshots.push(s);byProvider.set(p,s);warnings.push(`${p}: 마지막 수집 ${s.collectedAt}`);
     const before=await store.previous(p);
     // A scope that could not be fully read says nothing about what changed in it, so its gaps are not reported as deletions or additions.
-    if(before){const after=new Set(s.incomplete),earlier=new Set(before.incomplete);changes.push(...diffResources(before.resources,s.resources).filter(c=>!(c.kind==='removed'&&after.has(c.scope))&&!(c.kind==='added'&&earlier.has(c.scope))));if(!since||before.collectedAt<since)since=before.collectedAt;}
+    if(before){
+      const after=new Set(s.incomplete),earlier=new Set(before.incomplete);
+      const old=s.inventoryMode==='summary'?compactInventory({...before,scopeLabels:before.scopeLabels},null,'summary').resources:before.resources;
+      const foldedRuleIds=new Set(s.resources.flatMap(r=>r.rules.flatMap(rule=>rule.id?[rule.id]:[])));
+      const oldById=new Map(before.resources.map(r=>[r.id,r]));
+      changes.push(...diffResources(old,s.resources).filter(c=>{
+        const prior=oldById.get(c.id);
+        const folded=prior?.type==='ec2:security-group-rule'&&foldedRuleIds.has(prior.nativeId.split('/').pop()!);
+        return !(c.kind==='removed'&&(after.has(c.scope)||folded))&&!(c.kind==='added'&&earlier.has(c.scope));
+      }));
+      if(!since||before.collectedAt<since)since=before.collectedAt;
+    }
   }
   if(!snapshots.length)return null;
   const resources=snapshots.flatMap(s=>s.resources),links=snapshots.flatMap(s=>s.links),scopeLabels=Object.assign({},...snapshots.map(s=>s.scopeLabels)),allWarnings=[...warnings,...snapshots.flatMap(s=>s.warnings)];
   applySites(await readSites(),resources,links,allWarnings,scopeLabels);
-  return validateSnapshot({version:1,mode:'live',collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),scopeCollectedAt:Object.assign({},...snapshots.map(s=>s.scopeCollectedAt)),cost:snapshots.flatMap(s=>s.cost),costCoverage:snapshots.flatMap(s=>s.costCoverage),collectionGaps:snapshots.flatMap(s=>s.collectionGaps),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
+  return validateSnapshot({version:1,mode:'live',collectedAt:snapshots.map(s=>s.collectedAt).sort()[0],resources,links,inventoryMode:snapshots.some(s=>s.inventoryMode==='summary')?'summary':undefined,inventorySummary:snapshots.flatMap(s=>s.inventorySummary),warnings:allWarnings,scopes:snapshots.flatMap(s=>s.scopes),scopeLabels,hierarchy:snapshots.flatMap(s=>s.hierarchy),scopeCollectedAt:Object.assign({},...snapshots.map(s=>s.scopeCollectedAt)),cost:snapshots.flatMap(s=>s.cost),costCoverage:snapshots.flatMap(s=>s.costCoverage),collectionGaps:snapshots.flatMap(s=>s.collectionGaps),activity:snapshots.flatMap(s=>s.activity),costAt:snapshots.map(s=>s.costAt).filter(Boolean).sort()[0],iam:snapshots.flatMap(s=>s.iam),incomplete:snapshots.flatMap(s=>s.incomplete),changes:since?{since,items:changes}:undefined,connections:(['azure','aws','gcp'] as const).map(p=>{
     const s=byProvider.get(p),run=status?.providers[p],state:Record<ProviderState,string>={idle:s?'collected':'missing',running:'running',ok:'collected',partial:'partial',failed:'failed',unauthenticated:'unauthenticated'};
     return{provider:p,status:run?state[run.state]:s?'collected':'missing',api:'수집 스냅샷',scopes:s?.scopes.length??0,collectedAt:s?.collectedAt,message:run?.message};
   })});
@@ -42,12 +68,17 @@ app.get('/api/topology',requireAccess,async(req,res)=>{
   try{
     // Rates are the operator's setting, applied when read, so changing .env takes effect without a new collection.
     const fx=parseFx(process.env);
-    if(process.env.DATA_MODE!=='live'){res.json({...await mockSnapshot(isScenario(req.query.scenario)?req.query.scenario:'standard'),fx});return;}
-    const snapshot=await liveSnapshot();
+    if(process.env.DATA_MODE!=='live'){
+      const scenario=isScenario(req.query.scenario)?req.query.scenario:'standard';
+      let cached=mockCache.get(scenario);
+      if(!cached||Date.now()-cached.at>30_000){cached={at:Date.now(),value:mockSnapshot(scenario)};mockCache.set(scenario,cached);}
+      await sendPrivateJson(req,res,representation(await cached.value,undefined,'full',fx));return;
+    }
+    const snapshot=await cachedLiveSnapshot(apiStore());
     if(!snapshot){res.status(503).json({error:process.env.VERCEL?'Vercel 배포는 수집을 실행하거나 결과를 저장할 수 없어 보여줄 스냅샷이 없습니다. 클라우드에 접근되는 PC나 서버에서 npm run live를 실행하세요.':'실제 스냅샷이 없습니다. npm run collect로 먼저 수집하세요. 목데이터로 자동 대체하지 않습니다.',onboarding:collectorEnabled()});return;}
     const access=res.locals.access as AccessEntry|undefined;
     audit(req,{actor:actorOf(req,access?.name),action:'view',target:'portal',detail:'인벤토리 조회'});
-    res.json({...(access?restrictSnapshot(snapshot,access.scopes):snapshot),fx});
+    await sendPrivateJson(req,res,representation(snapshot,access,String(req.query.part??'full'),fx));
   }catch(e){console.error('Snapshot load failed:',e instanceof Error?e.message:'unknown');res.status(500).json({error:'스냅샷 형식 또는 참조가 올바르지 않습니다. 서버 로그와 수집 결과를 확인하세요.'});}
 });
 app.get('/api/collect/status',requireAccess,requireAdmin,async(_req,res)=>{

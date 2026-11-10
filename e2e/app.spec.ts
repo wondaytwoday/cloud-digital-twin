@@ -25,7 +25,7 @@ test('official icons all load under the CSP',async({page})=>{
   expect(await page.locator('img').evaluateAll(imgs=>imgs.filter(i=>!(i as HTMLImageElement).naturalWidth).length)).toBe(0);
 });
 test('a slow earlier scenario cannot overwrite the current one',async({page})=>{
-  await page.route('**/api/topology?scenario=enterprise',async r=>{await new Promise(s=>setTimeout(s,800));await r.continue().catch(()=>{});});
+  await page.route('**/api/topology?scenario=enterprise*',async r=>{await new Promise(s=>setTimeout(s,800));await r.continue().catch(()=>{});});
   await page.goto('/?scenario=standard&view=scopes');await page.waitForSelector('.scope-tree');
   const pick=page.getByLabel('예시 아키텍처');await pick.selectOption('enterprise');await pick.selectOption('single-vm');await page.waitForTimeout(1300);
   await expect.poll(async()=>Number(await page.locator('.home-stats dd').nth(1).textContent())).toBeLessThan(20);

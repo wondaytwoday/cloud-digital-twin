@@ -1,4 +1,7 @@
-import {positiveSetting} from './async.js';
+import {compactInventory} from './inventory.js';
+import {RequestGate} from './request-gate.js';
+import {proxyConfigured} from './request-error.js';
+import {positiveSetting,mapLimit} from './async.js';
 import {retainIncomplete} from './reconcile.js';
 import {costCoverageMessage} from '../shared/collectionView.js';
 import {classificationSummary} from '../shared/classification.js';
@@ -67,13 +70,13 @@ const realDrivers:CollectorDrivers={
   },
   gcp:{
     detect:async()=>{const {GoogleAuth}=await import('google-auth-library'),auth=new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}),client=await auth.getClient();await client.getAccessToken();return 'Application Default Credentials';},
-    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(async(url,init)=>{const response=await client.request({url,timeout:60_000,signal:options.signal,retryConfig:{retry:url.startsWith('https://bigquery.googleapis.com/')?0:3},...(init?{method:init.method as 'POST',data:init.data}:{})});return response.data;},options);},
+    collect:async options=>{const {GoogleAuth}=await import('google-auth-library'),client=await new GoogleAuth({scopes:['https://www.googleapis.com/auth/cloud-platform']}).getClient();return collectGcpAuto(async(url,init)=>{const work=()=>client.request({url,timeout:60_000,signal:options.signal,retryConfig:{retry:url.startsWith('https://bigquery.googleapis.com/')?0:3},...(init?{method:init.method as 'POST',data:init.data}:{})});const response=await (options.requests?options.requests.run(work,options.signal):work());return response.data;},options);},
   },
 };
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string,scopeCollectedAt:Record<string,string>={})=>validateSnapshot({version:1,scopeCollectedAt,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
+export const toSnapshot=(result:Normalized,costAt?:string,scopeCollectedAt:Record<string,string>={})=>validateSnapshot({version:1,scopeCollectedAt,inventoryMode:result.inventoryMode,inventorySummary:result.inventorySummary,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
 let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
 export const liveStatus=()=>current?live:undefined;
 const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
@@ -100,12 +103,14 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
   current=(async()=>{
     const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
     const selected=options.providers??PROVIDERS;
+    const requests=new RequestGate(Math.max(1,Math.floor(positiveSetting(process.env.ATLAS_REQUEST_CONCURRENCY,proxyConfigured()?4:8,32))));
+    const providerLimit=Math.max(1,Math.floor(positiveSetting(process.env.ATLAS_PROVIDER_CONCURRENCY,proxyConfigured()?1:2,3)));
     for(const p of selected)status.providers[p]={...status.providers[p],state:'running',message:undefined,slowStages:[],stages:newStages(p)};
     // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
     let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
     const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
     await store.writeStatus(status);
-    await Promise.all(selected.map(async p=>{
+    await mapLimit(selected,providerLimit,async p=>{
       const at=()=>new Date().toISOString(),driver=drivers[p];
       const report:Report=(id,patch={})=>{
         const stage=status.providers[p].stages?.find(s=>s.id===id);
@@ -133,11 +138,14 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
       let latestCheckpoint:Normalized|undefined;
       try{
         const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity;
-        const withCost=!previous?.costCoverage.some(c=>c.provider===p)||!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
+        // Older versions marked an empty GCP export complete. Do not let that
+        // cached result suppress the first read after this fix for 24 hours.
+        const emptyGcp=p==='gcp'&&process.env.ATLAS_GCP_ALLOW_EMPTY_COST!=='1'&&!previous?.cost.some(c=>c.provider==='gcp');
+        const withCost=emptyGcp||!previous?.costCoverage.some(c=>c.provider===p)||!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
         if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
         const scopeCollectedAt:Record<string,string>={...Object.fromEntries((previous?.scopes??[]).filter(s=>!previous?.incomplete.includes(s)).map(s=>[s,previous!.collectedAt])),...previous?.scopeCollectedAt};
         const controller=new AbortController();let checkpoint:Normalized|undefined,timedOut=false;
-        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,scopeCollectedAt,
+        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,scopeCollectedAt,requests,
           report:(id,patch)=>{if(!controller.signal.aborted)report(id,patch);},
           checkpoint:value=>{if(!controller.signal.aborted){checkpoint=structuredClone(value);latestCheckpoint=checkpoint;}},
         }));
@@ -168,12 +176,12 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
         }
         for(const scope of result.collectedScopes??[])scopeCollectedAt[scope]=at();
         const progress=result.accountProgress;
-        result=retainIncomplete(result,previous);
+        result=compactInventory(retainIncomplete(result,previous),previous);
         // Drop timestamps for scopes no longer in the discovered/saved collection.
         const kept=new Set([...result.collectedScopes??[],...result.incomplete??[]]);
         for(const scope of Object.keys(scopeCollectedAt))if(!kept.has(scope))delete scopeCollectedAt[scope];
         report('save');await store.save(p,toSnapshot(result,costAt,scopeCollectedAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
-        const missing=result.incomplete?.length??0,costProblem=result.costCoverage?.find(c=>c.provider===p&&['failed','partial'].includes(c.state));
+        const missing=result.incomplete?.length??0,costProblem=result.costCoverage?.find(c=>c.provider===p&&['failed','partial','pending'].includes(c.state));
         const message=[missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:'',costProblem?`비용 일부 누락 · ${costCoverageMessage(costProblem)} 이전 비용이 있으면 유지합니다.`:'',timedOut?`수집 시간 초과 · 완료 ${progress?.completed??0} / 전체 ${progress?.total??0}계정. 다음 수집에서 미수집·오래된 계정부터 이어서 진행합니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`:''].filter(Boolean).join(' ');
         status.providers[p]={...status.providers[p],state:missing||costProblem||timedOut?'partial':'ok',at:at(),resources:result.resources.length,message:message||undefined,stages:settleStages(status.providers[p].stages,'done')};
         log(`${p}: 자원 ${result.resources.length}개 저장${message?` · ${message}`:''}`);
@@ -186,7 +194,7 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
         status.providers[p]={...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);
       }
       await persist(true);
-    }));
+    });
     status.running=false;status.finishedAt=new Date().toISOString();await writing;await store.writeStatus(status);
     return status;
   })().finally(()=>{current=undefined;});

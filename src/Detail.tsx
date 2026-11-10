@@ -24,7 +24,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
   const ancestry=new Set([r.id]);for(let p=r.parent;p;p=snapshot.resources.find(x=>x.id===p)?.parent)ancestry.add(p);
   const appliedPolicies=snapshot.links.filter(e=>e.kind==='policy'&&ancestry.has(e.target)).map(e=>snapshot.resources.find(x=>x.id===e.source)!);
   const policies=[...new Map(appliedPolicies.map(p=>[p.id,p])).values()];
-  const access=snapshot.iam.filter(a=>a.scope===r.scope);
+  const access=snapshot.iam.filter(a=>a.scope===r.scope&&(!a.targetResource||a.targetResource===r.id));
   const change=snapshot.changes?.items.find(c=>c.id===r.id);
   const routes=[r,...[...ancestry].map(id=>snapshot.resources.find(x=>x.id===id)).filter((x):x is Resource=>!!x)].find(x=>x.routes.length)?.routes??[];
   const copy=async()=>{try{await navigator.clipboard.writeText(r.nativeId);setCopied(true)}catch{setCopied(false)}};

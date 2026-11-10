@@ -2,20 +2,22 @@ import {isAuxiliary,isNetworkResource} from '../shared/classification';
 import type {ElkNode} from 'elkjs/lib/elk-api';
 import type {Link,Resource,ResourceKind,Snapshot} from '../shared/schema';
 import {adjacency,distances,findPath,health,ingressIds} from '../shared/topology';
-export type Variant='provider'|'region'|'network'|'subnet';
+export type Variant='provider'|'region'|'network'|'subnet'|'workload';
 export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;workloads?:boolean;expanded:Set<string>};
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
-export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean};
+export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation'|'reference';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean};
 export type Topology={nodes:Placed[];edges:Bundle[];rollup:(id:string)=>string|undefined};
 export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'Amazon Web Services',gcp:'Google Cloud',onprem:'On-premises'};
 export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
-const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40};
+const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40,workload:40};
 const kindOrder:ResourceKind[]=['gateway','endpoint','appliance','loadbalancer','nat','cluster','compute','database','storage','service','dns','monitoring','security','logging','analytics','configuration','application','firewall','external','subnet','network','onprem'];
+export const workloadGroupId=(r:Resource)=>`workloads:${JSON.stringify([r.provider,r.scope,r.parent??r.region,r.kind])}`;
+export const isolatedWorkloads=(snapshot:Snapshot)=>{const connected=new Set(snapshot.links.flatMap(l=>[l.source,l.target]));return snapshot.resources.filter(r=>!isNetworkResource(r)&&!isAuxiliary(r)&&!r.parent&&!connected.has(r.id));};
 export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
@@ -44,11 +46,24 @@ function buildItems(snapshot:Snapshot,f:Filter){
   const regionsOf=new Map<string,Set<string>>();
   for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(r.provider)??regionsOf.set(r.provider,new Set()).get(r.provider)!).add(r.region);
   const topLevel=(r:Resource)=>(regionsOf.get(r.provider)?.size??0)>=2&&regionsOf.get(r.provider)!.has(r.region)?ensure({id:regionId(r),parent:provider(r.provider),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):provider(r.provider);
+  const isolated=new Set(isolatedWorkloads(snapshot).map(r=>r.id));
   for(const r of keep.values()){
+    if(isolated.has(r.id))continue;
     if(isAuxiliary(r)||(!f.workloads&&!isNetworkResource(r))||(r.kind==='service'&&f.workloads!==true)||(r.kind==='firewall'&&!f.policy))continue;
     if(r.provider==='onprem'){ensure({id:r.id,resource:r,label:r.name,provider:r.provider});continue;}
     const container=r.kind==='network'||r.kind==='subnet';
     ensure({id:r.id,parent:r.parent&&keep.has(r.parent)?r.parent:topLevel(r),resource:r,variant:container?r.kind as Variant:undefined,label:r.name,subtitle:r.cidr,provider:r.provider,outOfScope:outside.has(r.id)});
+  }
+  if(f.workloads){
+    const groups=new Map<string,Item[]>();
+    for(const item of items.values())if(item.resource&&!isNetworkResource(item.resource)){
+      const key=workloadGroupId(item.resource);const group=groups.get(key);if(group)group.push(item);else groups.set(key,[item]);
+    }
+    for(const [id,members] of groups)if(members.length>=4){
+      const first=members[0];
+      items.set(id,{id,parent:first.parent,variant:'workload',label:`${({compute:'VM',storage:'스토리지',database:'데이터베이스',cluster:'클러스터',security:'보안 주체',application:'애플리케이션'} as Record<string,string>)[first.resource!.kind]??'워크로드'} · ${members.length}개`,subtitle:'구성 워크로드 묶음 · 클릭해 펼치기',provider:first.provider});
+      for(const member of members)member.parent=id;
+    }
   }
   return items;
 }
@@ -81,7 +96,7 @@ function cachedLayout(input:ElkNode){
   if(!hit){hit=elk().then(engine=>engine.layout(input));layoutCache.set(key,hit);hit.catch(()=>layoutCache.delete(key));if(layoutCache.size>60)layoutCache.delete(layoutCache.keys().next().value!);}
   return hit;
 }
-const bundleKind=(links:Link[],hybrid:boolean):Bundle['kind']=>hybrid?'hybrid':links.some(l=>l.kind==='peering')?'peering':links.some(l=>l.kind==='attachment')?'attachment':links.some(l=>l.kind==='policy')?'policy':'simulation';
+const bundleKind=(links:Link[],hybrid:boolean):Bundle['kind']=>hybrid?'hybrid':links.some(l=>l.kind==='peering')?'peering':links.some(l=>l.kind==='attachment')?'attachment':links.some(l=>l.kind==='policy')?'policy':links.some(l=>l.kind==='reference')?'reference':'simulation';
 export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
   const items=buildItems(snapshot,f),children=new Map<string,string[]>();
   for(const it of items.values())if(it.parent)(children.get(it.parent)??children.set(it.parent,[]).get(it.parent)!).push(it.id);

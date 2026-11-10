@@ -38,3 +38,16 @@ test('a network endpoint is a visible leaf, never a VPC or subnet boundary',asyn
   assert.ok(node);assert.equal(node.item.variant,undefined);assert.equal(node.expandable,false);
   assert.equal(topology.edges.length,0,'inventory classification does not invent paths');
 });
+test('large workload fleets start in collapsed groups and isolated inventory remains off the map',async()=>{
+  const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-10T00:00:00Z',resources:[
+    {id:'vpc',nativeId:'vpc',name:'vpc',provider:'aws',kind:'network',type:'AWS::EC2::VPC',scope:'111111111111',region:'r',source:'fake'},
+    {id:'subnet',nativeId:'subnet',name:'subnet',parent:'vpc',provider:'aws',kind:'subnet',type:'AWS::EC2::Subnet',scope:'111111111111',region:'r',source:'fake'},
+    ...Array.from({length:100},(_,i)=>({id:`vm-${i}`,nativeId:`vm-${i}`,name:`vm-${i}`,parent:'subnet',provider:'aws',kind:'compute',type:'AWS::EC2::Instance',scope:'111111111111',region:'r',source:'fake'})),
+    {id:'isolated',nativeId:'isolated',name:'isolated',provider:'aws',kind:'service',type:'future:type',scope:'111111111111',region:'r',source:'fake'},
+  ],links:[],scopes:['111111111111'],warnings:[]});
+  const expanded=defaultExpanded(snapshot,2),filter={provider:'all',scopes:null,policy:false,flow:false,workloads:true,expanded};
+  const grouped=await computeTopology(snapshot,filter),group=grouped.nodes.find(n=>n.item.variant==='workload')!;
+  assert.ok(group);assert.equal(group.summary.total,100);assert.equal(group.collapsed,true);assert.ok(grouped.nodes.length<10);assert.ok(!grouped.nodes.some(n=>n.id==='isolated'));
+  expanded.add(group.id);const opened=await computeTopology(snapshot,filter);assert.equal(opened.nodes.filter(n=>n.item.resource?.kind==='compute').length,100);
+  assert.equal(opened.edges.length,0,'containment does not create workload communication edges');
+});

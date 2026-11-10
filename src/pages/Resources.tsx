@@ -1,6 +1,6 @@
 import {CollectionNotice} from '../CollectionNotice';
 import {isAuxiliary} from '../../shared/classification';
-import {useMemo,useState} from 'react';
+import {useMemo,useState,useEffect} from 'react';
 import {Bar,BarChart,CartesianGrid,Cell,Label,Pie,PieChart,XAxis,YAxis,Area,AreaChart} from 'recharts';
 import {ArrowDown,ArrowUp,ArrowUpRight,Cpu,HardDrive,MemoryStick,Server,Boxes,Gauge,Activity} from 'lucide-react';
 import type {Resource,Snapshot} from '../../shared/schema';
@@ -111,16 +111,20 @@ function EngineChart({rows}:{rows:Resource[]}){
 }
 type SortKey='name'|'provider'|'kind'|'scope'|'address'|'region'|'status'|'size';
 function Inventory({snapshot,rows,onOpen}:{snapshot:Snapshot;rows:Resource[];onOpen:(r:Resource)=>void}){
+  const [page,setPage]=useState(0);
   const [kind,setKind]=useState('all'),[state,setState]=useState('all'),[sort,setSort]=useState<{key:SortKey;dir:1|-1}>({key:'name',dir:1});
   const value=(r:Resource,key:SortKey)=>key==='scope'?snapshot.scopeLabels[r.scope]??r.scope:key==='address'?r.ip??r.cidr??'':key==='kind'?kindNames[r.kind]:key==='size'?r.specs['인스턴스']??r.specs['종류']??'':r[key];
   const kinds=[...new Set(rows.map(r=>r.kind))].sort(),present=(Object.keys(healthLabel) as Health[]).filter(h=>rows.some(r=>health(r.status)===h));
   const shown=rows.filter(r=>(kind==='all'||r.kind===kind)&&(state==='all'||health(r.status)===state)).sort((a,b)=>sort.dir*value(a,sort.key).localeCompare(value(b,sort.key),'ko',{numeric:true}));
+  useEffect(()=>setPage(0),[rows,kind,state,sort]);
+  const paged=shown.slice(page*100,(page+1)*100);
   const head=(key:SortKey,label:string)=><TableHead aria-sort={sort.key===key?(sort.dir===1?'ascending':'descending'):undefined}><button className="inline-flex items-center gap-1 font-medium hover:text-foreground" onClick={()=>setSort(s=>({key,dir:s.key===key?(s.dir===1?-1:1):1}))}>{label}{sort.key===key&&(sort.dir===1?<ArrowUp size={12}/>:<ArrowDown size={12}/>)}</button></TableHead>;
   const select='h-8 rounded-md border border-input bg-card px-2 text-sm';
   return <Panel title="리소스 목록" description={`${shown.length} / ${rows.length}개`} action={<div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><label className="flex items-center gap-1.5">유형<select className={select} value={kind} onChange={e=>setKind(e.target.value)}><option value="all">전체</option>{kinds.map(k=><option key={k} value={k}>{kindNames[k]}</option>)}</select></label><label className="flex items-center gap-1.5">상태<select className={select} value={state} onChange={e=>setState(e.target.value)}><option value="all">전체</option>{present.map(h=><option key={h} value={h}>{healthLabel[h]}</option>)}</select></label></div>}>
     <div className="max-h-[560px] overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_var(--line)]"><TableRow>{head('name','리소스')}{head('provider','클라우드')}{head('kind','유형')}{head('size','크기·종류')}{head('scope','소유 범위')}{head('address','주소')}{head('region','위치')}{head('status','상태')}</TableRow></TableHeader>
-      <TableBody>{shown.map(r=>{const mappable=r.kind!=='service';return <TableRow key={r.id}><TableCell>{mappable?<button className="inline-flex items-center gap-2 font-medium hover:text-primary" onClick={()=>onOpen(r)} title="토폴로지에서 보기"><ResourceIcon resource={r} size={18}/>{r.name}<ArrowUpRight size={12} className="text-muted-foreground"/></button>:<span className="inline-flex items-center gap-2 font-medium"><ResourceIcon resource={r} size={18}/>{r.name}</span>}</TableCell><TableCell>{providerLabel[r.provider]}</TableCell><TableCell>{kindNames[r.kind]}</TableCell><TableCell className="font-mono text-xs">{r.specs['인스턴스']??r.specs['종류']??'—'}</TableCell><TableCell className="max-w-[200px] truncate">{snapshot.scopeLabels[r.scope]??r.scope}</TableCell><TableCell className="font-mono text-xs">{r.ip??r.cidr??'—'}</TableCell><TableCell>{r.region}</TableCell><TableCell><StatusBadge status={r.status}/></TableCell></TableRow>;})}</TableBody></Table>
+      <TableBody>{paged.map(r=>{const mappable=r.kind!=='service';return <TableRow key={r.id}><TableCell>{mappable?<button className="inline-flex items-center gap-2 font-medium hover:text-primary" onClick={()=>onOpen(r)} title="토폴로지에서 보기"><ResourceIcon resource={r} size={18}/>{r.name}<ArrowUpRight size={12} className="text-muted-foreground"/></button>:<span className="inline-flex items-center gap-2 font-medium"><ResourceIcon resource={r} size={18}/>{r.name}</span>}</TableCell><TableCell>{providerLabel[r.provider]}</TableCell><TableCell>{kindNames[r.kind]}</TableCell><TableCell className="font-mono text-xs">{r.specs['인스턴스']??r.specs['종류']??'—'}</TableCell><TableCell className="max-w-[200px] truncate">{snapshot.scopeLabels[r.scope]??r.scope}</TableCell><TableCell className="font-mono text-xs">{r.ip??r.cidr??'—'}</TableCell><TableCell>{r.region}</TableCell><TableCell><StatusBadge status={r.status}/></TableCell></TableRow>;})}</TableBody></Table>
       {!shown.length&&<p className="p-6 text-center text-sm text-muted-foreground">조건에 맞는 자원이 없습니다.</p>}</div>
+    {shown.length>100&&<div className="page-actions" role="group" aria-label="리소스 페이지"><button className="button" disabled={page===0} onClick={()=>setPage(n=>n-1)}>이전 페이지</button><span>{page+1} / {Math.ceil(shown.length/100)} · 전체 {shown.length}개</span><button className="button" disabled={(page+1)*100>=shown.length} onClick={()=>setPage(n=>n+1)}>다음 페이지</button></div>}
   </Panel>;
 }
 export function ResourcesPage({snapshot,focus,query,onOpen}:{snapshot:Snapshot;focus:Focus;query:string;onOpen:(r:Resource)=>void}){
@@ -129,9 +133,14 @@ export function ResourcesPage({snapshot,focus,query,onOpen}:{snapshot:Snapshot;f
   const scoped=useMemo(()=>snapshot.resources.filter(r=>inScope(focus,r.provider,r.scope)&&(showAuxiliary||!isAuxiliary(r))&&(!q||`${r.name} ${r.ip??''} ${r.cidr??''} ${r.type} ${snapshot.scopeLabels[r.scope]??''}`.toLowerCase().includes(q))),[snapshot,focus,q,showAuxiliary]);
   const rows=category==='all'?scoped:scoped.filter(r=>categoryOf(r.kind)===category);
   const vms=scoped.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms),sizeIssues=capacityIssues(vms),states=statusCounts(scoped);
+  const summaries=snapshot.inventorySummary.filter(s=>inScope(focus,s.provider,s.scope));
+  const unknown=countBy(scoped.filter(r=>r.kind==='service'),r=>`${providerLabel[r.provider]} · ${r.type}`).slice(0,10);
   const counts=Object.fromEntries(CATEGORIES.map(c=>[c.id,scoped.filter(r=>categoryOf(r.kind)===c.id).length]));
   return <div className="page"><header className="page-head"><div><h1>리소스</h1><p>{live?'':'예시 데이터입니다. '}종류별 현황과 VM 용량·사용률을 봅니다. 이름을 누르면 토폴로지에서 위치를 보여줍니다.</p></div><div className="page-actions">{q&&<Badge variant="secondary">검색: {query}</Badge>}<label><input type="checkbox" checked={showAuxiliary} onChange={e=>setShowAuxiliary(e.target.checked)}/> 구성 부속물 포함</label></div></header>
     <CollectionNotice snapshot={snapshot} focus={focus}/>
+    {!!summaries.length&&<div className="notice page-notice" role="status"><p>구성 부속물 {summaries.reduce((n,s)=>n+s.count,0).toLocaleString('ko-KR')}개는 범위·타입별 요약으로 보관했습니다. 구성 부속물 포함을 켜면 요약과 예시를 확인할 수 있습니다. 전체 레코드는 상세 수집 모드에서 수집합니다.</p></div>}
+    {showAuxiliary&&!!summaries.length&&<details className="collection-notice" open><summary>구성 요소 요약 · {summaries.length}개 타입</summary><ul>{summaries.slice(0,100).map(s=><li key={`${s.provider}:${s.scope}:${s.type}`}>{providerLabel[s.provider]} · {s.type}: {s.count}개 · Tier {s.tier}{s.retained?` · 이전 요약 유지${s.collectedAt?` (${new Date(s.collectedAt).toLocaleString('ko-KR')})`:''}`:''}<small> · 예시: {s.examples.map(e=>e.name).join(', ')}</small></li>)}</ul>{summaries.length>100&&<p>앞의 100개 타입을 표시합니다. 관리 범위를 좁혀 확인하세요.</p>}</details>}
+    {!!unknown.length&&<details className="collection-notice"><summary>미분류 타입 상위 {unknown.length}개</summary><ul>{unknown.map(([type,count])=><li key={type}>{type}: {count}개</li>)}</ul></details>}
     {sizeIssues.length>0&&<div className="notice warn page-notice" role="status"><p><strong>VM 용량 확인 필요 · </strong>{sizeIssues.map(c=>`${c.reason} ${c.count}대`).join(' / ')}. 실행 중 VM에서 확인되지 않은 vCPU·메모리 값은 합계에서 제외됩니다. 자원 상세의 크기 조회 사유를 확인하세요.</p></div>}
     <div className="shad grid grid-cols-[minmax(0,1fr)] gap-3">
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6" aria-label="리소스 지표">

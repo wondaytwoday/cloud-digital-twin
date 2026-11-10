@@ -3,7 +3,7 @@ import {health} from './topology.js';
 export type ScopeStats={resources:number;networks:number;warn:number;stopped:number};
 export type ScopeIndex={nodes:Map<string,HierarchyNode>;children:Map<string,HierarchyNode[]>;roots:Record<string,HierarchyNode[]>;stats:Map<string,ScopeStats>;scopesUnder:(id:string)=>string[];pathTo:(id:string)=>HierarchyNode[]};
 const blank=():ScopeStats=>({resources:0,networks:0,warn:0,stopped:0});
-export function buildScopeIndex(hierarchy:HierarchyNode[],resources:Resource[]):ScopeIndex{
+export function buildScopeIndex(hierarchy:HierarchyNode[],resources:Resource[],scopeStats?:Record<string,ScopeStats>):ScopeIndex{
   const nodes=new Map(hierarchy.map(n=>[n.id,n])),children=new Map<string,HierarchyNode[]>(),roots:Record<string,HierarchyNode[]>={azure:[],aws:[],gcp:[]};
   // Groups first, then scopes by name: the tree reads top-down the way the CSP consoles do.
   const sorted=[...hierarchy].sort((a,b)=>Number(!!a.scope)-Number(!!b.scope)||a.name.localeCompare(b.name));
@@ -15,6 +15,7 @@ export function buildScopeIndex(hierarchy:HierarchyNode[],resources:Resource[]):
     if(r.kind==='network')s.networks++;
     if(r.kind!=='firewall'&&r.kind!=='subnet'){const h=health(r.status);if(h==='warn')s.warn++;if(h==='stopped')s.stopped++;}
   }
+  if(scopeStats){byScope.clear();for(const [scope,stats] of Object.entries(scopeStats))byScope.set(scope,stats);}
   const stats=new Map<string,ScopeStats>();
   const roll=(n:HierarchyNode):ScopeStats=>{
     const total=blank(),own=n.scope?byScope.get(n.scope):undefined;
