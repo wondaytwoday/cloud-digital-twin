@@ -1,3 +1,4 @@
+import {assetTypes,azureResourceQuery,hasResourceItems,resourceItem,awsStorageTypes,type CollectionItem} from '../shared/collection-items.js';
 import {fetchRetry,mapLimit,positiveSetting,retry,wait,type Wait} from './async.js';
 import {CostRowSchema,type CollectionGap,type CostCoverage} from '../shared/schema.js';
 import { finish,normalizeAwsIam,normalizeAzure,normalizeAzureIam,normalizeAws,normalizeGcp,normalizeGcpIam,scopeNodeId,type Normalized } from './normalize.js';
@@ -8,9 +9,19 @@ import {costCoverageMessage} from '../shared/collectionView.js';
 import {requestAdvice} from './request-error.js';
 import type {RequestGate} from './request-gate.js';
 import {costFailureReason} from './cost-failure.js';
-export type CollectOptions={withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void;scopeCollectedAt?:Record<string,string>;requests?:RequestGate};
+export type CollectOptions={items?:CollectionItem[];withIam?:boolean;withCost?:boolean;withActivity?:boolean;report?:Report;signal?:AbortSignal;wait?:Wait;checkpoint?:(result:Normalized)=>void;checkpointLazy?:(materialize:()=>Normalized)=>void;scopeCollectedAt?:Record<string,string>;requests?:RequestGate};
+// Shared by every per-account SDK dispatcher, including EC2/ELB/RDS. The gate
+// must surround each request, not a whole account that makes nested requests.
+export function awsServiceCaller(clients:Record<string,{send:(command:any,options:{abortSignal?:AbortSignal})=>Promise<any>}>,modules:Record<string,any>,options:Pick<CollectOptions,'signal'|'requests'>):AwsCaller{
+  return(service,operation,input={})=>{
+    options.signal?.throwIfAborted();
+    const send=()=>clients[service].send(new modules[service][`${operation}Command`](input),{abortSignal:options.signal});
+    return options.requests?options.requests.run(send,options.signal):send();
+  };
+}
 // Change records cover a week: long enough to answer "who touched this", short enough to read in one pass.
 const ACTIVITY_DAYS=7,ACTIVITY_CAP=2000;
+export type ActivityRows=Activity[]&{truncatedScopes?:string[]};
 const activitySince=(now=new Date())=>new Date(now.getTime()-ACTIVITY_DAYS*86_400_000);
 const lastSegment=(id:string)=>id.split('/').filter(Boolean).pop()??id;
 const count=(n:number)=>n.toLocaleString('ko-KR');
@@ -84,12 +95,13 @@ export async function azureCost(subscriptions:string[],token:()=>Promise<string>
   return{rows,failed};
 }
 // Activity Log keeps writes, deletes and actions per subscription; only the final Succeeded/Failed record of each operation is kept.
-export async function azureActivity(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,now=new Date()):Promise<Activity[]>{
-  const out:Activity[]=[],since=activitySince(now).toISOString();
+export async function azureActivity(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,now=new Date()):Promise<ActivityRows>{
+  const out:ActivityRows=[],since=activitySince(now).toISOString(),truncatedScopes:string[]=[];
   for(const sub of subscriptions){
     const filter=encodeURIComponent(`eventTimestamp ge '${since}' and eventTimestamp le '${now.toISOString()}'`);
-    let url:string|undefined=`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&$filter=${filter}&$select=eventTimestamp,caller,operationName,resourceId,status,eventDataId,httpRequest,claims`;let kept=0;
+    let url:string|undefined=`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}/providers/Microsoft.Insights/eventtypes/management/values?api-version=2015-04-01&$filter=${filter}&$select=eventTimestamp,caller,operationName,resourceId,status,eventDataId,httpRequest,claims`;let kept=0;const seen=new Set<string>();
     while(url&&kept<ACTIVITY_CAP){
+      if(seen.has(url)||new URL(url).origin!=='https://management.azure.com')throw new Error('Azure Activity Log: invalid continuation URL');seen.add(url);
       const r:Response=await request(url,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(60_000)});if(!r.ok)throw new Error(`Activity Log 조회 실패 (${r.status})`);
       const body:any=await r.json();
       for(const e of body.value??[]){
@@ -100,7 +112,9 @@ export async function azureActivity(subscriptions:string[],token:()=>Promise<str
       }
       url=body.nextLink;
     }
+    if(url)truncatedScopes.push(sub);
   }
+  if(truncatedScopes.length)out.truncatedScopes=truncatedScopes;
   return out;
 }
 export async function collectAzureWith(subscriptions:string[],token:()=>Promise<string>,request:typeof fetch=fetch,options:CollectOptions&{graphToken?:()=>Promise<string>}={}):Promise<Normalized>{
@@ -111,22 +125,24 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
   for(const sub of subscriptions){report('scopes',{detail:'구독 접근 확인',done:checked++,total:subscriptions.length});const r=await request(`https://management.azure.com/subscriptions/${encodeURIComponent(sub)}?api-version=2022-12-01`,{headers:{Authorization:`Bearer ${await token()}`},signal:AbortSignal.timeout(30_000)});if(!r.ok){warnings.push(`Azure 구독 ${sub}: 접근 확인 실패 (${r.status}), 건너뜁니다.`);continue;}readable.push(sub);const body=await r.json();labels[sub]=body.displayName??sub;if(body.tenantId)tenantIds.add(body.tenantId);}
   if(!readable.length)throw new Error(warnings[0]??'Azure: 읽을 수 있는 구독이 없습니다.');
   report('scopes',{state:'done',detail:`구독 ${readable.length}개`});report('resources',{detail:'Resource Graph 조회'});
-  const part=normalizeAzure(await azurePages(readable,token,request,AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`}),options),labels);
+  const part=normalizeAzure(options.items&&!hasResourceItems(options.items)?[]:await azurePages(readable,token,request,options.items?azureResourceQuery(AZURE_RESOURCES,options.items):AZURE_RESOURCES,n=>report('resources',{detail:`자원 ${count(n)}개 읽음`}),options),labels);
   await enrichAzureSizes(part.resources,token,request,options);
   report('resources',{state:'done',detail:`자원 ${count(part.resources.length)}개`});
   part.warnings.push(...warnings);part.incomplete=subscriptions.filter(x=>!readable.includes(x));
   if(tenantIds.size>1)part.warnings.push(`Azure: 구독이 ${tenantIds.size}개 테넌트에 걸쳐 있어 첫 테넌트의 관리 그룹만 표시합니다.`);
-  try{part.hierarchy=await azureHierarchy(token,request,[...tenantIds][0]);}catch(e){part.warnings.push(`Azure: 관리 그룹을 읽지 못해 구독을 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
+  try{part.hierarchy=await azureHierarchy(token,request,[...tenantIds][0]);}catch(e){options.signal?.throwIfAborted();part.warnings.push(`Azure: 관리 그룹을 읽지 못해 구독을 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
   part.collectedScopes=[...readable];part.hierarchy??=[];
   for(const scope of readable)if(!part.hierarchy.some(n=>n.scope===scope))part.hierarchy.push({id:scopeNodeId('azure',scope),name:labels[scope]??scope,provider:'azure',kind:'subscription',nativeId:scope,scope});
+  if(options.withIam!==false){
   report('iam',{detail:'역할 할당 조회'});
   try{
     const rows=await azurePages(readable,token,request,AZURE_IAM,undefined,options),ids=[...new Set(rows.filter(r=>r.type.toLowerCase().endsWith('roleassignments')).map(r=>String(r.properties?.principalId).toLowerCase()))];
     let names=new Map<string,string>();
     try{names=await azureDisplayNames(ids,options.graphToken,request);}catch{part.warnings.push('Azure: Microsoft Graph 조회 권한이 없어 IAM 주체를 ID로 표시합니다.');}
     part.iam=normalizeAzureIam(rows,names);report('iam',{state:'done',detail:`할당 ${count(part.iam.length)}건`});
-  }catch(e){part.iamIncomplete=[...readable];part.warnings.push(requestAdvice('Azure IAM',e,'Reader'));report('iam',{state:'failed',detail:requestAdvice('Azure IAM',e,'Reader')});}
-  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(requestAdvice('Azure Activity Log',e,'Reader'));report('activity',{state:'failed',detail:requestAdvice('Azure Activity Log',e,'Reader')});}}else report('activity',{state:'skipped'});
+  }catch(e){options.signal?.throwIfAborted();part.iamIncomplete=[...readable];part.warnings.push(requestAdvice('Azure IAM',e,'Reader'));report('iam',{state:'failed',detail:requestAdvice('Azure IAM',e,'Reader')});}
+  }else report('iam',{state:'skipped'});
+  if(options.withActivity!==false){report('activity',{detail:'Activity Log 조회'});try{part.activity=await azureActivity(readable,token,request);if((part.activity as ActivityRows).truncatedScopes?.length){part.activityLimited=(part.activity as ActivityRows).truncatedScopes;part.activityIncomplete=part.activityLimited;part.warnings.push('Azure: 활동 기록 조회 상한에 도달해 일부 기록만 저장했습니다.');}report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){options.signal?.throwIfAborted();part.activityIncomplete=[...readable];part.warnings.push(requestAdvice('Azure Activity Log',e,'Reader'));report('activity',{state:'failed',detail:requestAdvice('Azure Activity Log',e,'Reader')});}}else report('activity',{state:'skipped'});
   if(options.withCost!==false){
     const {rows,failed}=await azureCost(readable,token,request,undefined,(done,total)=>report('cost',{detail:'Cost Management 조회',done,total}),options);
     const failedScopes=[...new Set([...part.incomplete,...failed])];
@@ -139,14 +155,16 @@ export async function collectAzureWith(subscriptions:string[],token:()=>Promise<
 // Everything the signed-in identity can see, so nobody has to type subscription IDs.
 // Sign-in passing says nothing about roles or the network path to ARM, so each failure here names its own fix.
 export async function discoverAzureSubscriptions(token:()=>Promise<string>,request:typeof fetch=fetch,options?:Pick<CollectOptions,'signal'|'wait'|'requests'>){
-  const found:string[]=[],inactive:string[]=[];let url:string|undefined='https://management.azure.com/subscriptions?api-version=2022-12-01';
+  const found:string[]=[],inactive:string[]=[],seen=new Set<string>();let url:string|undefined='https://management.azure.com/subscriptions?api-version=2022-12-01';
   while(url){
+    options?.signal?.throwIfAborted();
+    if(seen.has(url)||new URL(url).origin!=='https://management.azure.com')throw new Error('Azure subscriptions: invalid continuation URL');seen.add(url);
     let r:Response;
     try{
       const init={headers:{Authorization:`Bearer ${await token()}`}};
       const bounded:typeof fetch=(url,init)=>options?.requests?options.requests.run(()=>request(url,init),options.signal):request(url,init);
       r=options?await fetchRetry(url,init,bounded,{...options,timeoutMs:30_000}):await bounded(url,{...init,signal:AbortSignal.timeout(30_000)});
-    }catch(e){throw new Error(azureNetworkMessage(e));}
+    }catch(e){options?.signal?.throwIfAborted();throw new Error(azureNetworkMessage(e));}
     if(!r.ok){const body:any=await r.json().catch(()=>({}));throw new Error(azureListMessage(r.status,body?.error));}
     const body:any=await r.json();
     for(const s of body.value??[])s.state==='Enabled'?found.push(s.subscriptionId):inactive.push(s.state);
@@ -163,13 +181,13 @@ function azureListMessage(status:number,error?:{code?:string;message?:string}){
   return `Azure 구독 목록 조회 실패 (${status}${detail?` ${detail}`:''})`;
 }
 export async function collectAzure(subscriptions:string[]=[],options:CollectOptions={}):Promise<Normalized>{
-  const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),token=async()=>(await credential.getToken('https://management.azure.com/.default')).token;
+  const {DefaultAzureCredential}=await import('@azure/identity');const credential=new DefaultAzureCredential(),token=async()=>(await credential.getToken('https://management.azure.com/.default',{abortSignal:options.signal})).token;
   options.report?.('scopes',{detail:'구독 목록 조회'});
   const targets=subscriptions.length?subscriptions:await discoverAzureSubscriptions(token,fetch,options);
-  return collectAzureWith(targets,token,fetch,{...options,graphToken:async()=>(await credential.getToken('https://graph.microsoft.com/.default')).token});
+  return collectAzureWith(targets,token,fetch,{...options,graphToken:async()=>(await credential.getToken('https://graph.microsoft.com/.default',{abortSignal:options.signal})).token});
 }
 // Management events from CloudTrail's free 90-day history; read-only calls are filtered out at the source.
-export async function collectAwsActivity(call:AwsCaller,account:string,region:string,now=new Date(),options:Pick<CollectOptions,'signal'|'wait'>={}):Promise<Activity[]>{
+export async function collectAwsActivity(call:AwsCaller,account:string,region:string,now=new Date(),options:Pick<CollectOptions,'signal'|'wait'>={}):Promise<ActivityRows>{
   const out:Activity[]=[],seen=new Set<string>();let token:string|undefined;
   do{
     options.signal?.throwIfAborted();
@@ -183,6 +201,7 @@ export async function collectAwsActivity(call:AwsCaller,account:string,region:st
     token=r.NextToken;
     if(token){if(seen.has(token))throw new Error('CloudTrail: repeated pagination token');seen.add(token);}
   }while(token&&out.length<ACTIVITY_CAP/4);
+  if(token)(out as ActivityRows).truncatedScopes=[account];
   return out;
 }
 type AwsService='ec2'|'elb'|'rds'|'dx'|'eks'|'org'|'iam'|'ce'|'rex'|'trail';
@@ -195,11 +214,14 @@ async function awsPages(call:AwsCaller,service:AwsService,operation:string,key:s
 const AWS_AUTH_ERROR=/ExpiredToken|InvalidClientTokenId|CredentialsProviderError|Could not load credentials/i;
 // A service missing from a region is normal, not a gap in what was collected.
 const AWS_UNAVAILABLE=/not available in this region|UnsupportedOperation|OptInRequired/i;
-export async function collectAwsAccount(call:AwsCaller,account:string,region:string,label?:string):Promise<Normalized>{
+export async function collectAwsAccount(call:AwsCaller,account:string,region:string,label?:string,items?:CollectionItem[],signal?:AbortSignal):Promise<Normalized>{
+  const originalCall=call;call=async(...args)=>{signal?.throwIfAborted();const value=await originalCall(...args);signal?.throwIfAborted();return value;};
   const data:Record<string,any[]>={},paged={MaxResults:100},failed:string[]=[],collectionGaps:CollectionGap[]=[];
   // One denied service must not cost the whole account; only a dead credential stops the run.
   const read=async<T>(what:string,work:()=>Promise<T>,empty:T):Promise<T>=>{
-    try{return await work();}catch(e){const text=`${(e as Error)?.name} ${(e as Error)?.message}`;if(AWS_AUTH_ERROR.test(text))throw e;const unavailable=AWS_UNAVAILABLE.test(text);if(!unavailable)failed.push(what);collectionGaps.push({provider:'aws',scope:account,region,operation:what,reason:/AccessDenied|UnauthorizedOperation|Forbidden/i.test(text)?'denied':unavailable?'unavailable':'failed',code:String((e as any)?.code??(e as any)?.cause?.code??(e as Error)?.name??'Error').slice(0,80)});return empty;}
+    const item:CollectionItem=what==='DescribeInstances'||what==='DescribeInstanceTypes'?'compute':what==='DescribeDBInstances'?'database':what==='ListClusters'||what==='DescribeCluster'?'containers':'network';
+    if(items&&!items.includes(item))return empty;
+    try{return await work();}catch(e){signal?.throwIfAborted();const text=`${(e as Error)?.name} ${(e as Error)?.message}`;if(AWS_AUTH_ERROR.test(text))throw e;const unavailable=AWS_UNAVAILABLE.test(text);if(!unavailable)failed.push(what);collectionGaps.push({provider:'aws',scope:account,region,operation:what,reason:/AccessDenied|UnauthorizedOperation|Forbidden/i.test(text)?'denied':unavailable?'unavailable':'failed',code:String((e as any)?.code??(e as any)?.cause?.code??(e as Error)?.name??'Error').slice(0,80)});return empty;}
   };
   for(const [operation,key] of [['DescribeVpcs','Vpcs'],['DescribeSubnets','Subnets'],['DescribeInstances','Reservations'],['DescribeSecurityGroups','SecurityGroups'],['DescribeSecurityGroupRules','SecurityGroupRules'],['DescribeInternetGateways','InternetGateways'],['DescribeNatGateways','NatGateways'],['DescribeTransitGateways','TransitGateways'],['DescribeTransitGatewayVpcAttachments','TransitGatewayVpcAttachments'],['DescribeTransitGatewayPeeringAttachments','TransitGatewayPeeringAttachments'],['DescribeVpcPeeringConnections','VpcPeeringConnections'],['DescribeRouteTables','RouteTables']] as const)data[key]=await read(operation,()=>awsPages(call,'ec2',operation,key,paged),[]);
   // These two operations take no MaxResults and return everything at once.
@@ -223,24 +245,37 @@ export async function collectAwsAccount(call:AwsCaller,account:string,region:str
   return result;
 }
 // IAM is global, so it is read once per account rather than once per region.
-export async function collectAwsIam(call:AwsCaller,account:string):Promise<{iam:IamAssignment[];warning?:string}>{
+export async function collectAwsIam(call:AwsCaller,account:string,options:{signal?:AbortSignal;concurrency?:number}={}):Promise<{iam:IamAssignment[];warning?:string}>{
   try{
-    const list=(op:string,key:string,input:Record<string,any>={})=>awsIamPages(call,op,key,input);
-    const users=await list('ListUsers','Users');
-    for(const u of users){
+    const guarded:AwsCaller=(...args)=>{options.signal?.throwIfAborted();return call(...args);};
+    const list=(op:string,key:string,input:Record<string,any>={})=>awsIamPages(guarded,op,key,input);
+    const limit=Math.floor(positiveSetting(String(options.concurrency??process.env.ATLAS_AWS_IAM_CONCURRENCY??4),4,8));
+    const groupPolicies=new Map<string,Promise<any[]>>();
+    const group=(name:string)=>{
+      let pending=groupPolicies.get(name);
+      if(!pending){pending=list('ListAttachedGroupPolicies','AttachedPolicies',{GroupName:name});groupPolicies.set(name,pending);}
+      return pending;
+    };
+    const users=await mapLimit(await list('ListUsers','Users'),limit,async user=>{
+      const u={...user};
       u.policies=await list('ListAttachedUserPolicies','AttachedPolicies',{UserName:u.UserName});
-      u.groupPolicies=[];for(const g of await list('ListGroupsForUser','Groups',{UserName:u.UserName}))u.groupPolicies.push(...(await list('ListAttachedGroupPolicies','AttachedPolicies',{GroupName:g.GroupName})).map((x:any)=>({...x,group:g.GroupName})));
+      u.groupPolicies=[];for(const g of await list('ListGroupsForUser','Groups',{UserName:u.UserName}))u.groupPolicies.push(...(await group(g.GroupName)).map((x:any)=>({...x,group:g.GroupName})));
       u.mfa=(await list('ListMFADevices','MFADevices',{UserName:u.UserName})).length>0;
       u.keys=await list('ListAccessKeys','AccessKeyMetadata',{UserName:u.UserName});
-    }
-    const roles=(await list('ListRoles','Roles')).filter(r=>!String(r.Path??'').startsWith('/aws-service-role/'));
-    for(const r of roles)r.policies=await list('ListAttachedRolePolicies','AttachedPolicies',{RoleName:r.RoleName});
+      return u;
+    },options.signal);
+    const roles=await mapLimit((await list('ListRoles','Roles')).filter(r=>!String(r.Path??'').startsWith('/aws-service-role/')),limit,async r=>({...r,policies:await list('ListAttachedRolePolicies','AttachedPolicies',{RoleName:r.RoleName})}),options.signal);
     return{iam:normalizeAwsIam({users,roles},account)};
-  }catch(e){return{iam:[],warning:`AWS 계정 ${account}: IAM을 읽지 못했습니다 (${(e as Error)?.name}).`};}
+  }catch(e){options.signal?.throwIfAborted();return{iam:[],warning:`AWS 계정 ${account}: IAM을 읽지 못했습니다 (${(e as Error)?.name}).`};}
 }
 async function awsIamPages(call:AwsCaller,op:string,key:string,input:Record<string,any>){
-  const out:any[]=[];let marker:string|undefined;
-  do{const r=await call('iam',op,{...input,...(marker?{Marker:marker}:{})});out.push(...(r[key]??[]));marker=r.IsTruncated?r.Marker:undefined;}while(marker);
+  const out:any[]=[],seen=new Set<string>();let marker:string|undefined;
+  do{
+    const r=await call('iam',op,{...input,...(marker?{Marker:marker}:{})});out.push(...(r[key]??[]));
+    marker=r.IsTruncated?r.Marker:undefined;
+    if(r.IsTruncated&&(!marker||seen.has(marker)))throw new Error('IAM pagination did not advance');
+    if(marker)seen.add(marker);
+  }while(marker);
   return out;
 }
 // One request per page, and Cost Explorer bills per request. The runner limits how often this runs.
@@ -256,9 +291,16 @@ export async function collectAwsCost(call:AwsCaller,now=new Date(),options:Pick<
 }
 // Types the Describe collectors already read in full; everything else comes from Resource Explorer as a plain list.
 const AWS_DESCRIBED=new Set(['ec2:instance','ec2:vpc','ec2:subnet','ec2:security-group','ec2:internet-gateway','ec2:natgateway','ec2:transit-gateway','ec2:transit-gateway-attachment','ec2:vpn-connection','ec2:vpn-gateway','ec2:vpc-peering-connection','ec2:route-table','ec2:network-interface','ec2:network-acl','elasticloadbalancing:loadbalancer','elasticloadbalancing:loadbalancer/app','elasticloadbalancing:loadbalancer/net','rds:db','eks:cluster']);
-export async function collectAwsInventory(call:AwsCaller):Promise<{rows:any[];warning?:string}>{
-  try{return{rows:(await awsPages(call,'rex','ListResources','Resources',{MaxResults:100})).filter(r=>!AWS_DESCRIBED.has(r.ResourceType))};}
-  catch(e){return{rows:[],warning:`AWS: Resource Explorer를 읽지 못해 S3, Lambda 같은 나머지 서비스는 인벤토리에서 빠집니다 (${(e as Error)?.name}). 조직 인덱스를 켜면 함께 수집합니다.`};}
+export async function collectAwsInventory(call:AwsCaller,items?:CollectionItem[],signal?:AbortSignal,account?:string):Promise<{rows:any[];warning?:string}>{
+  const filter=items?items.includes('storage')?(items.includes('inventory')?undefined:`resourcetype:${awsStorageTypes.join(',')}`):`-resourcetype:${awsStorageTypes.join(',')}`:undefined;
+  if(account&&!/^\d{12}$/.test(account))throw new Error('Invalid inventory account ID');
+  const query=[account?`accountid:${account}`:undefined,filter].filter(Boolean).join(' ');
+  try{
+    const rows=await awsPages(call,'rex','ListResources','Resources',{MaxResults:100,...(query?{Filters:{FilterString:query}}:{})});
+    if(account&&rows.some(row=>row.OwningAccountId&&row.OwningAccountId!==account))throw Object.assign(new Error('Unexpected resource owner'),{name:'OwnershipMismatch'});
+    return{rows:rows.filter(r=>!AWS_DESCRIBED.has(r.ResourceType))};
+  }
+  catch(e){signal?.throwIfAborted();return{rows:[],warning:`AWS: Resource Explorer를 읽지 못해 S3, Lambda 같은 나머지 서비스는 인벤토리에서 빠집니다 (${(e as Error)?.name}). 조직 인덱스를 켜면 함께 수집합니다.`};}
 }
 // Organizations answers only for the management or a delegated admin account; member accounts fall back to a flat list.
 export async function awsHierarchy(call:AwsCaller){
@@ -283,12 +325,18 @@ export type AwsRuntime={
   regions:(credentials:any)=>Promise<string[]>;
   resources:(credentials:any,account:string,region:string,label?:string)=>Promise<Normalized>;
   iam:(credentials:any,account:string)=>ReturnType<typeof collectAwsIam>;
-  inventory:(credentials:any)=>ReturnType<typeof collectAwsInventory>;
+  inventory:(credentials:any,account?:string)=>ReturnType<typeof collectAwsInventory>;
   activity:(credentials:any,account:string,region:string)=>Promise<Activity[]>;
   cost:()=>Promise<CostRow[]>;
 };
 // The coordinator has no SDK dependency: tests exercise multi-account runs with a fake runtime.
 export async function collectAwsWith(runtime:AwsRuntime,regions:string[]=[],roles:AwsRole[]=[],options:CollectOptions={}):Promise<Normalized>{
+  if(options.items?.length&&options.items.every(item=>item==='cost')){
+    const report=options.report??noReport,current=await runtime.identity();
+    report('scopes',{state:'done',detail:'비용 조회 계정 확인'});report('cost',{detail:'조직 단위 Cost Explorer 조회'});
+    try{const cost=await runtime.cost();options.signal?.throwIfAborted();report('cost',{state:'done',detail:`${count(cost.length)}행`});return{resources:[],links:[],warnings:[],scopeLabels:{},collectedScopes:[current],cost,costCoverage:[{provider:'aws',state:'complete',failedScopes:[],unit:'organization'}]};}
+    catch(e){options.signal?.throwIfAborted();report('cost',{state:'failed',detail:'조직 단위 비용 조회 실패'});return{resources:[],links:[],warnings:[],scopeLabels:{},collectedScopes:[current],costCoverage:[{provider:'aws',state:'failed',failedScopes:[],unit:'organization',reason:costFailureReason(e)}]};}
+  }
   const report=options.report??noReport,parts:Normalized[]=[],warnings:string[]=[],incomplete=new Set<string>(),completed=new Set<string>();
   let hierarchy:HierarchyNode[]|undefined,cost:CostRow[]|undefined,costCoverage:CostCoverage[]|undefined;
   report('scopes',{detail:'조직 구조 확인'});
@@ -302,7 +350,15 @@ export async function collectAwsWith(runtime:AwsRuntime,regions:string[]=[],role
   targets.sort((a,b)=>(Date.parse(options.scopeCollectedAt?.[idOf(a)]??'')||0)-(Date.parse(options.scopeCollectedAt?.[idOf(b)]??'')||0));
   const pending=new Set(targets.map(idOf));let regionsDone=0,accountsDone=0;
   const result=()=>({...finish([...parts,{resources:[],links:[],warnings:[...warnings],scopeLabels:{},hierarchy,incomplete:[...new Set([...incomplete,...pending])],cost,costCoverage}]),collectedScopes:[...completed],accountProgress:{completed:completed.size,total:targets.length}});
-  const checkpoint=()=>options.checkpoint?.(result());
+  const checkpoint=()=>{
+    if(options.checkpointLazy){
+      // Completed parts are never mutated by this coordinator. Capture the
+      // collection membership now; normalize only if the runner needs recovery.
+      const savedParts=parts.slice(),savedCompleted=[...completed],savedPending=[...new Set([...incomplete,...pending])];
+      const metadata:Normalized={resources:[],links:[],warnings:[...warnings],scopeLabels:{},hierarchy,incomplete:savedPending,cost,costCoverage};
+      options.checkpointLazy(()=>({...finish([...savedParts,metadata]),collectedScopes:savedCompleted,accountProgress:{completed:savedCompleted.length,total:targets.length}}));
+    }else options.checkpoint?.(result());
+  };
   report('scopes',{state:'done',detail:`계정 ${targets.length}개`});
   const accountLimit=Math.floor(positiveSetting(process.env.ATLAS_AWS_ACCOUNT_CONCURRENCY,3,8));
   const regionLimit=Math.floor(positiveSetting(process.env.ATLAS_AWS_REGION_CONCURRENCY,4,8));
@@ -322,51 +378,52 @@ export async function collectAwsWith(runtime:AwsRuntime,regions:string[]=[],role
     }
     checkpoint();
   }
-  report('resources',{detail:`완료 0 / 전체 ${targets.length}계정 · 첫 수집은 여러 회차가 필요할 수 있습니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`});
+  report('resources',{done:0,total:targets.length,detail:`완료 0 / 전체 ${targets.length}계정 · 첫 수집은 여러 회차가 필요할 수 있습니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`});
   await mapLimit(targets,accountLimit,async role=>{
-    const id=idOf(role),who=role?.label??id,started=Date.now();
+    const id=idOf(role),who=role?.label??id,started=Date.now();let accountParts:Normalized[]=[];
     try{
       const credentials=role?await runtime.assume(role):undefined;
       const atRegions=regions.length?regions:await runtime.regions(credentials);
       if(!atRegions.length)throw new Error('조회할 리전이 없습니다.');
-      const regional=await mapLimit(atRegions,regionLimit,async region=>{
-        const begin=Date.now();report('resources',{detail:`${who} · ${region}`,done:regionsDone});
+      const regional=options.items&&!options.items.some(i=>['network','compute','database','containers'].includes(i))?[]:await mapLimit(atRegions,regionLimit,async region=>{
+        const begin=Date.now();report('resources',{detail:`${who} · ${region}`});
         try{return await runtime.resources(credentials,id,region,role?.label);}
         catch(e){options.signal?.throwIfAborted();return{resources:[],links:[],scopeLabels:{},incomplete:[id],warnings:[`AWS ${who} ${region}: 자원 조회 실패 (${(e as Error)?.name??'Error'})`]};}
-        finally{regionsDone++;report('resources',{detail:`${who} · ${region}`,elapsedMs:Date.now()-begin,done:regionsDone});}
+        finally{regionsDone++;report('resources',{detail:`${who} · ${region} · 리전 처리 ${regionsDone}개`,elapsedMs:Date.now()-begin});}
       },options.signal);
-      parts.push(...regional);
+      accountParts=regional;
       report('iam',{detail:who});
-      const iamStart=Date.now(),assignments=await runtime.iam(credentials,id);
+      const iamStart=Date.now(),assignments=options.withIam===false?{iam:[]}:await runtime.iam(credentials,id);
       report('iam',{detail:who,elapsedMs:Date.now()-iamStart});
-      const inventoryStart=Date.now(),inventory=await runtime.inventory(credentials);
+      const inventoryStart=Date.now(),inventory=options.items&&!options.items.some(i=>i==='inventory'||i==='storage')?{rows:[]}:await runtime.inventory(credentials,id);
       report('resources',{detail:`${who} · 나머지 서비스 목록`,elapsedMs:Date.now()-inventoryStart});
-      const activity:Activity[]=[],accountWarnings=[...(assignments.warning?[assignments.warning]:[]),...(inventory.warning?[inventory.warning]:[])];
+      const activity:Activity[]=[],activityIncomplete:string[]=[],activityLimited:string[]=[],accountWarnings=[...(assignments.warning?[assignments.warning]:[]),...(inventory.warning?[inventory.warning]:[])];
       if(options.withActivity!==false){
         report('activity',{detail:`${who} · CloudTrail`});
         const activityStart=Date.now();
         await mapLimit([...new Set([...atRegions,'us-east-1'])],regionLimit,async region=>{
-          try{activity.push(...await runtime.activity(credentials,id,region));}
-          catch(e){options.signal?.throwIfAborted();accountWarnings.push(`AWS ${who} ${region}: 변경 기록 조회 실패 (${(e as Error)?.name??'Error'})`);}
+          try{const rows=await runtime.activity(credentials,id,region);activity.push(...rows);if((rows as ActivityRows).truncatedScopes?.length){activityLimited.push(id);activityIncomplete.push(id);accountWarnings.push(`AWS ${who} ${region}: 활동 기록 조회 상한에 도달해 일부 기록만 저장했습니다.`);}}
+          catch(e){options.signal?.throwIfAborted();activityIncomplete.push(id);accountWarnings.push(`AWS ${who} ${region}: 변경 기록 조회 실패 (${(e as Error)?.name??'Error'})`);}
         },options.signal);
         report('activity',{detail:`${who} · CloudTrail`,elapsedMs:Date.now()-activityStart});
       }
       if(accountWarnings.length)incomplete.add(id);
-      parts.push({resources:[],links:[],warnings:accountWarnings,scopeLabels:{[id]:who},iam:assignments.iam,iamIncomplete:assignments.warning?[id]:[],activity,awsInventory:{account:id,rows:inventory.rows}});
+      parts.push(...accountParts,{resources:[],links:[],warnings:accountWarnings,scopeLabels:{[id]:who},iam:assignments.iam,iamIncomplete:assignments.warning?[id]:[],activity,activityIncomplete,activityLimited,awsInventory:{account:id,rows:inventory.rows}});
       completed.add(id);
     }catch(e){
       options.signal?.throwIfAborted();
+      parts.push(...accountParts);
       // The management account often has no StackSets read role; no other account is optional.
       const optional=!!roleName&&!roles.length&&id===current;
       warnings.push(`AWS ${who}: 계정 수집 실패 (${(e as Error)?.name??'Error'})${optional?' · 관리 계정의 역할을 확인하세요':''}`);
       if(!optional)incomplete.add(id);
     }finally{
-      if(!options.signal?.aborted){pending.delete(id);accountsDone++;report('resources',{detail:`계정 ${who} 완료`,done:accountsDone,total:targets.length,elapsedMs:Date.now()-started});checkpoint();}
+      if(!options.signal?.aborted){pending.delete(id);accountsDone++;report('resources',{detail:`계정 ${who} 처리 완료 · 완료 ${completed.size} · 실패 ${accountsDone-completed.size}`,done:accountsDone,total:targets.length,elapsedMs:Date.now()-started});checkpoint();}
     }
   },options.signal);
   options.signal?.throwIfAborted();
-  report('resources',{state:'done',detail:`계정 ${completed.size}개 · 리전 ${regionsDone}개`});
-  report('iam',{state:'done'});report('activity',options.withActivity===false?{state:'skipped'}:{state:'done'});
+  report('resources',{state:'done',done:accountsDone,total:targets.length,detail:`계정 완료 ${completed.size} · 실패 ${accountsDone-completed.size} · 리전 처리 ${regionsDone}개`});
+  report('iam',{state:options.withIam===false?'skipped':'done'});report('activity',options.withActivity===false?{state:'skipped'}:{state:'done'});
   if(!hierarchy&&!listed.length)warnings.push('AWS: Organizations를 읽지 못해 계정을 평면으로 표시합니다. 관리 계정 또는 위임 관리자 권한이 필요합니다.');
   if(!roles.length&&!roleName&&accounts.some(a=>a.id!==current))warnings.push('AWS: 조직의 다른 계정은 미수집입니다. ATLAS_AWS_ROLE_NAME에 읽기 전용 역할을 지정하세요.');
 
@@ -388,11 +445,11 @@ export async function collectAws(regions:string[]=[],roles:AwsRole[]=[],options:
     regions:async credentials=>((await single(ec2,'EC2Client',home,credentials,'DescribeRegions',{AllRegions:false})).Regions??[]).map((r:any)=>r.RegionName).filter(Boolean),
     resources:async(credentials,id,region,label)=>{
       const clientOptions={region,maxAttempts:3,credentials},clients={ec2:new ec2.EC2Client(clientOptions),elb:new elb.ElasticLoadBalancingV2Client(clientOptions),rds:new rds.RDSClient(clientOptions),dx:new dx.DirectConnectClient(clientOptions),eks:new eks.EKSClient(clientOptions)},modules:Record<string,any>={ec2,elb,rds,dx,eks};
-      const call:AwsCaller=(service,operation,input={})=>{options.signal?.throwIfAborted();return (clients as any)[service].send(new modules[service][`${operation}Command`](input),{abortSignal:options.signal});};
-      try{return await collectAwsAccount(call,id,region,label);}finally{for(const client of Object.values(clients))client.destroy();}
+      const call=awsServiceCaller(clients,modules,options);
+      try{return await collectAwsAccount(call,id,region,label,options.items,options.signal);}finally{for(const client of Object.values(clients))client.destroy();}
     },
-    iam:(credentials,id)=>collectAwsIam((_s,op,input={})=>single(iam,'IAMClient','us-east-1',credentials,op,input),id),
-    inventory:credentials=>collectAwsInventory((_s,op,input={})=>single(rex,'ResourceExplorer2Client',home,credentials,op,input)),
+    iam:(credentials,id)=>collectAwsIam((_s,op,input={})=>single(iam,'IAMClient','us-east-1',credentials,op,input),id,options),
+    inventory:(credentials,id)=>collectAwsInventory((_s,op,input={})=>single(rex,'ResourceExplorer2Client',home,credentials,op,input),options.items,options.signal,id),
     activity:(credentials,id,region)=>collectAwsActivity((_s,op,input={})=>single(trail,'CloudTrailClient',region,credentials,op,input),id,region,undefined,options),
     cost:()=>collectAwsCost((_s,op,input={})=>single(ce,'CostExplorerClient','us-east-1',undefined,op,input),undefined,options),
   },regions,roles,options);
@@ -445,26 +502,30 @@ export async function collectGcpCost(request:GcpRequest,table:string,now=new Dat
   return rows;
 }
 // Admin Activity audit logs are always on and free to read; one request covers many projects at once.
-export async function gcpActivity(resourceNames:string[],request:GcpRequest,now=new Date()):Promise<Activity[]>{
-  const out:Activity[]=[],filter=`logName:"cloudaudit.googleapis.com%2Factivity" AND timestamp>="${activitySince(now).toISOString()}"`;
+export async function gcpActivity(resourceNames:string[],request:GcpRequest,now=new Date()):Promise<ActivityRows>{
+  const out:ActivityRows=[],filter=`logName:"cloudaudit.googleapis.com%2Factivity" AND timestamp>="${activitySince(now).toISOString()}"`;
   for(let i=0;i<resourceNames.length&&out.length<ACTIVITY_CAP;i+=50){
-    let token:string|undefined;
+    let token:string|undefined;const seen=new Set<string>();
     do{
       const body=await request('https://logging.googleapis.com/v2/entries:list',{method:'POST',data:{resourceNames:resourceNames.slice(i,i+50),filter,orderBy:'timestamp desc',pageSize:1000,...(token?{pageToken:token}:{})}});
       for(const e of body.entries??[]){
         const p=e.protoPayload??{},method=String(p.methodName??''),who=String(p.authenticationInfo?.principalEmail??'');
-        const project=e.resource?.labels?.project_id??String(e.logName??'').match(/^projects\/([^/]+)/)?.[1]??'';
+        const project=e.resource?.labels?.project_id??String(e.logName??'').match(/^(?:projects|organizations|folders)\/([^/]+)/)?.[1]??'';
         out.push({id:`gcp:${e.insertId}:${e.timestamp}`,provider:'gcp',at:e.timestamp,actor:who||'알 수 없음',actorType:who.endsWith('gserviceaccount.com')?'service':who?'user':'unknown',operation:method,label:`${String(p.serviceName??'').replace('.googleapis.com','')} ${method.split('.').pop()}`.trim(),kind:/\.(delete|remove)/i.test(method)?'delete':/\.(insert|create|patch|update|set|add)/i.test(method)?'write':'action',target:p.resourceName?`gcp:${p.resourceName}`:'',targetName:lastSegment(String(p.resourceName??method)),scope:project,outcome:p.status?.code?'failed':'ok',ip:p.requestMetadata?.callerIp,source:'GCP Admin Activity 감사 로그'});
       }
       token=body.nextPageToken;
+      if(token){if(seen.has(token))throw new Error('GCP logging: repeated pagination token');seen.add(token);}
     }while(token&&out.length<ACTIVITY_CAP);
+    if(token||i+50<resourceNames.length&&out.length>=ACTIVITY_CAP)out.truncatedScopes=resourceNames.map(name=>name.split('/').pop()!);
   }
   return out;
 }
 export async function collectGcpWith(parent:string,request:GcpRequest,options:CollectOptions={}):Promise<Normalized>{
+  const originalRequest=request;request=async(url,init)=>{options.signal?.throwIfAborted();const result=await originalRequest(url,init);options.signal?.throwIfAborted();return result;};
   const report=options.report??noReport;
   report('resources',{detail:parent});
-  const part=normalizeGcp(await gcpPages(parent,request,[],'RESOURCE',n=>report('resources',{detail:`${parent} · 자원 ${count(n)}개 읽음`})));
+  const part=normalizeGcp(options.items&&!hasResourceItems(options.items)?[]:await gcpPages(parent,request,options.items?assetTypes(options.items):[],'RESOURCE',n=>report('resources',{detail:`${parent} · 자원 ${count(n)}개 읽음`})));
+  if(options.items)part.resources=part.resources.filter(r=>options.items!.includes(resourceItem(r)));
   await enrichGcpSizes(part.resources,request,options);
   const projectNumbers=new Map<string,string>(),org:{domain?:string}={};
   if(!parent.startsWith('projects/'))try{part.hierarchy=await gcpHierarchy(parent,request,projectNumbers,org);}catch(e){part.warnings.push(`GCP: 조직 계층을 읽지 못해 프로젝트를 평면으로 표시합니다 (${e instanceof Error?e.message:'오류'}).`);}
@@ -480,8 +541,9 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
     ...part.resources.filter(r=>r.scope!=='unknown'&&r.scope!=='external').map(r=>r.scope),
     ...(part.hierarchy??[]).filter(n=>n.kind==='project'&&n.scope).map(n=>n.scope!),
   ])];
+  if(options.withIam!==false){
   report('iam',{detail:parent});
-  try{part.iam=normalizeGcpIam(await gcpPages(parent,request,[...GCP_HIERARCHY_TYPES,'compute.googleapis.com/Instance','storage.googleapis.com/Bucket','run.googleapis.com/Service','secretmanager.googleapis.com/Secret'],'IAM_POLICY'),projectNumbers,parent.startsWith('projects/')?parent.split('/')[1]:undefined,org.domain,new Map(part.resources.map(r=>[r.nativeId,r.scope])));}
+  try{part.iam=normalizeGcpIam(await gcpPages(parent,request,[...GCP_HIERARCHY_TYPES,'compute.googleapis.com/Instance','storage.googleapis.com/Bucket','run.googleapis.com/Service','secretmanager.googleapis.com/Secret'],'IAM_POLICY'),projectNumbers,parent.startsWith('projects/')?parent.split('/')[1]:undefined,org.domain,new Map(part.resources.map(r=>[r.nativeId,r.scope])));part.iamCollectedScopes=[...new Set([...part.collectedScopes,...(part.hierarchy??[]).map(n=>n.scope??n.nativeId.split('/').pop()!),parent.split('/')[1]])];}
   catch(e){
     options.signal?.throwIfAborted();
     // IAM scopes use project IDs, but organization and folder IDs omit prefixes.
@@ -492,19 +554,20 @@ export async function collectGcpWith(parent:string,request:GcpRequest,options:Co
     ])];
     part.warnings.push(`GCP: IAM 정책을 읽지 못했습니다 (${(e as Error)?.message?.slice(0,100)}).`);
   }
+  }else report('iam',{state:'skipped'});
   if(options.withActivity!==false){
     // An organization's own log holds only org-level changes; each project keeps its own.
     const names=parent.startsWith('projects/')?[parent]:[parent,...(part.hierarchy??[]).filter(n=>n.kind==='project').map(n=>`projects/${n.nativeId}`)];
     report('activity',{detail:'감사 로그 조회'});
-    try{part.activity=await gcpActivity(names,request);report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){part.warnings.push(requestAdvice('GCP 감사 로그',e,'roles/logging.viewer'));report('activity',{state:'failed',detail:requestAdvice('GCP 감사 로그',e,'roles/logging.viewer')});}
+    try{part.activity=await gcpActivity(names,request);part.activityCollectedScopes=names.map(name=>name.split('/').pop()!);if((part.activity as ActivityRows).truncatedScopes?.length){part.activityLimited=[...part.activityCollectedScopes];part.activityIncomplete=part.activityLimited;part.warnings.push('GCP: 활동 기록 조회 상한에 도달해 일부 기록만 저장했습니다.');}report('activity',{state:'done',detail:`${count(part.activity.length)}건`});}catch(e){options.signal?.throwIfAborted();part.activityIncomplete=names.map(name=>name.split('/').pop()!);part.warnings.push(requestAdvice('GCP 감사 로그',e,'roles/logging.viewer'));report('activity',{state:'failed',detail:requestAdvice('GCP 감사 로그',e,'roles/logging.viewer')});}
   }
   const result=finish([part]);result.warnings.push('GCP: Asset Inventory의 최종 일관성 데이터. Cloud Router 관계는 구성 참조이며 패킷 경유 경로가 아닙니다.');return result;
 }
 // Prefer the whole organization; an identity without org rights still gets every project it can read.
 export async function discoverGcpParents(request:GcpRequest){
   const orgList:{name:string;displayName?:string}[]=await request('https://cloudresourcemanager.googleapis.com/v3/organizations:search').then(b=>b.organizations??[],()=>[]);
-  const records:{projectId:string;name?:string;parent?:{type:string;id:string}}[]=[];let token:string|undefined;
-  do{const q=new URLSearchParams({filter:'lifecycleState:ACTIVE'});if(token)q.set('pageToken',token);const body=await request(`https://cloudresourcemanager.googleapis.com/v1/projects?${q}`);records.push(...(body.projects??[]));token=body.nextPageToken;}while(token);
+  const records:{projectId:string;name?:string;parent?:{type:string;id:string}}[]=[],seen=new Set<string>();let token:string|undefined;
+  do{const q=new URLSearchParams({filter:'lifecycleState:ACTIVE'});if(token)q.set('pageToken',token);const body=await request(`https://cloudresourcemanager.googleapis.com/v1/projects?${q}`);records.push(...(body.projects??[]));token=body.nextPageToken;if(token){if(seen.has(token))throw new Error('GCP projects: repeated pagination token');seen.add(token);}}while(token);
   return{orgs:orgList.map(o=>o.name),orgNames:new Map(orgList.map(o=>[o.name,o.displayName??o.name])),projects:records.map(p=>`projects/${p.projectId}`),records};
 }
 // Per-project collection never sees the organization, so the folder tree is rebuilt from Resource Manager.
@@ -518,7 +581,7 @@ export async function gcpAncestry(records:{projectId:string;name?:string;parent?
     if(p.parent?.id)chains.set(p.projectId,[`${p.parent.type}s/${p.parent.id}`]);
   }}));
   const names=new Map(orgNames),folderParents=new Map<string,string>();
-  try{let token:string|undefined;do{const q=new URLSearchParams();if(token)q.set('pageToken',token);const body=await request(`https://cloudresourcemanager.googleapis.com/v3/folders:search?${q}`);for(const f of body.folders??[]){if(!f?.name)continue;names.set(f.name,f.displayName??f.name);if(f.parent)folderParents.set(f.name,f.parent);}token=body.nextPageToken;}while(token);}catch{/* names fall back below */}
+  try{let token:string|undefined;const seen=new Set<string>();do{const q=new URLSearchParams();if(token)q.set('pageToken',token);const body=await request(`https://cloudresourcemanager.googleapis.com/v3/folders:search?${q}`);for(const f of body.folders??[]){if(!f?.name)continue;names.set(f.name,f.displayName??f.name);if(f.parent)folderParents.set(f.name,f.parent);}token=body.nextPageToken;if(token){if(seen.has(token))throw new Error('GCP folders: repeated pagination token');seen.add(token);}}while(token);}catch{/* names fall back below */}
   const ancestors=new Set([...chains.values()].flat());
   for(const id of ancestors)if(!names.has(id)){try{const body=await request(`https://cloudresourcemanager.googleapis.com/v3/${id}`);if(body?.displayName){names.set(id,body.displayName);if(body.parent)folderParents.set(id,body.parent);continue;}}catch{/* label below */}missingNames.push(id);}
   const label=(id:string)=>names.get(id)??(id.startsWith('folders/')?`폴더 ${id.slice(8)}`:`조직 ${id.slice(14)}`);
@@ -551,10 +614,11 @@ async function gcpBilling(request:GcpRequest,scopes:string[],options:CollectOpti
 }
 export async function collectGcpAuto(request:GcpRequest,options:CollectOptions={}):Promise<Normalized>{
   const originalRequest=request;request=async(url,init)=>{options.signal?.throwIfAborted();const body=await originalRequest(url,init);options.signal?.throwIfAborted();return body;};
+  if(options.items?.length&&options.items.every(item=>item==='cost')){const result=await gcpBilling(request,[],options);return{...result,collectedScopes:[...new Set(result.cost?.map(row=>row.scope))]};}
   const report=options.report??noReport;report('scopes',{detail:'조직과 프로젝트 조회'});
   const {orgs,orgNames,projects,records}=await discoverGcpParents(request),parts:Normalized[]=[],warnings:string[]=[],incomplete:string[]=[];let hierarchy:HierarchyNode[]|undefined;
   report('scopes',{state:'done',detail:orgs.length?`조직 ${orgs.length}개`:`프로젝트 ${projects.length}개`});let done=0;
-  for(const parent of orgs){report('resources',{done:done++,total:orgs.length});try{parts.push(await collectGcpWith(parent,request,{...options,report}));}catch(e){warnings.push(`GCP ${parent}: 조직 범위를 읽지 못해 프로젝트별로 수집합니다 (${(e as Error)?.message?.slice(0,240)}).`);}}
+  for(const parent of orgs){report('resources',{done:done++,total:orgs.length});try{parts.push(await collectGcpWith(parent,request,{...options,report}));}catch(e){options.signal?.throwIfAborted();warnings.push(`GCP ${parent}: 조직 범위를 읽지 못해 프로젝트별로 수집합니다 (${(e as Error)?.message?.slice(0,240)}).`);}}
   // Organization permissions can differ, and some visible projects have no
   // organization at all. A successful organization does not cover those reads.
   const covered=new Set(parts.flatMap(p=>p.collectedScopes??[]));

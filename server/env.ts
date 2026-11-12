@@ -10,7 +10,8 @@ export function loadEnvFiles(env:NodeJS.ProcessEnv=process.env,files=['.env.loca
   }
   return loaded;
 }
-loadEnvFiles();
 // Cloud SDKs honour HTTPS_PROXY on their own; Node's fetch, which the ARM and Graph calls use, only does once told to.
-const proxied=['HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy'].some(k=>process.env[k]);
-if(proxied&&typeof (http as any).setGlobalProxyFromEnv==='function')(http as any).setGlobalProxyFromEnv(process.env);
+export function configureProxy(env:NodeJS.ProcessEnv=process.env){
+  const proxied=['HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy'].some(k=>env[k]);
+  if(proxied&&typeof (http as any).setGlobalProxyFromEnv==='function')(http as any).setGlobalProxyFromEnv(env);
+}

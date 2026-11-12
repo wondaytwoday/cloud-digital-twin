@@ -1,3 +1,4 @@
+import {CollectionItem} from './collection-items.js';
 import { z } from 'zod';
 export const Provider = z.enum(['azure', 'aws', 'gcp', 'onprem']);
 export type Provider = z.infer<typeof Provider>;
@@ -43,14 +44,38 @@ export type AuditEvent = z.infer<typeof AuditEventSchema>;
 export const FxSchema = z.object({base:z.string().regex(/^[A-Z]{3}$/),rates:z.record(z.string(),z.number().positive()),source:z.string()});
 export const InventorySummarySchema=z.object({provider:Provider,scope:z.string(),type:z.string(),tier:z.union([z.literal(2),z.literal(3)]),count:z.number().int().nonnegative(),examples:z.array(z.object({id:z.string(),name:z.string()})).max(3),retained:z.boolean().optional(),collectedAt:z.string().datetime().optional()});
 export type InventorySummary=z.infer<typeof InventorySummarySchema>;
-export const SnapshotSchema = z.object({version:z.literal(1),inventoryMode:z.enum(['summary','full']).optional(),inventorySummary:z.array(InventorySummarySchema).default([]),presentation:z.object({part:z.string(),activitySummary:z.array(z.object({provider:Provider,scope:z.string(),day:z.string(),kind:z.enum(['write','delete','action']),count:z.number().int().nonnegative()})).optional(),scopeStats:z.record(z.string(),z.object({resources:z.number(),networks:z.number(),warn:z.number(),stopped:z.number()}))}).optional(),fx:FxSchema.optional(),activity:z.array(ActivitySchema).default([]),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([]),incomplete:z.array(z.string()).default([]),collectionGaps:z.array(CollectionGapSchema).default([]),cost:z.array(CostRowSchema).default([]),costAt:z.string().optional(),costCoverage:z.array(CostCoverageSchema).default([]),scopeCollectedAt:z.record(z.string(),z.string().datetime()).default({}),iam:z.array(IamAssignmentSchema).default([]),changes:z.object({since:z.string(),items:z.array(ChangeSchema)}).optional()});
+export const ItemCollectionSchema=z.object({provider:Provider,scope:z.string(),item:CollectionItem,state:z.enum(['complete','partial','failed']),reason:z.enum(['limited','failed','unverified']).optional(),attemptedAt:z.string().datetime(),collectedAt:z.string().datetime().optional()});
+export type ItemCollection=z.infer<typeof ItemCollectionSchema>;
+export const SnapshotSchema = z.object({itemCollection:z.array(ItemCollectionSchema).default([]),version:z.literal(1),inventoryMode:z.enum(['summary','full']).optional(),inventorySummary:z.array(InventorySummarySchema).default([]),presentation:z.object({part:z.string(),activitySummary:z.array(z.object({provider:Provider,scope:z.string(),day:z.string(),kind:z.enum(['write','delete','action']),count:z.number().int().nonnegative()})).optional(),scopeStats:z.record(z.string(),z.object({resources:z.number(),networks:z.number(),warn:z.number(),stopped:z.number()}))}).optional(),fx:FxSchema.optional(),activity:z.array(ActivitySchema).default([]),mode:z.enum(['mock','live']),scenario:z.string().optional(),collectedAt:z.string().datetime(),resources:z.array(ResourceSchema),links:z.array(LinkSchema),warnings:z.array(z.string()),scopes:z.array(z.string()),scopeLabels:z.record(z.string(),z.string()).default({}),connections:z.array(ConnectionSchema).default([]),hierarchy:z.array(HierarchyNodeSchema).default([]),incomplete:z.array(z.string()).default([]),collectionGaps:z.array(CollectionGapSchema).default([]),cost:z.array(CostRowSchema).default([]),costAt:z.string().optional(),costCoverage:z.array(CostCoverageSchema).default([]),scopeCollectedAt:z.record(z.string(),z.string().datetime()).default({}),iam:z.array(IamAssignmentSchema).default([]),changes:z.object({since:z.string(),items:z.array(ChangeSchema)}).optional()});
 export type Snapshot = z.infer<typeof SnapshotSchema>;
+export class SnapshotValidationError extends Error{
+  constructor(message:string,options?:ErrorOptions){super(message,options);this.name='SnapshotValidationError';}
+}
 export function validateSnapshot(input: unknown): Snapshot {
-  const s=SnapshotSchema.parse(input), ids=new Set(s.resources.map(r=>r.id));
+  try{return validateSnapshotIntegrity(SnapshotSchema.parse(input));}
+  catch(cause){throw new SnapshotValidationError(cause instanceof Error?cause.message:'Invalid snapshot',{cause});}
+}
+// Used after either the complete schema or the versioned view DTO has parsed.
+// Reusing an already parsed core does not skip the cross-field/live invariants.
+export function validateSnapshotIntegrity(s:Snapshot):Snapshot {
+  const ids=new Set(s.resources.map(r=>r.id));
   if(ids.size!==s.resources.length) throw new Error('Duplicate resource ID');
   for(const r of s.resources) if(r.parent&&!ids.has(r.parent)) throw new Error(`Missing parent: ${r.parent}`);
   const edgeIds=new Set<string>();
   for(const e of s.links){if(edgeIds.has(e.id))throw new Error('Duplicate link ID');edgeIds.add(e.id);if(!ids.has(e.source)||!ids.has(e.target))throw new Error(`Unresolved link: ${e.id}`);}
+  const checkParents=(rows:{id:string;parent?:string}[],name:string)=>{
+    const byId=new Map(rows.map(row=>[row.id,row])),done=new Set<string>();
+    for(const row of rows){
+      if(done.has(row.id))continue;
+      const chain=new Set<string>();let current:typeof row|undefined=row;
+      while(current&&!done.has(current.id)){
+        if(chain.has(current.id))throw new Error(`Cyclic ${name} parent`);
+        chain.add(current.id);current=current.parent?byId.get(current.parent):undefined;
+      }
+      for(const id of chain)done.add(id);
+    }
+  };
+  checkParents(s.resources,'resource');checkParents(s.hierarchy,'hierarchy');
   const nodes=new Set(s.hierarchy.map(n=>n.id));
   for(const n of s.hierarchy)if(n.parent&&!nodes.has(n.parent))throw new Error(`Missing hierarchy parent: ${n.parent}`);
   if(s.mode==='live'&&s.activity.some(a=>a.id.startsWith('demo-')))throw new Error('Live collector must not include demo activity');

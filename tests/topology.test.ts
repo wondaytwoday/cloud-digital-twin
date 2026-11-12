@@ -28,7 +28,9 @@ const load=async()=>{const s=await mockSnapshot('standard'),named=(n:string)=>s.
 test('fixtures survive pagination and normalization across every provider',async()=>{
   const {s,named}=await load();
   for(const n of ['vnet-hub','afw-hub','sql-platform','aks-platform','tgw-core','rds-orders','alb-checkout','vpc-shared','gke-analytics','sql-analytics','sandbox-01'])assert.ok(named(n),n);
-  assert.equal(named('sql-platform').parent,s.resources.find(r=>r.kind==='subnet'&&r.name==='data'&&r.provider==='azure')!.id);
+  assert.equal(named('sql-platform').parent,undefined,'Private Link does not place the managed SQL service inside its endpoint subnet');
+  const endpoint=s.resources.find(r=>r.type.toLowerCase()==='microsoft.network/privateendpoints'&&s.links.some(l=>l.source===r.id&&l.target===named('sql-platform').id))!;
+  assert.equal(endpoint.parent,s.resources.find(r=>r.kind==='subnet'&&r.name==='data'&&r.provider==='azure')!.id);
   assert.equal(named('checkout-api-01').specs['vCPU'],'4');
   // Resource SKUs supplies GPU count but no model; do not invent a live model from the offline table.
   assert.equal(named('worker-gpu-01').specs['GPU'],'1 × GPU (모델 미제공)');
@@ -70,13 +72,13 @@ test('status maps to health without treating unknown text as healthy',()=>{
   assert.equal(health('deallocated'),'stopped');assert.equal(health('degraded'),'warn');assert.equal(health('running'),'ok');assert.equal(health('구성 수집됨'),'neutral');assert.equal(health('조회 권한 없음'),'unknown');
 });
 
-test('every scenario validates, and only documented gaps lack an official icon',async()=>{
+test('every scenario validates and unbundled endpoint artwork uses a generic glyph',async()=>{
   for(const {id} of scenarios){
     const s=await mockSnapshot(id);assert.ok(s.resources.length>0,id);
     for(const r of s.resources){
       const key=iconKey(r);
       if(key)assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),`${id}: ${key}`);
-      else assert.ok(r.provider==='onprem'||r.kind==='external'||r.type==='AWS::EC2::SecurityGroup'||r.type==='compute.googleapis.com/Subnetwork',`${id}: ${r.type} has no icon`);
+      else assert.ok(r.provider==='onprem'||r.kind==='external'||r.type==='AWS::EC2::SecurityGroup'||r.type==='compute.googleapis.com/Subnetwork'||r.type.toLowerCase()==='microsoft.network/privateendpoints',`${id}: ${r.type} has no icon`);
     }
   }
   for(const key of [...Object.values(providerLogo),...Object.values(groupIcon).flatMap(v=>Object.values(v))])assert.ok(existsSync(`src/assets/csp-icons/${key}.svg`),key);

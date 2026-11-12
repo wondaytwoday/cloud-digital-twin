@@ -14,7 +14,7 @@ export function ResourceIcon({resource,size=28}:{resource:Pick<Resource,'type'|'
   const Glyph=icons[resource.kind];return <span className="glyph-icon" style={{width:size,height:size}}><Glyph size={Math.round(size*.58)}/></span>;
 }
 export type Emphasis='normal'|'dim'|'focus'|'path'|'impact'|'removed';
-export type NodeData=Placed&{emphasis:Emphasis;scopeLabel?:string;onToggle:(id:string)=>void};
+export type NodeData=Placed&{emphasis:Emphasis;scopeLabel?:string;onToggle:(id:string)=>void;onPolicies:(id:string)=>void};
 export type FlowNode=Node<NodeData,'resource'|'frame'|'summary'>;
 export function cardSubtitle(r:Resource){
   const size=r.specs['인스턴스']?.replace('Standard_','');
@@ -28,17 +28,18 @@ export const ResourceNode=memo(function ResourceNode({data}:NodeProps<FlowNode>)
   return <div className={`rc ${r.provider} kind-${r.kind} h-${health(r.status)} e-${data.emphasis}`} title={`${r.name} · ${r.status}`}><Handles/>
     <ResourceIcon resource={r}/>
     <span className="rc-body"><strong>{r.name}</strong><small className={r.ip||r.cidr?'mono':''}>{cardSubtitle(r)}</small></span>
-    <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{r.publicIp&&<span className="rc-public" title={`공인 IP ${r.publicIp}`}><Globe2 size={11}/></span>}{data.policies>0&&<span className="rc-policy" title={`적용된 보안 정책 ${data.policies}개`}><ShieldCheck size={10}/>{data.policies}</span>}</span>
+    <span className="rc-state">{health(r.status)==='warn'?<AlertTriangle size={13}/>:<i/>}{r.publicIp&&<span className="rc-public" title={`공인 IP ${r.publicIp}`}><Globe2 size={11}/></span>}{data.policies>0&&<button className="rc-policy nodrag" aria-label={`보안 정책 ${data.policies}개 근거 보기`} onClick={e=>{e.stopPropagation();data.onPolicies(data.id);}}><ShieldCheck size={10}/>{data.policies}</button>}</span>
   </div>;
 });
-const variantIcon={provider:null,region:Globe2,network:Network,subnet:Rows3,workload:Boxes};
+const variantIcon={provider:null,scope:Building2,region:Globe2,network:Network,subnet:Rows3,workload:Boxes};
 function Title({data,open}:{data:NodeData;open:boolean}){
   const it=data.item,Icon=it.variant&&variantIcon[it.variant],official=it.variant&&iconUrl(groupIcon[it.provider]?.[it.variant]);
   return <div className="frame-title">
     {data.expandable&&<button className="chevron nodrag" aria-label={`${it.label} ${open?'접기':'펼치기'}`} aria-expanded={open} onClick={e=>{e.stopPropagation();data.onToggle(data.id)}}>{open?<ChevronDown size={14}/>:<ChevronRight size={14}/>}</button>}
     {it.variant==='provider'?<ProviderMark provider={it.provider}/>:it.resource?<ResourceIcon resource={it.resource} size={18}/>:official?<img className="csp-icon" src={official} width={18} height={18} alt="" aria-hidden="true" draggable={false}/>:Icon&&<Icon size={14} className="frame-icon"/>}
     <strong title={it.label}>{it.label}</strong>
-    {data.hub&&<span className="pill hub">HUB</span>}
+    {data.policies>0&&<button className="rc-policy nodrag" aria-label={`보안 정책 ${data.policies}개 근거 보기`} onClick={e=>{e.stopPropagation();data.onPolicies(data.id);}}><ShieldCheck size={10}/>{data.policies}</button>}
+    {data.hub&&<span className="pill hub" title="연결 허브">허브</span>}
     {it.outOfScope&&<span className="pill outside">범위 밖</span>}
     {open&&it.variant!=='provider'&&it.subtitle&&<span className={it.resource?'mono frame-sub':'frame-sub'}>{it.subtitle}</span>}
     {open&&data.scopeLabel&&<span className="pill scope" title="소유 범위. 네트워크 경계와 다를 수 있습니다.">{data.scopeLabel}</span>}

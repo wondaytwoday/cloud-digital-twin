@@ -1,3 +1,4 @@
+import {statusLabel} from '../shared/status';
 import {useState,useEffect,useRef,useMemo} from 'react';
 import {ArrowUpRight,Copy,Check,ShieldCheck,Activity,Info,Link2,X,Route,Unplug,AlertTriangle,CircleOff,CircleHelp,ArrowDown,Globe2,Plus,Minus,PenLine,MousePointerClick} from 'lucide-react';
 import type {Resource,Snapshot} from '../shared/schema';
@@ -29,7 +30,7 @@ export function ResourceDetail({resource:r,snapshot,onSelect,onClose,onTrace,onI
   const routes=[r,...[...ancestry].map(id=>snapshot.resources.find(x=>x.id===id)).filter((x):x is Resource=>!!x)].find(x=>x.routes.length)?.routes??[];
   const copy=async()=>{try{await navigator.clipboard.writeText(r.nativeId);setCopied(true)}catch{setCopied(false)}};
   return <aside className="inspector"><div className="inspector-head"><span>리소스 상세</span><button className="icon-button" onClick={onClose} aria-label="상세 닫기"><X size={16}/></button></div>
-    <div className="hero"><div className="large-icon plain"><ResourceIcon resource={r} size={38}/></div><div className="caption">{providerNames[r.provider]} · {kindNames[r.kind]}</div><h2>{r.name}</h2><div className="hero-badges"><span className={`badge ${statusClass[health(r.status)]}`}>{r.status}</span><span className="badge neutral">{r.region}</span></div>
+    <div className="hero"><div className="large-icon plain"><ResourceIcon resource={r} size={38}/></div><div className="caption">{providerNames[r.provider]} · {kindNames[r.kind]}</div><h2>{r.name}</h2><div className="hero-badges"><span title={r.status} className={`badge ${statusClass[health(r.status)]}`}>{statusLabel(r.status)}</span><span className="badge neutral">{r.region}</span></div>
       {!!scopePath.length&&<nav className="scope-path" aria-label="소유 범위">{scopePath.map((n,i)=><span key={n.id}>{i>0&&<i>/</i>}<button onClick={()=>onOpenScope(n.id)}>{n.name}</button></span>)}</nav>}
       {r.kind!=='firewall'&&r.kind!=='external'&&r.provider!=='onprem'&&<div className="hero-actions"><button className="button" onClick={()=>onTrace(r.id)}><Route size={14}/>경로 추적</button>{canImpact&&<button className="button" onClick={()=>onImpact(r.id)}><Unplug size={14}/>단절 영향</button>}</div>}</div>
     <div className="tabs" role="tablist" aria-label="리소스 상세">{[['overview','개요'],['network',`네트워크${policies.length+r.rules.length?` ${policies.length+(r.rules.length?1:0)}`:''}`],['access','접근 권한']].map(([k,l])=><button key={k} role="tab" aria-selected={tab===k} onClick={()=>setTab(k)}>{l}</button>)}</div>

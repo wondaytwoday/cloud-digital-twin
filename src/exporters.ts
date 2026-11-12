@@ -6,16 +6,16 @@ import type {Topology} from './layout';
 const save=(href:string,name:string)=>{const a=document.createElement('a');a.href=href;a.download=name;a.click();};
 const saveBlob=(content:string,type:string,name:string)=>{const url=URL.createObjectURL(new Blob([content],{type}));save(url,name);setTimeout(()=>URL.revokeObjectURL(url),1000);};
 export const downloadJson=(snapshot:Snapshot,base:string)=>saveBlob(JSON.stringify(snapshot,null,2),'application/json',`${base}.json`);
-const xml=(v:string)=>v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const xml=(v:string)=>v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/\n/g,'&#10;');
 const providerColor:Record<string,[string,string]>={azure:['#e8f2fb','#1f6fb5'],aws:['#fdf2e2','#a85f0c'],gcp:['#e8f5ec','#2c7c4c'],onprem:['#ecEEf5','#4d5a78']};
-const edgeColor:Record<string,string>={hybrid:'#0f7a68',peering:'#6a55b0',attachment:'#8996a0',policy:'#64748b',simulation:'#7ec8b7'};
+const edgeColor:Record<string,string>={hybrid:'#0f7a68',peering:'#6a55b0',attachment:'#8996a0',policy:'#64748b',simulation:'#7ec8b7',reference:'#64748b'};
 // Shapes and connections only. Editing keeps connections; product icons stay out so the file carries no CSP artwork.
 export function toDrawio(topology:Topology){
   const cells=['<mxCell id="0"/>','<mxCell id="1" parent="0"/>'];
   const ordered=[...topology.nodes].sort((a,b)=>Number(!!b.item.variant&&!b.collapsed)-Number(!!a.item.variant&&!a.collapsed)||a.depth-b.depth);
   ordered.forEach(n=>{
-    const [fill,stroke]=providerColor[n.item.provider]??providerColor.onprem,frame=!!n.item.variant&&!n.collapsed,label=[n.item.label,n.item.resource?.ip??n.item.subtitle].filter(Boolean).join('\n');
-    const style=frame?`rounded=1;whiteSpace=wrap;html=0;verticalAlign=top;align=left;spacingLeft=8;fillColor=${n.item.variant==='provider'?fill:'none'};strokeColor=${stroke};${n.item.variant==='subnet'||n.item.variant==='region'?'dashed=1;':''}`:`rounded=1;whiteSpace=wrap;html=0;fillColor=#ffffff;strokeColor=${stroke};`;
+    const [fill,stroke]=providerColor[n.item.provider]??providerColor.onprem,frame=!!n.item.variant&&!n.collapsed,label=[n.item.label,n.item.resource?.ip??n.item.subtitle,n.collapsed&&n.summary.total?`자원 ${n.summary.total}개`:undefined,n.policies?`보안 정책 ${n.policies}개`:undefined].filter(Boolean).join('\n');
+    const style=frame?`rounded=1;whiteSpace=wrap;html=0;verticalAlign=top;align=left;spacingLeft=8;fillColor=${n.item.variant==='provider'?fill:'none'};strokeColor=${stroke};${n.item.variant==='subnet'||n.item.variant==='region'||n.item.variant==='scope'?'dashed=1;':''}`:`rounded=1;whiteSpace=wrap;html=0;fillColor=#ffffff;strokeColor=${stroke};`;
     cells.push(`<mxCell id="${xml(n.id)}" value="${xml(label)}" style="${style}" vertex="1" parent="1"><mxGeometry x="${Math.round(n.x)}" y="${Math.round(n.y)}" width="${Math.round(n.width)}" height="${Math.round(n.height)}" as="geometry"/></mxCell>`);
   });
   topology.edges.forEach(e=>{
@@ -48,7 +48,7 @@ export async function toSvg(topology:Topology){
   const text=(x:number,y:number,value:string,size:number,weight:number,color:string,max:number)=>`<text x="${x}" y="${y}" font-size="${size}" font-weight="${weight}" fill="${color}">${xml(fit(value,max,`${weight} ${size}px ${FONT}`))}</text>`;
   const framed=(n:Topology['nodes'][number])=>!!n.item.variant&&!n.collapsed;
   for(const n of [...topology.nodes].filter(framed).sort((a,b)=>a.depth-b.depth)){
-    const [fill,stroke]=providerColor[n.item.provider]??providerColor.onprem,provider=n.item.variant==='provider',dashed=n.item.variant==='subnet'||n.item.variant==='region';
+    const [fill,stroke]=providerColor[n.item.provider]??providerColor.onprem,provider=n.item.variant==='provider',dashed=n.item.variant==='subnet'||n.item.variant==='region'||n.item.variant==='scope';
     parts.push(`<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="10" fill="${provider?fill:n.item.variant==='network'?'#ffffff':'#f4f6f9'}" stroke="${stroke}" stroke-opacity="${provider?1:.45}"${dashed?' stroke-dasharray="5 4"':''}/>`,text(n.x+14,n.y+(provider?30:24),[n.item.label,n.item.subtitle].filter(Boolean).join('  '),provider?15:12.5,600,'#0f172a',n.width-28));
   }
   for(const e of topology.edges)if(e.points.length>1){
@@ -59,6 +59,10 @@ export async function toSvg(topology:Topology){
     parts.push(`<rect x="${n.x}" y="${n.y}" width="${n.width}" height="${n.height}" rx="8" fill="#ffffff" stroke="${stroke}" stroke-opacity=".55"/>`);
     if(image)parts.push(`<image x="${n.x+10}" y="${n.y+n.height/2-14}" width="28" height="28" href="${image}" xlink:href="${image}"/>`);
     parts.push(text(textX,n.y+(n.height>70?30:26),n.item.label,12.5,600,'#0f172a',width),text(textX,n.y+(n.height>70?48:43),r?cardSubtitle(r)??'':n.item.subtitle??'',11,400,'#475569',width));
+  }
+  for(const n of topology.nodes){
+    if(n.collapsed&&n.summary.total&&n.height>70)parts.push(text(n.x+12,n.y+68,`자원 ${n.summary.total}개`,11,400,'#475569',n.width-24));
+    if(n.policies)parts.push(text(n.x+n.width-88,n.y+15,`보안 정책 ${n.policies}`,10,600,'#475569',80));
   }
   for(const e of topology.edges)if((e.kind==='hybrid'||e.kind==='peering')&&e.points.length>1){
     let at=0,best=-1;e.points.slice(0,-1).forEach((p,i)=>{const q=e.points[i+1],l=Math.abs(q.x-p.x);if(l>best){best=l;at=i;}});

@@ -1,3 +1,4 @@
+import {collectionLabels} from '../shared/collection-items';
 import {useEffect,useState} from 'react';
 import {Check,Circle,CircleAlert,KeyRound,Minus,RefreshCw} from 'lucide-react';
 import {overallProgress,providerProgress,type CollectionStatus,type ProviderId,type ProviderState,type Stage,type StageState} from '../shared/collect';
@@ -9,7 +10,7 @@ const STAGE_LABEL:Record<StageState,string>={pending:'대기',running:'진행 �
 const stateIcon=(state:ProviderState)=>state==='running'?<RefreshCw size={15} className="spin"/>:state==='ok'||state==='partial'?<Check size={15}/>:state==='unauthenticated'?<KeyRound size={15}/>:state==='failed'?<CircleAlert size={15}/>:null;
 const stageIcon=(state:StageState)=>state==='running'?<RefreshCw size={13} className="spin"/>:state==='done'?<Check size={13}/>:state==='failed'?<CircleAlert size={13}/>:state==='skipped'?<Minus size={13}/>:<Circle size={13}/>;
 const elapsedText=(ms:number)=>{const s=Math.max(0,Math.floor(ms/1000));return s<60?`${s}초`:`${Math.floor(s/60)}분 ${s%60}초`;};
-export const percent=(state:Pick<CollectionStatus,'providers'>)=>Math.round(overallProgress(state)*100);
+export const percent=(state:Pick<CollectionStatus,'providers'|'selectedItems'>)=>Math.round(overallProgress(state)*100);
 export function ProgressBar({value,label,active}:{value:number;label:string;active:boolean}){
   return <div className={`progress ${active?'is-active':''}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}><i style={{width:`${value}%`}}/></div>;
 }
@@ -22,8 +23,9 @@ export function CollectProgress({state,onGuide}:{state:CollectState;onGuide?:()=
   useEffect(()=>{if(!state.running)return;const t=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(t);},[state.running]);
   return <div className="collect-progress">
     {state.running?<div className="collect-overall"><div className="collect-overall-head"><strong>전체 {value}%</strong>{state.startedAt&&<span>경과 {elapsedText(now-Date.parse(state.startedAt))}</span>}</div><ProgressBar value={value} label="전체 수집 진행률" active/></div>:state.finishedAt&&<p className="collect-last">마지막 수집 {new Date(state.finishedAt).toLocaleString('ko-KR')}</p>}
-    {connectors.map(c=>{const run=state.providers[c.provider as ProviderId],show=run?.stages?.length&&run.state!=='unauthenticated'&&(state.running||run.state==='failed'||run.state==='partial');return <section className="collect-provider" key={c.provider} aria-label={c.name}>
+    {connectors.filter(c=>!state.running||!state.selectedItems||state.selectedItems.some(i=>i.provider===c.provider)).map(c=>{const run=state.providers[c.provider as ProviderId],show=run?.stages?.length&&run.state!=='unauthenticated'&&(state.running||run.state==='failed'||run.state==='partial');return <section className="collect-provider" key={c.provider} aria-label={c.name}>
       <header><ProviderMark provider={c.provider}/><strong>{c.name}</strong><span className={`collect-state s-${run?.state??'idle'}`} role="status">{stateIcon(run?.state??'idle')}{STATE_LABEL[run?.state??'idle']}{run?.state==='ok'||run?.state==='partial'?` · 자원 ${run.resources??0}개`:''}</span></header>
+      {!!state.selectedItems?.filter(i=>i.provider===c.provider).length&&<p className="muted small">선택 항목: {state.selectedItems.filter(i=>i.provider===c.provider).map(i=>collectionLabels[i.item]).join(', ')}</p>}
       {run?.identity&&run.state!=='unauthenticated'&&<p className="collect-identity">{run.identity}</p>}
       {run?.state==='running'&&<ProgressBar value={Math.round(providerProgress(run.stages)*100)} label={`${c.name} 수집 진행률`} active/>}
       {show?<ol className="stage-list">{run.stages!.map(s=><StageRow key={s.id} stage={s}/>)}</ol>:null}

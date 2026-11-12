@@ -1,4 +1,4 @@
-import './env.js';
+import './bootstrap.js';
 import {parseArgs} from 'node:util';
 import {collectAzure,collectAws,collectGcp,type CollectOptions} from './collectors.js';
 import {FileSnapshotStore} from './store.js';

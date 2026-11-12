@@ -1,3 +1,4 @@
+import {activityIdentity} from '../shared/activity.js';
 import {classifyResource} from '../shared/classification.js';
 import type {CollectionGap,CostCoverage} from '../shared/schema.js';
 import type { Activity } from '../shared/schema.js';
@@ -6,7 +7,9 @@ import { azureSkus, gcpMachines, skuSpecs } from './skus.js';
 // Disk sizes arrive per disk and sometimes as strings; an instance with none reported gets no disk entry rather than a zero.
 const diskSpec=(sizes:unknown[]):Record<string,string>=>{const n=sizes.map(Number).filter(v=>v>0);return n.length?{'디스크':`${n.reduce((a,b)=>a+b,0)} GiB`}:{};};
 type Raw = Record<string, any>;
-export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];iamIncomplete?:string[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];collectedScopes?:string[];costCoverage?:CostCoverage[];collectionGaps?:CollectionGap[];inventoryMode?:'summary'|'full';inventorySummary?:import('../shared/schema.js').InventorySummary[];accountProgress?:{completed:number;total:number};awsInventory?:{account:string;rows:Raw[]}};
+export type Normalized={resources:Resource[];links:Link[];warnings:string[];scopeLabels:Record<string,string>;hierarchy?:HierarchyNode[];incomplete?:string[];iamIncomplete?:string[];iamCollectedScopes?:string[];activityCollectedScopes?:string[];activityIncomplete?:string[];activityLimited?:string[];itemCollection?:import('../shared/schema.js').ItemCollection[];cost?:CostRow[];iam?:IamAssignment[];activity?:Activity[];collectedScopes?:string[];costCoverage?:CostCoverage[];collectionGaps?:CollectionGap[];inventoryMode?:'summary'|'full';inventorySummary?:import('../shared/schema.js').InventorySummary[];accountProgress?:{completed:number;total:number};awsInventory?:{account:string;rows:Raw[]}};
+const single=(values:(string|undefined)[])=>{const unique=[...new Set(values.filter((v):v is string=>!!v))];return unique.length===1?unique[0]:undefined;};
+const azureLocation=(subnets:(string|undefined)[])=>single(subnets.map(s=>s?.toLowerCase()))??single(subnets.map(s=>s?.toLowerCase().match(/^(.*\/virtualnetworks\/[^/]+)\/subnets\//)?.[1]));
 const leafKind:Record<string,HierarchyNode['kind']>={azure:'subscription',aws:'account',gcp:'project'};
 export const scopeNodeId=(provider:string,scope:string)=>`${provider}:scope:${scope}`;
 const base=(provider:Provider,id:string,name:string,kind:Resource['kind'],type:string,scope:string,region:string,source:string,extra:Partial<Resource>={}):Resource=>ResourceSchema.parse({id:`${provider}:${id}`,nativeId:id,name,provider,kind,type,scope,region,source,...extra});
@@ -14,7 +17,7 @@ const name=(r:Raw)=>r.Tags?.find((t:Raw)=>t.Key==='Name')?.Value;
 const relation=(source:string,target:string,kind:Link['kind'],label:string,evidence:string,transit?:boolean):Link=>({id:`${kind}:${source}:${target}`,source,target,kind,label,evidence,...(transit?{transit}:{})});
 const azurePrivateServices:Record<string,[Resource['kind'],string]>={'microsoft.cache/redis':['database','Azure Cache for Redis'],'microsoft.documentdb/databaseaccounts':['database','Cosmos DB'],'microsoft.storage/storageaccounts':['storage','Storage account']};
 // Rows folded into other resources, so they never appear as items of their own.
-const AZURE_CONSUMED=new Set(['microsoft.network/networkinterfaces','microsoft.network/privateendpoints','microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
+const AZURE_CONSUMED=new Set(['microsoft.network/networkinterfaces','microsoft.network/routetables','microsoft.network/publicipaddresses','microsoft.network/connections']);
 const pairKey=(l:Link)=>l.kind==='peering'?`peering:${[l.source,l.target].sort().join('|')}`:l.id;
 const awsSharedKey=(id:string)=>id.match(/^aws:[^/]+\/([^/]+\/(?:tgw|dxgw)-[^/]+)$/)?.[1];
 // Runs after all accounts/projects merge: a reference into another collected account is not dangling.
@@ -57,7 +60,12 @@ export function finish(input:Normalized[]):Normalized {
   const hierarchy=new Map(parts.flatMap(p=>p.hierarchy??[]).map(n=>[n.id,n]));
   for(const r of resources)if(r.provider!=='onprem'&&r.scope!=='external'&&!hierarchy.has(scopeNodeId(r.provider,r.scope)))hierarchy.set(scopeNodeId(r.provider,r.scope),{id:scopeNodeId(r.provider,r.scope),name:scopeLabels[r.scope]??r.scope,provider:r.provider,kind:leafKind[r.provider],nativeId:r.scope,scope:r.scope});
   for(const n of hierarchy.values())if(n.scope&&!scopeLabels[n.scope])scopeLabels[n.scope]=n.name;
-  return {resources,links:[...unique.values()],warnings,scopeLabels,inventorySummary:parts.flatMap(p=>p.inventorySummary??[]),inventoryMode:parts.find(p=>p.inventoryMode)?.inventoryMode,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>[...p.incomplete??[],...p.iamIncomplete??[]]))],iamIncomplete:[...new Set(parts.flatMap(p=>p.iamIncomplete??[]))],collectedScopes:parts.some(p=>p.collectedScopes!==undefined)?[...new Set(parts.flatMap(p=>p.collectedScopes??[]))]:undefined,collectionGaps,costCoverage:parts.flatMap(p=>p.costCoverage??[]),cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[a.id,a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
+  return {
+    iamCollectedScopes:parts.some(p=>p.iamCollectedScopes!==undefined)?[...new Set(parts.flatMap(p=>p.iamCollectedScopes??[]))]:undefined,
+    activityCollectedScopes:parts.some(p=>p.activityCollectedScopes!==undefined)?[...new Set(parts.flatMap(p=>p.activityCollectedScopes??[]))]:undefined,
+    activityLimited:[...new Set(parts.flatMap(p=>p.activityLimited??[]))],
+    itemCollection:parts.flatMap(p=>p.itemCollection??[]),
+    activityIncomplete:[...new Set(parts.flatMap(p=>p.activityIncomplete??[]))],resources,links:[...unique.values()],warnings,scopeLabels,inventorySummary:parts.flatMap(p=>p.inventorySummary??[]),inventoryMode:parts.find(p=>p.inventoryMode)?.inventoryMode,hierarchy:[...hierarchy.values()],incomplete:[...new Set(parts.flatMap(p=>[...p.incomplete??[],...p.iamIncomplete??[]]))],iamIncomplete:[...new Set(parts.flatMap(p=>p.iamIncomplete??[]))],collectedScopes:parts.some(p=>p.collectedScopes!==undefined)?[...new Set(parts.flatMap(p=>p.collectedScopes??[]))]:undefined,collectionGaps,costCoverage:parts.flatMap(p=>p.costCoverage??[]),cost:parts.flatMap(p=>p.cost??[]),activity:[...new Map(parts.flatMap(p=>p.activity??[]).map(a=>[activityIdentity(a),a])).values()].sort((a,b)=>b.at.localeCompare(a.at)),iam:[...new Map(parts.flatMap(p=>p.iam??[]).map(a=>[a.id,a])).values()]};
 }
 export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):Normalized {
   const resources:Resource[]=[], links:Link[]=[];
@@ -65,8 +73,8 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
   const byId=new Map(rows.map(r=>[r.id.toLowerCase(),r]));
   const nicOwner=new Map<string,string>();
   for(const r of rows)if(r.type.toLowerCase()==='microsoft.compute/virtualmachines')for(const n of r.properties?.networkProfile?.networkInterfaces??[])nicOwner.set(n.id.toLowerCase(),r.id);
-  const privateEndpoints=new Map<string,Raw>();
-  for(const r of rows)if(r.type.toLowerCase()==='microsoft.network/privateendpoints')for(const c of r.properties?.privateLinkServiceConnections??[])if(c.properties?.privateLinkServiceId)privateEndpoints.set(c.properties.privateLinkServiceId.toLowerCase(),r.properties);
+  const privateEndpoints=new Map<string,Raw[]>();
+  for(const r of rows)if(r.type.toLowerCase()==='microsoft.network/privateendpoints')for(const c of r.properties?.privateLinkServiceConnections??[])if(c.properties?.privateLinkServiceId){const key=c.properties.privateLinkServiceId.toLowerCase();(privateEndpoints.get(key)??privateEndpoints.set(key,[]).get(key)!).push(r.properties);}
   for(const r of rows){
     const native=r.id.toLowerCase(),t=r.type.toLowerCase(),p=r.properties??{}, common=[r.subscriptionId,r.location??'global','Azure Resource Graph'] as const;
     const add=(kind:Resource['kind'],extra:Partial<Resource>={})=>resources.push(base('azure',native,r.name,kind,r.type,...common,{group:r.resourceGroup,tags:r.tags??{},...extra}));
@@ -75,11 +83,12 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
       for(const sub of p.subnets??[]){resources.push(base('azure',sub.id.toLowerCase(),sub.name,'subnet','Microsoft.Network/virtualNetworks/subnets',...common,{group:r.resourceGroup,parent:id(r.id),cidr:sub.properties?.addressPrefix??sub.properties?.addressPrefixes?.join(', ')}));if(sub.properties?.networkSecurityGroup?.id)links.push(relation(id(sub.properties.networkSecurityGroup.id),id(sub.id),'policy','NSG 적용','subnet.properties.networkSecurityGroup.id'));}
       for(const peer of p.virtualNetworkPeerings??[])if(peer.properties?.remoteVirtualNetwork?.id)links.push(relation(id(r.id),id(peer.properties.remoteVirtualNetwork.id),'peering',peer.properties.allowGatewayTransit||peer.properties.useRemoteGateways?'Peering · transit':'Peering','virtualNetworkPeerings.remoteVirtualNetwork.id',!!(peer.properties.allowGatewayTransit||peer.properties.useRemoteGateways)));
     } else if(t==='microsoft.compute/virtualmachines'){
-      const nic=byId.get(p.networkProfile?.networkInterfaces?.[0]?.id?.toLowerCase()), ip=nic?.properties?.ipConfigurations?.[0]?.properties,size=p.hardwareProfile?.vmSize;
-      add('compute',{parent:ip?.subnet?.id?id(ip.subnet.id):undefined,ip:ip?.privateIPAddress,publicIp:ip?.publicIPAddress?.id?byId.get(ip.publicIPAddress.id.toLowerCase())?.properties?.ipAddress:undefined,status:p.extended?.instanceView?.powerState?.code?.split('/').pop()??p.provisioningState??'미확인',specs:{'인스턴스':size??'미확인','OS':p.storageProfile?.osDisk?.osType??'미확인',...skuSpecs(azureSkus[size]),...diskSpec([p.storageProfile?.osDisk?.diskSizeGB,...(p.storageProfile?.dataDisks??[]).map((d:Raw)=>d.diskSizeGB)])}});
+      const nics:Raw[]=(p.networkProfile?.networkInterfaces??[]).map((n:Raw)=>byId.get(n.id?.toLowerCase())).filter(Boolean),ips:Raw[]=nics.flatMap(n=>n.properties?.ipConfigurations??[]).map(c=>c.properties??{}),ip=ips.length===1?ips[0]:ips.find(c=>c.primary===true),subnets=ips.map(c=>c.subnet?.id),location=azureLocation(subnets),size=p.hardwareProfile?.vmSize;
+      add('compute',{parent:location?id(location):undefined,ip:ip?.privateIPAddress,publicIp:ip?.publicIPAddress?.id?byId.get(ip.publicIPAddress.id.toLowerCase())?.properties?.ipAddress:undefined,status:p.extended?.instanceView?.powerState?.code?.split('/').pop()??p.provisioningState??'미확인',specs:{'인스턴스':size??'미확인','OS':p.storageProfile?.osDisk?.osType??'미확인',...skuSpecs(azureSkus[size]),...diskSpec([p.storageProfile?.osDisk?.diskSizeGB,...(p.storageProfile?.dataDisks??[]).map((d:Raw)=>d.diskSizeGB)])}});
       for(const disk of [p.storageProfile?.osDisk,...p.storageProfile?.dataDisks??[]])if(disk?.managedDisk?.id)links.push(relation(id(r.id),id(disk.managedDisk.id),'reference','연결 디스크','virtualMachine.storageProfile.managedDisk.id'));
       for(const identity of Object.keys(r.identity?.userAssignedIdentities??{}))links.push(relation(id(r.id),id(identity),'reference','연결 관리 ID','virtualMachine.identity.userAssignedIdentities'));
-      if(nic?.properties?.networkSecurityGroup?.id)links.push(relation(id(nic.properties.networkSecurityGroup.id),id(r.id),'policy','NIC 보안 정책','networkInterface.networkSecurityGroup.id'));
+      for(const nic of nics)if(nic.properties?.networkSecurityGroup?.id)links.push(relation(id(nic.properties.networkSecurityGroup.id),id(r.id),'policy','NIC 보안 정책','networkInterface.networkSecurityGroup.id'));
+      if(subnets.length>1)for(const subnet of new Set(subnets))if(subnet)links.push(relation(id(r.id),id(subnet),'reference','NIC 서브넷 참조','networkInterface.ipConfigurations.subnet.id'));
     } else if(t==='microsoft.network/networksecuritygroups')add('firewall',{rules:[...(p.securityRules??[]),...(p.defaultSecurityRules??[])].map((rule:Raw)=>{const q=rule.properties??{};return{direction:q.direction??'Unknown',action:q.access??'Unknown',protocol:q.protocol??'*',ports:q.destinationPortRange??q.destinationPortRanges?.join(', ')??'*',source:q.sourceAddressPrefix??q.sourceAddressPrefixes?.join(', ')??q.sourceApplicationSecurityGroups?.map((x:Raw)=>x.id).join(', ')??'미확인',destination:q.destinationAddressPrefix??q.destinationAddressPrefixes?.join(', ')??'미확인',priority:String(q.priority??'-')};})});
     else if(t==='microsoft.network/expressroutecircuits')add('gateway',{specs:{'종류':'ExpressRoute circuit','대역폭':`${p.serviceProviderProperties?.bandwidthInMbps??'?'} Mbps`,'공급자':p.serviceProviderProperties?.serviceProviderName??'미확인','피어링 위치':p.serviceProviderProperties?.peeringLocation??'미확인'},status:p.provisioningState??'미확인'});
     else if(t==='microsoft.network/virtualnetworkgateways'){
@@ -97,16 +106,20 @@ export function normalizeAzure(rows:Raw[],scopeLabels:Record<string,string>={}):
       add('loadbalancer',{parent:p.gatewayIPConfigurations?.[0]?.properties?.subnet?.id?id(p.gatewayIPConfigurations[0].properties.subnet.id):undefined,ip:p.frontendIPConfigurations?.[0]?.properties?.privateIPAddress,status:p.operationalState??p.provisioningState??'미확인',specs:{'종류':'Application Gateway','SKU':p.sku?.tier??'미확인'}});
       for(const pool of p.backendAddressPools??[])for(const c of pool.properties?.backendIPConfigurations??[]){const vm=nicOwner.get(c.id.toLowerCase().split('/ipconfigurations/')[0]);if(vm)links.push(relation(id(r.id),id(vm),'attachment','백엔드 풀','applicationGateway.backendAddressPools.backendIPConfigurations'));}
     } else if(t==='microsoft.network/bastionhosts')add('appliance',{parent:p.ipConfigurations?.[0]?.properties?.subnet?.id?id(p.ipConfigurations[0].properties.subnet.id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'Azure Bastion'}});
+    else if(t==='microsoft.network/privateendpoints'){
+      add('endpoint',{parent:p.subnet?.id?id(p.subnet.id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'Private Endpoint'}});
+      for(const connection of p.privateLinkServiceConnections??[])if(connection.properties?.privateLinkServiceId)links.push(relation(id(r.id),id(connection.properties.privateLinkServiceId),'attachment','Private Link 구성 연결','privateEndpoint.privateLinkServiceConnections.privateLinkServiceId'));
+    }
     else if(azurePrivateServices[t]){
       const pe=privateEndpoints.get(native),[kind,label]=azurePrivateServices[t];
-      add(kind,{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.provisioningState??'미확인',specs:{'종류':label,'연결':pe?'Private Endpoint':'공용 엔드포인트'}});
+      add(kind,{status:p.provisioningState??'미확인',specs:{'종류':label,'연결':pe?`Private Endpoint 설정 ${pe.length}개`:p.publicNetworkAccess??'접근 설정 미확인'}});
     } else if(t==='microsoft.network/natgateways')add('nat',{parent:p.subnets?.[0]?.id?id(p.subnets[0].id):undefined,status:p.provisioningState??'미확인',specs:{'종류':'NAT Gateway'}});
     else if(t==='microsoft.containerservice/managedclusters'){
-      const pools=p.agentPoolProfiles??[],subnet=pools[0]?.vnetSubnetID;
+      const pools=p.agentPoolProfiles??[],subnet=azureLocation(pools.map((pool:Raw)=>pool.vnetSubnetID));
       add('cluster',{parent:subnet?id(subnet):undefined,status:p.powerState?.code??p.provisioningState??'미확인',specs:{'종류':'AKS','버전':p.kubernetesVersion??'미확인','노드':String(pools.reduce((s:number,x:Raw)=>s+(x.count??0),0))}});
     } else if(t==='microsoft.sql/servers'){
       const pe=privateEndpoints.get(native);
-      add('database',{parent:pe?.subnet?.id?id(pe.subnet.id):undefined,ip:pe?.customDnsConfigs?.[0]?.ipAddresses?.[0],status:p.state??'미확인',specs:{'종류':'Azure SQL','버전':p.version??'미확인','연결':pe?'Private Endpoint':'공용 엔드포인트'}});
+      add('database',{status:p.state??'미확인',specs:{'종류':'Azure SQL','버전':p.version??'미확인','연결':pe?`Private Endpoint 설정 ${pe.length}개`:p.publicNetworkAccess??'접근 설정 미확인'}});
     }else if(!AZURE_CONSUMED.has(t))add(classifyResource('azure',t).kind,{auxiliary:classifyResource('azure',t).auxiliary,status:p.provisioningState??p.state??'구성 수집됨',specs:{'서비스':r.type}});
   }
   // Routes attach after the pass above so a UDR can reference a firewall from any row order.
@@ -137,8 +150,9 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   }
   for(const reservation of data.Reservations??[])for(const r of reservation.Instances??[]){
     if(r.State?.Name==='terminated')continue;
-    const spec=data.InstanceTypes?.find((x:Raw)=>x.InstanceType===r.InstanceType);
-    add(r,'InstanceId','compute','AWS::EC2::Instance',{parent:r.SubnetId?id(r.SubnetId):undefined,ip:r.PrivateIpAddress,publicIp:r.PublicIpAddress,status:r.State?.Name??'미확인',specs:{'인스턴스':r.InstanceType??'미확인','vCPU':String(spec?.VCpuInfo?.DefaultVCpus??'미수집'),'메모리':spec?.MemoryInfo?.SizeInMiB?`${spec.MemoryInfo.SizeInMiB/1024} GiB`:'미수집','GPU':spec?String(spec.GpuInfo?.Gpus?.map((g:Raw)=>`${g.Count} × ${g.Name}`).join(', ')||'없음'):'미수집'}});
+    const spec=data.InstanceTypes?.find((x:Raw)=>x.InstanceType===r.InstanceType),subnets=(r.NetworkInterfaces??[]).map((nic:Raw)=>nic.SubnetId),location=single(subnets.length?subnets:[r.SubnetId])??single((r.NetworkInterfaces??[]).map((nic:Raw)=>nic.VpcId))??(subnets.length?undefined:r.VpcId);
+    add(r,'InstanceId','compute','AWS::EC2::Instance',{parent:location?id(location):undefined,ip:r.PrivateIpAddress,publicIp:r.PublicIpAddress,status:r.State?.Name??'미확인',specs:{'인스턴스':r.InstanceType??'미확인','vCPU':String(spec?.VCpuInfo?.DefaultVCpus??'미수집'),'메모리':spec?.MemoryInfo?.SizeInMiB?`${spec.MemoryInfo.SizeInMiB/1024} GiB`:'미수집','GPU':spec?String(spec.GpuInfo?.Gpus?.map((g:Raw)=>`${g.Count} × ${g.Name}`).join(', ')||'없음'):'미수집'}});
+    if(subnets.length>1)for(const subnet of new Set(subnets))if(subnet)links.push(relation(id(r.InstanceId),id(String(subnet)),'reference','NIC 서브넷 참조','instance.NetworkInterfaces.SubnetId'));
     for(const disk of r.BlockDeviceMappings??[])if(disk.Ebs?.VolumeId)links.push(relation(id(r.InstanceId),id(disk.Ebs.VolumeId),'reference','연결 볼륨','instance.BlockDeviceMappings.Ebs.VolumeId'));
     for(const sg of r.SecurityGroups??[])links.push(relation(id(sg.GroupId),id(r.InstanceId),'policy','Security Group 적용','instance.SecurityGroups'));
   }
@@ -153,7 +167,7 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
     resources.push(base('aws',native(r.directConnectGatewayId,scope,'global'),r.directConnectGatewayName??r.directConnectGatewayId,'gateway','AWS::DirectConnect::DirectConnectGateway',scope,'global','AWS Describe APIs',{group:'global',status:r.directConnectGatewayState??'미확인',specs:{'종류':'Direct Connect gateway','ASN':String(r.amazonSideAsn??'미확인')}}));
     for(const a of r.associations??[])if(a.associatedGateway?.id)links.push(relation(id(r.directConnectGatewayId,scope,'global'),id(a.associatedGateway.id,a.associatedGateway.ownerAccount??scope,a.associatedGateway.region??region),'attachment','DX 연결','directConnectGatewayAssociation.associatedGateway'));
   }
-  for(const r of data.Clusters??[])resources.push(base('aws',native(r.name),r.name,'cluster','AWS::EKS::Cluster',scope,region,'AWS Describe APIs',{group:region,parent:r.resourcesVpcConfig?.subnetIds?.[0]?id(r.resourcesVpcConfig.subnetIds[0]):undefined,status:r.status??'미확인',specs:{'종류':'EKS','버전':r.version??'미확인'}}));
+  for(const r of data.Clusters??[])resources.push(base('aws',native(r.name),r.name,'cluster','AWS::EKS::Cluster',scope,region,'AWS Describe APIs',{group:region,parent:single(r.resourcesVpcConfig?.subnetIds??[])?id(single(r.resourcesVpcConfig.subnetIds)!):r.resourcesVpcConfig?.vpcId?id(r.resourcesVpcConfig.vpcId):undefined,status:r.status??'미확인',specs:{'종류':'EKS','버전':r.version??'미확인'}}));
   for(const r of live(data.VpnConnections)){
     const tunnels=r.VgwTelemetry??[],up=tunnels.filter((t:Raw)=>t.Status==='UP').length;
     add(r,'VpnConnectionId','gateway','AWS::EC2::VPNConnection',{status:r.State==='available'&&tunnels.length&&up<tunnels.length?'degraded':r.State??'미확인',specs:{'종류':'Site-to-Site VPN','터널':`${up}/${tunnels.length} UP`,'고객 게이트웨이':r.CustomerGatewayId??'미확인'}});
@@ -161,12 +175,12 @@ export function normalizeAws(data:Raw,scope:string,region:string,label?:string):
   }
   for(const r of data.VpcPeeringConnections??[])if(r.Status?.Code==='active')links.push(relation(id(r.RequesterVpcInfo.VpcId,r.RequesterVpcInfo.OwnerId??scope),id(r.AccepterVpcInfo.VpcId,r.AccepterVpcInfo.OwnerId??scope),'peering','Peering','vpcPeeringConnection'));
   for(const r of data.LoadBalancers??[]){
-    add(r,'LoadBalancerName','loadbalancer','AWS::ElasticLoadBalancingV2::LoadBalancer',{parent:r.AvailabilityZones?.[0]?.SubnetId?id(r.AvailabilityZones[0].SubnetId):undefined,status:r.State?.Code??'미확인',specs:{'종류':`${r.Type??'application'} LB`,'공개 범위':r.Scheme??'미확인'}});
+    add(r,'LoadBalancerName','loadbalancer','AWS::ElasticLoadBalancingV2::LoadBalancer',{parent:single((r.AvailabilityZones??[]).map((zone:Raw)=>zone.SubnetId))?id(single(r.AvailabilityZones.map((zone:Raw)=>zone.SubnetId))!):r.VpcId?id(r.VpcId):undefined,status:r.State?.Code??'미확인',specs:{'종류':`${r.Type??'application'} LB`,'공개 범위':r.Scheme??'미확인'}});
     for(const sg of r.SecurityGroups??[])links.push(relation(id(sg),id(r.LoadBalancerName),'policy','Security Group 적용','loadBalancer.SecurityGroups'));
     for(const target of r.Targets??[])links.push(relation(id(r.LoadBalancerName),id(target),'attachment','대상 그룹','describeTargetHealth.Target.Id'));
   }
   for(const r of data.DBInstances??[]){
-    add(r,'DBInstanceIdentifier','database','AWS::RDS::DBInstance',{parent:r.DBSubnetGroup?.Subnets?.[0]?.SubnetIdentifier?id(r.DBSubnetGroup.Subnets[0].SubnetIdentifier):undefined,status:r.DBInstanceStatus??'미확인',specs:{'종류':r.Engine??'RDS','인스턴스':r.DBInstanceClass??'미확인','Multi-AZ':String(r.MultiAZ??false)}});
+    add(r,'DBInstanceIdentifier','database','AWS::RDS::DBInstance',{parent:single((r.DBSubnetGroup?.Subnets??[]).map((subnet:Raw)=>subnet.SubnetIdentifier))?id(single(r.DBSubnetGroup.Subnets.map((subnet:Raw)=>subnet.SubnetIdentifier))!):r.DBSubnetGroup?.VpcId?id(r.DBSubnetGroup.VpcId):undefined,status:r.DBInstanceStatus??'미확인',specs:{'종류':r.Engine??'RDS','인스턴스':r.DBInstanceClass??'미확인','Multi-AZ':String(r.MultiAZ??false)}});
     for(const sg of r.VpcSecurityGroups??[])links.push(relation(id(sg.VpcSecurityGroupId),id(r.DBInstanceIdentifier),'policy','Security Group 적용','dbInstance.VpcSecurityGroups'));
   }
   for(const table of data.RouteTables??[]){
@@ -189,7 +203,8 @@ export function normalizeGcp(assets:Raw[]):Normalized {
       for(const peer of p.peerings??[])if(peer.network&&peer.state!=='INACTIVE')links.push(relation(id(a.name),id(peer.network),'peering',peer.exportCustomRoutes||peer.importCustomRoutes?'Peering · transit':'Peering','network.peerings.network',!!(peer.exportCustomRoutes||peer.importCustomRoutes)));
     }
     else if(t==='compute.googleapis.com/Subnetwork')add('subnet',{parent:p.network?id(p.network):undefined,cidr:p.ipCidrRange});
-    else if(t==='compute.googleapis.com/Instance'){const machine=p.machineType?.split('/').pop();add('compute',{parent:p.networkInterfaces?.[0]?.subnetwork?id(p.networkInterfaces[0].subnetwork):undefined,ip:p.networkInterfaces?.[0]?.networkIP,publicIp:p.networkInterfaces?.[0]?.accessConfigs?.[0]?.natIP,status:p.status??'미확인',specs:{'인스턴스':machine??'미확인',...skuSpecs(gcpMachines[machine]),...diskSpec((p.disks??[]).map((d:Raw)=>d.diskSizeGb)),'GPU':p.guestAccelerators?.map((g:Raw)=>`${g.acceleratorCount} × ${g.acceleratorType.split('/').pop()}`).join(', ')||'없음'}});
+    else if(t==='compute.googleapis.com/Instance'){const machine=p.machineType?.split('/').pop(),subnets=(p.networkInterfaces??[]).map((nic:Raw)=>nic.subnetwork),location=single(subnets)??single((p.networkInterfaces??[]).map((nic:Raw)=>nic.network));add('compute',{parent:location?id(location):undefined,ip:p.networkInterfaces?.[0]?.networkIP,publicIp:p.networkInterfaces?.[0]?.accessConfigs?.[0]?.natIP,status:p.status??'미확인',specs:{'인스턴스':machine??'미확인',...skuSpecs(gcpMachines[machine]),...diskSpec((p.disks??[]).map((d:Raw)=>d.diskSizeGb)),'GPU':p.guestAccelerators?.map((g:Raw)=>`${g.acceleratorCount} × ${g.acceleratorType.split('/').pop()}`).join(', ')||'없음'}});
+      if(subnets.length>1)for(const subnet of new Set(subnets))if(subnet)links.push(relation(id(a.name),id(String(subnet)),'reference','NIC 서브넷 참조','instance.networkInterfaces.subnetwork'));
       for(const disk of p.disks??[])if(disk.source)links.push(relation(id(a.name),id(disk.source),'reference','연결 디스크','instance.disks.source'));
       for(const account of p.serviceAccounts??[])if(account.email)links.push(relation(id(a.name),`gcp:service-account:${scope}:${account.email}`,'reference','연결 서비스 계정','instance.serviceAccounts.email'));
     }

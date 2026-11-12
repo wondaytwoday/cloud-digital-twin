@@ -14,7 +14,7 @@ export function costCoverageMessage(c:CostCoverage){
   const unit=c.unit==='organization'?'조직 단위 비용 조회 1건':c.failedScopes.length?`${c.failedScopes.length}개 범위 조회`:'비용 조회';
   if(c.state==='unconfigured')return '비용 수집 미설정';
   switch(c.reason){
-    case 'waiting-data':return '결제 내보내기 데이터 대기 중. 첫 데이터가 쌓인 뒤 수집하면 자동 반영됩니다. 이전 비용이 있으면 유지합니다.';
+    case 'waiting-data':return '결제 내보내기 데이터 대기 중. 첫 데이터가 쌓인 뒤 수집하면 자동 반영됩니다.';
     case 'unverified':return '이전 비용의 완전성 검증 안 됨. 다음 수집에서 다시 조회합니다.';
     case 'skipped-timeout':return `${unit} 미완료: 전체 수집 시간 초과로 건너뛰었거나 완료하지 못했습니다. 제한 시간을 늘리면 다음 수집에서 재시도합니다.`;
     case 'timeout':return `${unit} 실패: 요청 시간 초과. 다음 수집에서 재시도하며 제한 시간과 네트워크를 확인하세요.`;

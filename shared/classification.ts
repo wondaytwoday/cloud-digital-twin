@@ -1,7 +1,7 @@
 import {ResourceKind,type Provider,type Resource} from './schema.js';
 
 type Classification={kind:ResourceKind;auxiliary?:boolean};
-import mappings from './resource-types.json';
+import mappings from './resource-types.json' with {type:'json'};
 // Exact provider type mappings are data; unregistered types remain visible.
 export const RESOURCE_CLASSIFICATIONS=new Map<string,Classification>(Object.entries(mappings).map(([type,value])=>[type,{kind:ResourceKind.parse(value.kind),...('auxiliary' in value?{auxiliary:value.auxiliary}:{})}]));
 const tiers=new Map<string,number>(Object.entries(mappings).map(([type,value])=>[type,value.tier]));

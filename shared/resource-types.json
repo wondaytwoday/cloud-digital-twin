@@ -901,5 +901,30 @@
     "kind": "database",
     "tier": 1,
     "reason": "정책·보안 증거 또는 주요 운영 자원 보존"
+  },
+  "aws:ec2:snapshot": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 2
+  },
+  "aws:ec2:image": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 2
+  },
+  "aws:ecs:task-definition": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 2
+  },
+  "aws:memorydb:parametergroup": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 2
+  },
+  "aws:fsx:backup": {
+    "kind": "configuration",
+    "auxiliary": true,
+    "tier": 2
   }
 }

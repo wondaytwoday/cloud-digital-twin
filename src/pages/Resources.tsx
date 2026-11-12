@@ -1,6 +1,10 @@
+import {ServerResources} from './ServerResources';
 import {CollectionNotice} from '../CollectionNotice';
 import {isAuxiliary} from '../../shared/classification';
-import {useMemo,useState,useEffect} from 'react';
+import {useMemo,useState,useEffect,memo} from 'react';
+import {resourceSearchIndex,searchKey} from '../../shared/search';
+import {statusLabel} from '../../shared/status';
+import type {ResourcePreferences,SortKey} from '../resource-preferences';
 import {Bar,BarChart,CartesianGrid,Cell,Label,Pie,PieChart,XAxis,YAxis,Area,AreaChart} from 'recharts';
 import {ArrowDown,ArrowUp,ArrowUpRight,Cpu,HardDrive,MemoryStick,Server,Boxes,Gauge,Activity} from 'lucide-react';
 import type {Resource,Snapshot} from '../../shared/schema';
@@ -17,7 +21,7 @@ import {cn} from '@/ui/lib/utils';
 const PROVIDERS=['azure','aws','gcp','onprem'] as const;
 const providerLabel:Record<string,string>={azure:'Azure',aws:'AWS',gcp:'Google Cloud',onprem:'사내망'};
 const providerChart={azure:{label:'Azure',color:'var(--azure)'},aws:{label:'AWS',color:'var(--aws)'},gcp:{label:'Google Cloud',color:'var(--gcp)'},onprem:{label:'사내망',color:'var(--onprem)'}} satisfies ChartConfig;
-const healthLabel:Record<Health,string>={ok:'정상',warn:'이상',stopped:'중지',unknown:'권한 없음',neutral:'구성만 수집'};
+const healthLabel:Record<Health,string>={ok:'정상',warn:'이상',stopped:'중지',unknown:'권한 없음',neutral:'상태 미확인·구성만 수집'};
 const healthColor:Record<Health,string>={ok:'var(--path)',warn:'var(--warn)',stopped:'var(--faint)',unknown:'var(--amber)',neutral:'var(--line-strong)'};
 const num=(v:number)=>v.toLocaleString('ko-KR',{maximumFractionDigits:1});
 const gib=(v:number)=>v>=1024?`${num(v/1024)} TiB`:`${num(v)} GiB`;
@@ -38,7 +42,7 @@ function Meter({label,value}:{label:string;value?:number}){
   const t=tone(value);
   return <div className="flex items-center gap-2 text-xs" title={`${label} ${value}%`}><span className="w-10 shrink-0 text-muted-foreground">{label}</span><div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--bg)]" role="meter" aria-label={label} aria-valuenow={value} aria-valuemin={0} aria-valuemax={100}><div className={cn('h-full rounded-full',toneBar[t])} style={{width:`${value}%`}}/></div><span className={cn('w-9 shrink-0 text-right tabular-nums',t==='bad'&&'font-semibold text-destructive',t==='warn'&&'text-[var(--amber)]')}>{value}%</span></div>;
 }
-function StatusBadge({status}:{status:string}){const h=health(status);return <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs"><i className="size-2 rounded-full" style={{background:healthColor[h]}} aria-hidden="true"/>{status}</span>;}
+function StatusBadge({status}:{status:string}){const h=health(status);return <span title={status} className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs"><i className="size-2 rounded-full" style={{background:healthColor[h]}} aria-hidden="true"/>{statusLabel(status)}</span>;}
 function KindChart({rows,onPick}:{rows:Resource[];onPick:(c:CategoryId)=>void}){
   const data=useMemo(()=>{const m=new Map<string,Record<string,number|string>>();for(const r of rows){const k=kindNames[r.kind];const row=m.get(k)??{kind:k,cat:categoryOf(r.kind),total:0};row[r.provider]=((row[r.provider] as number)??0)+1;(row.total as number)++;m.set(k,row);}return [...m.values()].sort((a,b)=>(b.total as number)-(a.total as number));},[rows]);
   const present=PROVIDERS.filter(p=>rows.some(r=>r.provider===p));
@@ -109,29 +113,35 @@ function EngineChart({rows}:{rows:Resource[]}){
   if(!data.length)return <p className="text-sm text-muted-foreground">이 범위에 데이터 서비스가 없습니다.</p>;
   return <ChartContainer config={{count:{label:'개수',color:'var(--chart-2)'}}} className="aspect-auto w-full" style={{height:data.length*26+16}}><BarChart data={data} layout="vertical" margin={{right:28}} accessibilityLayer><XAxis type="number" hide allowDecimals={false}/><YAxis type="category" dataKey="engine" width={120} tickLine={false} axisLine={false}/><ChartTooltip cursor={{fill:'var(--bg)'}} content={<ChartTooltipContent hideIndicator/>}/><Bar dataKey="count" fill="var(--color-count)" radius={3} maxBarSize={16} label={{position:'right',className:'fill-foreground text-xs tabular-nums'}}/></BarChart></ChartContainer>;
 }
-type SortKey='name'|'provider'|'kind'|'scope'|'address'|'region'|'status'|'size';
-function Inventory({snapshot,rows,onOpen}:{snapshot:Snapshot;rows:Resource[];onOpen:(r:Resource)=>void}){
+const collator=new Intl.Collator('ko',{numeric:true});
+function Inventory({snapshot,rows,onOpen,preferences,kindChoices}:{snapshot:Snapshot;rows:Resource[];kindChoices:Resource['kind'][];onOpen:(r:Resource)=>void;preferences:ResourcePreferences}){
   const [page,setPage]=useState(0);
-  const [kind,setKind]=useState('all'),[state,setState]=useState('all'),[sort,setSort]=useState<{key:SortKey;dir:1|-1}>({key:'name',dir:1});
+  const {kind,setKind,state,setState,sort,setSort}=preferences;
   const value=(r:Resource,key:SortKey)=>key==='scope'?snapshot.scopeLabels[r.scope]??r.scope:key==='address'?r.ip??r.cidr??'':key==='kind'?kindNames[r.kind]:key==='size'?r.specs['인스턴스']??r.specs['종류']??'':r[key];
-  const kinds=[...new Set(rows.map(r=>r.kind))].sort(),present=(Object.keys(healthLabel) as Health[]).filter(h=>rows.some(r=>health(r.status)===h));
-  const shown=rows.filter(r=>(kind==='all'||r.kind===kind)&&(state==='all'||health(r.status)===state)).sort((a,b)=>sort.dir*value(a,sort.key).localeCompare(value(b,sort.key),'ko',{numeric:true}));
+  const kinds=kindChoices;
+  const present=Object.keys(healthLabel) as Health[];
+  const effectiveKind=kinds.some(k=>k===kind)?kind:'all';
+  useEffect(()=>{if(kind!==effectiveKind)setKind(effectiveKind);},[kind,effectiveKind,setKind]);
+  const shown=useMemo(()=>rows.filter(r=>(effectiveKind==='all'||r.kind===effectiveKind)&&(state==='all'||health(r.status)===state)).sort((a,b)=>sort.dir*collator.compare(value(a,sort.key),value(b,sort.key))),[rows,effectiveKind,state,sort,snapshot.scopeLabels]);
   useEffect(()=>setPage(0),[rows,kind,state,sort]);
-  const paged=shown.slice(page*100,(page+1)*100);
+  const current=Math.min(page,Math.max(0,Math.ceil(shown.length/100)-1));
+  const paged=shown.slice(current*100,(current+1)*100);
   const head=(key:SortKey,label:string)=><TableHead aria-sort={sort.key===key?(sort.dir===1?'ascending':'descending'):undefined}><button className="inline-flex items-center gap-1 font-medium hover:text-foreground" onClick={()=>setSort(s=>({key,dir:s.key===key?(s.dir===1?-1:1):1}))}>{label}{sort.key===key&&(sort.dir===1?<ArrowUp size={12}/>:<ArrowDown size={12}/>)}</button></TableHead>;
   const select='h-8 rounded-md border border-input bg-card px-2 text-sm';
   return <Panel title="리소스 목록" description={`${shown.length} / ${rows.length}개`} action={<div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><label className="flex items-center gap-1.5">유형<select className={select} value={kind} onChange={e=>setKind(e.target.value)}><option value="all">전체</option>{kinds.map(k=><option key={k} value={k}>{kindNames[k]}</option>)}</select></label><label className="flex items-center gap-1.5">상태<select className={select} value={state} onChange={e=>setState(e.target.value)}><option value="all">전체</option>{present.map(h=><option key={h} value={h}>{healthLabel[h]}</option>)}</select></label></div>}>
     <div className="max-h-[560px] overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_var(--line)]"><TableRow>{head('name','리소스')}{head('provider','클라우드')}{head('kind','유형')}{head('size','크기·종류')}{head('scope','소유 범위')}{head('address','주소')}{head('region','위치')}{head('status','상태')}</TableRow></TableHeader>
       <TableBody>{paged.map(r=>{const mappable=r.kind!=='service';return <TableRow key={r.id}><TableCell>{mappable?<button className="inline-flex items-center gap-2 font-medium hover:text-primary" onClick={()=>onOpen(r)} title="토폴로지에서 보기"><ResourceIcon resource={r} size={18}/>{r.name}<ArrowUpRight size={12} className="text-muted-foreground"/></button>:<span className="inline-flex items-center gap-2 font-medium"><ResourceIcon resource={r} size={18}/>{r.name}</span>}</TableCell><TableCell>{providerLabel[r.provider]}</TableCell><TableCell>{kindNames[r.kind]}</TableCell><TableCell className="font-mono text-xs">{r.specs['인스턴스']??r.specs['종류']??'—'}</TableCell><TableCell className="max-w-[200px] truncate">{snapshot.scopeLabels[r.scope]??r.scope}</TableCell><TableCell className="font-mono text-xs">{r.ip??r.cidr??'—'}</TableCell><TableCell>{r.region}</TableCell><TableCell><StatusBadge status={r.status}/></TableCell></TableRow>;})}</TableBody></Table>
       {!shown.length&&<p className="p-6 text-center text-sm text-muted-foreground">조건에 맞는 자원이 없습니다.</p>}</div>
-    {shown.length>100&&<div className="page-actions" role="group" aria-label="리소스 페이지"><button className="button" disabled={page===0} onClick={()=>setPage(n=>n-1)}>이전 페이지</button><span>{page+1} / {Math.ceil(shown.length/100)} · 전체 {shown.length}개</span><button className="button" disabled={(page+1)*100>=shown.length} onClick={()=>setPage(n=>n+1)}>다음 페이지</button></div>}
+    {shown.length>100&&<div className="page-actions" role="group" aria-label="리소스 페이지"><button className="button" disabled={current===0} onClick={()=>setPage(current-1)}>이전 페이지</button><span>{current+1} / {Math.ceil(shown.length/100)} · 전체 {shown.length}개</span><button className="button" disabled={(current+1)*100>=shown.length} onClick={()=>setPage(current+1)}>다음 페이지</button></div>}
   </Panel>;
 }
-export function ResourcesPage({snapshot,focus,query,onOpen}:{snapshot:Snapshot;focus:Focus;query:string;onOpen:(r:Resource)=>void}){
-  const [category,setCategory]=useState<CategoryId|'all'>('all'),[showAuxiliary,setShowAuxiliary]=useState(false);
-  const q=query.trim().toLowerCase(),live=snapshot.mode==='live';
-  const scoped=useMemo(()=>snapshot.resources.filter(r=>inScope(focus,r.provider,r.scope)&&(showAuxiliary||!isAuxiliary(r))&&(!q||`${r.name} ${r.ip??''} ${r.cidr??''} ${r.type} ${snapshot.scopeLabels[r.scope]??''}`.toLowerCase().includes(q))),[snapshot,focus,q,showAuxiliary]);
-  const rows=category==='all'?scoped:scoped.filter(r=>categoryOf(r.kind)===category);
+const LegacyResourcesPage=memo(function LegacyResourcesPage({snapshot,focus,query,onOpen,preferences}:{snapshot:Snapshot;focus:Focus;query:string;onOpen:(r:Resource)=>void;preferences:ResourcePreferences}){
+  const {category,setCategory,showAuxiliary,setShowAuxiliary}=preferences;
+  const q=searchKey(query),live=snapshot.mode==='live';
+  const searchIndex=useMemo(()=>resourceSearchIndex(snapshot),[snapshot]);
+  const scoped=useMemo(()=>snapshot.resources.filter(r=>inScope(focus,r.provider,r.scope)&&(showAuxiliary||!isAuxiliary(r))&&(!q||searchIndex.get(r.id)?.includes(q))),[snapshot,focus,q,showAuxiliary,searchIndex]);
+  const rows=useMemo(()=>category==='all'?scoped:scoped.filter(r=>categoryOf(r.kind)===category),[category,scoped]);
+  const kindChoices=useMemo(()=>[...new Set(snapshot.resources.filter(r=>inScope(focus,r.provider,r.scope)&&(showAuxiliary||!isAuxiliary(r))&&(category==='all'||categoryOf(r.kind)===category)).map(r=>r.kind))].sort(),[snapshot,focus,showAuxiliary,category]);
   const vms=scoped.filter(r=>r.kind==='compute'),fleet=fleetTotals(vms),sizeIssues=capacityIssues(vms),states=statusCounts(scoped);
   const summaries=snapshot.inventorySummary.filter(s=>inScope(focus,s.provider,s.scope));
   const unknown=countBy(scoped.filter(r=>r.kind==='service'),r=>`${providerLabel[r.provider]} · ${r.type}`).slice(0,10);
@@ -154,6 +164,10 @@ export function ResourcesPage({snapshot,focus,query,onOpen}:{snapshot:Snapshot;f
       <Tabs value={category} onValueChange={v=>setCategory(v as CategoryId|'all')} className="min-w-0"><TabsList className="h-9 max-w-full justify-start overflow-x-auto" aria-label="리소스 분류"><TabsTrigger value="all" className="px-3">전체 <span className="ml-1 tabular-nums text-muted-foreground">{scoped.length}</span></TabsTrigger>{CATEGORIES.filter(c=>counts[c.id]).map(c=><TabsTrigger key={c.id} value={c.id} className="px-3">{c.label} <span className="ml-1 tabular-nums text-muted-foreground">{counts[c.id]}</span></TabsTrigger>)}</TabsList></Tabs>
       {category==='all'&&<div className="grid items-start gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]"><Panel title="종류별 리소스" description="막대를 누르면 그 분류로 이동합니다"><KindChart rows={scoped} onPick={setCategory}/></Panel><div className="grid gap-3"><Panel title="상태"><StatusDonut rows={scoped}/></Panel>{vms.length>0&&<Utilization vms={vms} live={live}/>}</div></div>}
       <CategoryPanels category={category} rows={rows} live={live}/>
-      <Inventory key={category} snapshot={snapshot} rows={rows} onOpen={onOpen}/>
+      <Inventory kindChoices={kindChoices} snapshot={snapshot} rows={rows} onOpen={onOpen} preferences={preferences}/>
     </div></div>;
-}
+});
+
+export const ResourcesPage=memo(function ResourcesPage(props:Parameters<typeof LegacyResourcesPage>[0]){
+  return props.snapshot.mode==='live'?<ServerResources {...props}/>:<LegacyResourcesPage {...props}/>;
+});

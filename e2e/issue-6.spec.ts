@@ -1,3 +1,4 @@
+import {resourcePage,activityPage} from '../server/pages';
 import {test,expect,type Page} from '@playwright/test';
 import {validateSnapshot,type Snapshot} from '../shared/schema';
 import {projectSnapshot} from '../shared/presentation';
@@ -9,6 +10,8 @@ async function serve(page:Page,snapshot:Snapshot,onPart?:(part:string)=>void){
   await page.addInitScript(()=>localStorage.setItem('atlas.guide.seen','1'));
   await page.route('https://fonts.g*/**',route=>route.abort());
   await page.route('**/api/collect/status',route=>route.fulfill({json:{enabled:false,running:false,providers:{azure:{state:'idle'},aws:{state:'idle'},gcp:{state:'idle'}}}}));
+  await page.route('**/api/resources?*',route=>route.fulfill({json:resourcePage(snapshot,new URL(route.request().url()).searchParams)}));
+  await page.route('**/api/activity?*',route=>route.fulfill({json:activityPage(snapshot,new URL(route.request().url()).searchParams)}));
   await page.route('**/api/topology?*',route=>{const part=new URL(route.request().url()).searchParams.get('part')??'full';onPart?.(part);return route.fulfill({json:projectSnapshot(snapshot,part)});});
 }
 test('scope summary loads first, pages fetch their own data once, and export retrieves the full snapshot',async({page})=>{
@@ -40,7 +43,7 @@ test('workloads start grouped, isolated counts are visible, and exact searches r
   const snapshot=fake();snapshot.resources.push(...Array.from({length:100},(_,i)=>({...snapshot.resources[0],id:`vm-${i}`,nativeId:`vm-${i}`,name:`grouped-vm-${i}`,kind:'compute' as const,type:'AWS::EC2::Instance',status:'running',parent:'subnet'})));
   snapshot.resources.push({...snapshot.resources[0],id:'isolated',nativeId:'isolated',name:'isolated-service',kind:'service',type:'future:type'});
   await serve(page,snapshot);await page.goto('/?view=map');await page.getByRole('button',{name:'워크로드',exact:true}).click();
-  await expect(page.locator('.summary.v-workload')).toContainText('VM · 100개');await expect(page.locator('.map-workload-note')).toContainText('고립 자원 1개');
+  await expect(page.locator('.summary.v-workload')).toContainText('VM · 100개');await expect(page.locator('.map-workload-note')).toContainText('지도 밖 자원 1개');
   await expect(page.locator('.react-flow__node')).toHaveCount(4);
   await page.getByLabel('리소스와 범위 검색').fill('grouped-vm-42');await page.keyboard.press('Enter');await expect(page.locator('.rc',{hasText:'grouped-vm-42'})).toBeVisible();
 });

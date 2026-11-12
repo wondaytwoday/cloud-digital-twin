@@ -4,7 +4,7 @@ export type StageId='auth'|'scopes'|'resources'|'iam'|'activity'|'cost'|'save';
 export type StageState='pending'|'running'|'done'|'skipped'|'failed';
 export type Stage={id:StageId;label:string;state:StageState;detail?:string;done?:number;total?:number;elapsedMs?:number};
 export type ProviderStatus={state:ProviderState;message?:string;at?:string;resources?:number;identity?:string;stages?:Stage[];slowStages?:{id:StageId;detail:string;elapsedMs:number}[]};
-export type CollectionStatus={running:boolean;startedAt?:string;finishedAt?:string;pid?:number;providers:Record<ProviderId,ProviderStatus>};
+export type CollectionStatus={mode?:'all'|'selected';fullFinishedAt?:string;runId?:string;selectedItems?:{provider:ProviderId;item:import('./collection-items.js').CollectionItem}[];running:boolean;startedAt?:string;finishedAt?:string;pid?:number;providers:Record<ProviderId,ProviderStatus>};
 export type Report=(stage:StageId,patch?:Partial<Pick<Stage,'state'|'detail'|'done'|'total'|'elapsedMs'>>)=>void;
 export const noReport:Report=()=>{};
 const SCOPE_STAGE:Record<ProviderId,string>={azure:'구독 찾기',aws:'조직·계정 찾기',gcp:'조직·프로젝트 찾기'};
@@ -12,4 +12,4 @@ export const newStages=(p:ProviderId):Stage[]=>([['auth','로그인 확인'],['s
 const fraction=(s:Stage)=>s.state==='done'||s.state==='failed'?1:s.state==='running'&&s.total?Math.min(1,(s.done??0)/s.total):0;
 // Skipped stages leave the count, so a cloud that never signed in reads as finished rather than stuck at one sixth.
 export function providerProgress(stages:Stage[]=[]){const counted=stages.filter(s=>s.state!=='skipped');return counted.length?counted.reduce((n,s)=>n+fraction(s),0)/counted.length:0;}
-export function overallProgress(status:Pick<CollectionStatus,'providers'>){const all=Object.values(status.providers).filter(p=>p.stages?.length);return all.length?all.reduce((n,p)=>n+providerProgress(p.stages),0)/all.length:0;}
+export function overallProgress(status:Pick<CollectionStatus,'providers'|'selectedItems'>){const selected=status.selectedItems?new Set(status.selectedItems.map(i=>i.provider)):undefined;const all=Object.entries(status.providers).filter(([provider,p])=>p.stages?.length&&(!selected||selected.has(provider as ProviderId))).map(([,p])=>p);return all.length?all.reduce((n,p)=>n+providerProgress(p.stages),0)/all.length:0;}

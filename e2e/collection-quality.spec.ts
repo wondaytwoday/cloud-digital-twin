@@ -3,7 +3,10 @@ import {validateSnapshot,type Snapshot} from '../shared/schema';
 const fakeLiveSnapshot=()=>validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-10T00:00:00Z',resources:[],links:[],warnings:[],scopes:['111111111111'],cost:[{provider:'aws',scope:'111111111111',service:'fake-compute',month:'2026-11',amount:10,currency:'USD'}]});
 const inject=async(page:Page,change:(snapshot:Snapshot)=>void)=>{
   await page.route('**/api/topology?*',async route=>{
-    const response=await route.fetch(),snapshot=await response.json() as Snapshot;
+    // This helper edits a complete fixture. Transport reuse is tested separately;
+    // request a full body so a previous core cannot hide the fixture mutation.
+    const url=new URL(route.request().url());url.searchParams.delete('transport');url.searchParams.delete('base');
+    const response=await route.fetch({url:url.href}),snapshot=await response.json() as Snapshot;
     change(snapshot);await route.fulfill({response,json:snapshot});
   });
 };

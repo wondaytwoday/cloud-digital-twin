@@ -15,6 +15,7 @@ test('with no setup beyond login, the portal collects and fills itself in',async
   await expect(page.locator('.onprem-note')).toBeVisible();
   await page.locator('.scope-open',{hasText:'Shop Prod'}).click();await page.waitForSelector('.react-flow__node');
   await page.getByRole('button',{name:'워크로드',exact:true}).click();
+  await page.getByRole('button',{name:/^VM · \d+개 펼치기$/}).click();
   await expect(page.locator('.rc',{hasText:'shop-web-01'})).toBeVisible();
 });
 test('collection cannot be triggered cross-site or from mock mode',async({request})=>{
@@ -25,10 +26,10 @@ test('collection cannot be triggered cross-site or from mock mode',async({reques
 test('a run shows what is being read and why a cloud was skipped',async({page})=>{
   await page.route('https://fonts.g*/**',r=>r.abort());await page.goto('/?view=scopes');
   await expect(page.locator('.cloud-card.gcp .cloud-note')).toContainText('GOOGLE_APPLICATION_CREDENTIALS');
-  await page.locator('.collect-menu summary').click();const pop=page.locator('.collect-pop');await expect(pop).toContainText('로그인 필요');
+  await page.locator('.collect-menu > summary').click();const pop=page.locator('.collect-pop');await expect(pop).toContainText('로그인 필요');
   await pop.getByRole('button',{name:'지금 수집'}).click();
   await expect(pop.getByRole('progressbar',{name:'전체 수집 진행률'})).toBeVisible();await expect(pop.locator('section',{hasText:'Microsoft Azure'}).locator('.collect-stage.is-running')).toContainText('자원 1,000개 읽음');
-  await expect(page.locator('.collect-menu summary')).toContainText('수집 중');
+  await expect(page.locator('.collect-menu > summary')).toContainText('수집 중');
   await expect(pop.getByRole('button',{name:'지금 수집'})).toBeEnabled({timeout:15_000});await expect(page.locator('.toast')).toContainText('수집 완료');
   await expect(pop.locator('section',{hasText:'Amazon Web Services'})).toContainText('일부 누락');await expect(pop.locator('section',{hasText:'Amazon Web Services'}).locator('.collect-stage.is-skipped')).toContainText('비용');
 });

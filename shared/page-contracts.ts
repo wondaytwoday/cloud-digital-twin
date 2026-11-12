@@ -1,0 +1,11 @@
+import {z} from 'zod';
+import {ActivitySchema,Provider,ResourceKind,ResourceSchema} from './schema.js';
+export const PageMeta=z.object({revision:z.string().regex(/^[a-f0-9]{64}$/),total:z.number().int().nonnegative(),nextCursor:z.string().optional()});
+export const ResourceSummary=ResourceSchema.pick({id:true,name:true,type:true,provider:true,scope:true,kind:true,region:true,status:true,ip:true,cidr:true}).extend({size:z.string().optional()});
+export type ResourceSummary=z.infer<typeof ResourceSummary>;
+const count=z.number().int().nonnegative();
+export const ResourcePage=PageMeta.extend({version:z.literal(1),rows:z.array(ResourceSummary).max(100),summary:z.object({total:count,vm:count,capacityTargets:count,vcpuKnown:count,memoryKnown:count,vcpu:z.number().nonnegative(),memoryGiB:z.number().nonnegative(),unsized:count,diskGiB:z.number().nonnegative(),gpus:count,gpuHosts:count,sizeIssues:z.array(z.object({reason:z.string(),count})).max(20),sizes:z.array(z.object({name:z.string(),count})).max(20),engines:z.array(z.object({name:z.string(),count})).max(20),unknownTypes:z.array(z.object({name:z.string(),count})).max(10),kinds:z.array(z.object({kind:ResourceKind,count})),states:z.record(z.string(),count),providers:z.array(z.object({provider:Provider,count}))})});
+export type ResourcePage=z.infer<typeof ResourcePage>;
+export const ActivityPage=PageMeta.extend({version:z.literal(1),coverage:z.object({verified:z.boolean(),incompleteScopes:count,limitedScopes:count,lastCompleteAt:z.string().optional()}),rows:z.array(ActivitySchema).max(100),actors:z.array(z.string()).max(200),summary:z.object({total:count,failed:count,sensitive:count,actors:count,daily:z.array(z.object({day:z.string(),provider:Provider,count})),kinds:z.array(z.object({kind:z.enum(['write','delete','action']),count}))})});
+export type ActivityPage=z.infer<typeof ActivityPage>;
+export const sensitiveActivity=/securityRules|SecurityGroup(Ingress|Egress)|firewalls|firewallRules|RoleAssignment|setIamPolicy|AttachRolePolicy|PutRolePolicy|CreateAccessKey|listKeys/i;

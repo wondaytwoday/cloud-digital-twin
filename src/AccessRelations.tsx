@@ -1,4 +1,4 @@
-import {useMemo,useState} from 'react';
+import {useMemo,useState,useEffect} from 'react';
 import type {Snapshot} from '../shared/schema';
 import {iamInScope,inScope,type Focus} from '../shared/hierarchy';
 import {isWideInbound} from '../shared/topology';
@@ -6,19 +6,21 @@ import {isWideInbound} from '../shared/topology';
 // These are configured references and role assignments, never observed traffic or effective grants.
 export function AccessRelations({snapshot,focus,selected,onSelect}:{snapshot:Snapshot;focus:Focus;selected:string|null;onSelect:(id:string)=>void}){
   const [page,setPage]=useState(0);
+  useEffect(()=>setPage(0),[focus,selected]);
   const byId=useMemo(()=>new Map(snapshot.resources.map(r=>[r.id,r])),[snapshot]);
   const rows=useMemo(()=>{
     const rows:{id:string;from:string;to:string;label:string;details:string;target?:string;risk:boolean}[]=[];
     const ancestors=new Set<string>();for(let r=selected?byId.get(selected):undefined;r;r=r.parent?byId.get(r.parent):undefined)ancestors.add(r.id);
+    const subtree=new Set<string>();if(selected)for(const resource of snapshot.resources)for(let r:typeof resource|undefined=resource;r;r=r.parent?byId.get(r.parent):undefined)if(r.id===selected){subtree.add(resource.id);break;}
     for(const link of snapshot.links){
       if(!['policy','reference'].includes(link.kind))continue;
       const from=byId.get(link.source),to=byId.get(link.target);
-      if(!to||!inScope(focus,to.provider,to.scope)||selected&&!ancestors.has(link.target)&&link.source!==selected)continue;
+      if(!to||!inScope(focus,to.provider,to.scope)||selected&&!ancestors.has(link.target)&&!subtree.has(link.target)&&link.source!==selected)continue;
       rows.push({id:link.id,from:from?.name??link.source,to:to.name,label:link.kind==='policy'?'정책 적용':'구성 참조',target:to.id,risk:!!from?.rules.some(isWideInbound),details:`${link.evidence}\n${(from?.rules??[]).map(r=>`${r.action} ${r.direction} ${r.protocol}/${r.ports}: ${r.source} → ${r.destination}`).join('\n')}`});
     }
     for(const assignment of snapshot.iam){
       if(!iamInScope(focus,assignment))continue;
-      if(selected&&(assignment.targetResource?assignment.targetResource!==selected:assignment.scope!==byId.get(selected)?.scope))continue;
+      if(selected&&(assignment.targetResource?!subtree.has(assignment.targetResource):assignment.scope!==byId.get(selected)?.scope))continue;
       rows.push({id:assignment.id,from:assignment.principal,to:assignment.targetResource?byId.get(assignment.targetResource)?.name??'미수집 대상 자원':assignment.scopeName??snapshot.scopeLabels[assignment.scope]??assignment.scope,label:`역할 할당 · ${assignment.role}`,target:assignment.targetResource&&byId.has(assignment.targetResource)?assignment.targetResource:undefined,risk:assignment.privileged||assignment.external,details:`${assignment.source}\n대상: ${assignment.targetResource??assignment.scopeName??assignment.scope}\n역할: ${assignment.role}\n조건·상속·거부 정책을 반영한 실효 권한이 아닙니다.`});
     }
     return rows;

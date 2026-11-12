@@ -59,6 +59,13 @@ test('HTTP compression and private ETags keep authentication, scope isolation an
       assert.equal((await fetch(url,{headers:{Authorization:'Bearer a','If-None-Match':etag}})).status,304);
       assert.equal((await fetch(url,{headers:{'If-None-Match':etag}})).status,401);
       const other=await fetch(url,{headers:{Authorization:'Bearer b','If-None-Match':etag}});assert.equal(other.status,200);assert.doesNotMatch(JSON.stringify(await other.json()),/allowed/);
+      const full=await (await fetch(`${url}?part=map&transport=1`,{headers:{Authorization:'Bearer a'}})).json();
+      assert.ok(full.snapshot);assert.match(full.revision,/^[a-f0-9]{64}$/);
+      const reused=await (await fetch(`${url}?part=network&transport=1&base=${full.revision}`,{headers:{Authorization:'Bearer a'}})).json();
+      assert.ok(reused.metadata);assert.equal(reused.snapshot,undefined);assert.equal(reused.metadata.resources,undefined);
+      const isolated=await (await fetch(`${url}?part=network&transport=1&base=${full.revision}`,{headers:{Authorization:'Bearer b'}})).json();
+      assert.ok(isolated.snapshot);assert.doesNotMatch(JSON.stringify(isolated),/allowed/);
+      assert.equal((await fetch(`${url}?part=network&transport=1&base=${full.revision}`)).status,401);
       const small=await fetch(`${url}?part=scopes`,{headers:{Authorization:'Bearer a'}}),summary=await small.json();assert.deepEqual(summary.resources,[]);assert.equal(summary.presentation.scopeStats['111111111111'].resources,1);assert.equal(summary.presentation.scopeStats['222222222222'],undefined);
       await store.save('aws',toSnapshot(normalized([resource('changed')])));
       const changed=await fetch(url,{headers:{Authorization:'Bearer a','If-None-Match':etag}});assert.equal(changed.status,200);assert.notEqual(changed.headers.get('etag'),etag);
@@ -75,7 +82,7 @@ test('page projections omit unrelated payloads without weakening full snapshot v
   const dashboard=projectSnapshot(full,'dashboard');assert.equal(dashboard.activity.length,0);
   assert.equal(dashboard.presentation!.activitySummary!.reduce((n,a)=>n+a.count,0),20);
   assert.equal(dashboard.presentation!.activitySummary!.find(a=>a.kind==='delete')!.count,3);
-  assert.equal(projectSnapshot(full,'audit').activity.length,20);
+  assert.equal(projectSnapshot(full,'audit').activity.length,0,'activity uses a separate paginated API');
 });
 
 test('GCP empty export remains pending, retains prior cost and timestamp, then retries on arrival',async()=>withStore(async store=>{
@@ -104,7 +111,8 @@ test('a previously cached complete but empty GCP export is retried before its 24
     withCost=options.withCost;return{...normalized([]),collectedScopes:['p'],cost:[],costCoverage:[{provider:'gcp',state:'pending',reason:'waiting-data',failedScopes:[]}]};
   }}});
   await env({ATLAS_GCP_ALLOW_EMPTY_COST:undefined},async()=>{
-    await store.save('gcp',initial);await runCollection(store,undefined,{providers:['gcp']});
+    await store.save('gcp',initial);const status=await runCollection(store,undefined,{providers:['gcp']});
+    assert.equal(status.providers.gcp.message?.match(/이전 비용이 있으면 유지합니다/g)?.length,1);
     assert.equal(withCost,true);assert.equal((await store.latest('gcp'))!.costCoverage[0].state,'pending');
   });
   await env({ATLAS_GCP_ALLOW_EMPTY_COST:'1'},async()=>{

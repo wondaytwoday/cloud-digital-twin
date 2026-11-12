@@ -27,6 +27,7 @@ test('GCP activity reads the admin activity log across projects',async()=>{
   const rows=await gcpActivity(['organizations/1','projects/p1'],async(_u,init)=>{body=init?.data;return{entries:[{insertId:'i',timestamp:'2026-11-05T00:00:00Z',resource:{labels:{project_id:'p1'}},protoPayload:{methodName:'v1.compute.firewalls.delete',serviceName:'compute.googleapis.com',resourceName:'projects/p1/global/firewalls/allow-ssh',authenticationInfo:{principalEmail:'ci@p1.iam.gserviceaccount.com'}}}]};},NOW);
   assert.match(body.filter,/cloudaudit\.googleapis\.com%2Factivity/);assert.deepEqual(body.resourceNames,['organizations/1','projects/p1']);
   assert.deepEqual([rows[0].kind,rows[0].actorType,rows[0].scope,rows[0].targetName],['delete','service','p1','allow-ssh']);
+  const org=await gcpActivity(['organizations/123'],async()=>({entries:[{insertId:'org-event',timestamp:'2026-11-05T00:00:00Z',logName:'organizations/123/logs/cloudaudit.googleapis.com%2Factivity',protoPayload:{methodName:'SetIamPolicy'}}]}),NOW);assert.equal(org[0].scope,'123','organization logs keep their own scope');
 });
 test('portal audit keeps one record per repeated view and the demo shows a failed-login burst',async()=>{
   resetAuditMemory();const req={ip:'1.1.1.1',headers:{}} as any;

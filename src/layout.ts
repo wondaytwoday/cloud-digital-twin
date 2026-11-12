@@ -2,29 +2,39 @@ import {isAuxiliary,isNetworkResource} from '../shared/classification';
 import type {ElkNode} from 'elkjs/lib/elk-api';
 import type {Link,Resource,ResourceKind,Snapshot} from '../shared/schema';
 import {adjacency,distances,findPath,health,ingressIds} from '../shared/topology';
-export type Variant='provider'|'region'|'network'|'subnet'|'workload';
-export type Filter={provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;workloads?:boolean;expanded:Set<string>};
+export type Variant='provider'|'scope'|'region'|'network'|'subnet'|'workload';
+export type RelationLayer='network'|'traffic'|'external'|'reference';
+export const relationLayer=(link:Link,byId:Map<string,Resource>):RelationLayer=>{
+  const source=byId.get(link.source),target=byId.get(link.target);
+  if([source,target].some(r=>r?.provider==='onprem'||r?.kind==='external'||r?.kind==='onprem'))return 'external';
+  if(link.kind==='reference')return 'reference';
+  if([source,target].some(r=>r?.kind==='loadbalancer'||r?.kind==='endpoint'))return 'traffic';
+  return 'network';
+};
+export type Filter={layers?:Set<RelationLayer>;provider:string;scopes:Set<string>|null;policy:boolean;flow:boolean;workloads?:boolean;expanded:Set<string>;budget?:number};
 export type Item={id:string;parent?:string;resource?:Resource;variant?:Variant;label:string;subtitle?:string;provider:string;outOfScope?:boolean};
 export type Summary={total:number;stopped:number;warn:number;counts:Partial<Record<ResourceKind,number>>};
 export type Placed={id:string;x:number;y:number;width:number;height:number;depth:number;item:Item;collapsed:boolean;expandable:boolean;summary:Summary;policies:number;hub:boolean};
 export type Bundle={id:string;source:string;target:string;links:Link[];kind:'hybrid'|'peering'|'attachment'|'policy'|'simulation'|'reference';hasFlow:boolean;label:string;points:{x:number;y:number}[];trunk?:boolean};
-export type Topology={nodes:Placed[];edges:Bundle[];rollup:(id:string)=>string|undefined};
+export type Topology={nodes:Placed[];edges:Bundle[];rollup:(id:string)=>string|undefined;budgetCollapsed?:number};
 export const providerNames:Record<string,string>={azure:'Microsoft Azure',aws:'Amazon Web Services',gcp:'Google Cloud',onprem:'On-premises'};
 export const scopeNouns:Record<string,string>={azure:'구독',aws:'계정',gcp:'프로젝트'};
 const CARD={width:204,height:60},SUMMARY={width:236,height:92},SUBNET_SUMMARY=CARD,PACK_GAP=12,TRUNK_GAP=40,TRUNK_STEP=14,CLOUD_GAP=28;
 // Spokes of one hub become a grid fed by shared lanes; a single column of sixteen spokes was what made big maps unreadable.
 const FAN={min:3,laneX:44,laneY:22,lead:28,top:14};
-const PADDING_TOP:Record<Variant,number>={provider:58,region:44,network:50,subnet:40,workload:40};
+const PADDING_TOP:Record<Variant,number>={provider:58,scope:48,region:44,network:50,subnet:40,workload:40};
 const kindOrder:ResourceKind[]=['gateway','endpoint','appliance','loadbalancer','nat','cluster','compute','database','storage','service','dns','monitoring','security','logging','analytics','configuration','application','firewall','external','subnet','network','onprem'];
 export const workloadGroupId=(r:Resource)=>`workloads:${JSON.stringify([r.provider,r.scope,r.parent??r.region,r.kind])}`;
-export const isolatedWorkloads=(snapshot:Snapshot)=>{const connected=new Set(snapshot.links.flatMap(l=>[l.source,l.target]));return snapshot.resources.filter(r=>!isNetworkResource(r)&&!isAuxiliary(r)&&!r.parent&&!connected.has(r.id));};
-export const regionId=(r:Pick<Resource,'provider'|'region'>)=>`region:${r.provider}:${r.region}`;
+const MAP_WORKLOADS=new Set<ResourceKind>(['compute','database','storage','cluster']);
+export const isolatedWorkloads=(snapshot:Snapshot)=>{const connected=new Set(snapshot.links.flatMap(l=>[l.source,l.target]));return snapshot.resources.filter(r=>!isNetworkResource(r)&&!isAuxiliary(r)&&(!MAP_WORKLOADS.has(r.kind)||!r.parent&&!connected.has(r.id)));};
+export const scopeFrameId=(r:Pick<Resource,'provider'|'scope'>)=>`scope-frame:${JSON.stringify([r.provider,r.scope])}`;
+export const regionId=(r:Pick<Resource,'provider'|'region'|'scope'>)=>`region:${JSON.stringify([r.provider,r.scope,r.region])}`;
 // Large environments open at the summary level; small ones have nothing worth hiding.
 export const startingLevel=(count:number)=>count<=30?2:count<=90?1:0;
 export function defaultExpanded(snapshot:Snapshot,level:number){
   const out=new Set<string>();
   for(const p of ['azure','aws','gcp'])out.add(`provider:${p}`);
-  for(const r of snapshot.resources)out.add(regionId(r));
+  if(level>=1)for(const r of snapshot.resources){out.add(scopeFrameId(r));out.add(regionId(r));}
   for(const r of snapshot.resources){if(level>=1&&r.kind==='network')out.add(r.id);if(level>=2&&r.kind==='subnet')out.add(r.id);}
   return out;
 }
@@ -42,10 +52,13 @@ function buildItems(snapshot:Snapshot,f:Filter){
   const {keep,outside}=selectResources(snapshot,f),items=new Map<string,Item>();
   const ensure=(item:Item)=>{if(!items.has(item.id))items.set(item.id,item);return item.id;};
   const provider=(p:string)=>ensure({id:`provider:${p}`,variant:'provider',label:providerNames[p],provider:p});
+  const scopesOf=new Map<string,Set<string>>();
+  for(const r of keep.values())if(r.scope!=='external')(scopesOf.get(r.provider)??scopesOf.set(r.provider,new Set()).get(r.provider)!).add(r.scope);
+  const scope=(r:Resource)=>(scopesOf.get(r.provider)?.size??0)>1&&r.scope!=='external'?ensure({id:scopeFrameId(r),parent:provider(r.provider),variant:'scope',label:snapshot.scopeLabels[r.scope]??r.scope,subtitle:`${scopeNouns[r.provider]??'관리 범위'} · 조직상 묶음`,provider:r.provider}):provider(r.provider);
   // Region frames only earn their space once a provider really spans regions; global VPCs stay directly under the provider.
   const regionsOf=new Map<string,Set<string>>();
-  for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(r.provider)??regionsOf.set(r.provider,new Set()).get(r.provider)!).add(r.region);
-  const topLevel=(r:Resource)=>(regionsOf.get(r.provider)?.size??0)>=2&&regionsOf.get(r.provider)!.has(r.region)?ensure({id:regionId(r),parent:provider(r.provider),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):provider(r.provider);
+  for(const r of keep.values())if(!(r.parent&&keep.has(r.parent))&&r.region!=='global'&&r.region!=='미확인')(regionsOf.get(scopeFrameId(r))??regionsOf.set(scopeFrameId(r),new Set()).get(scopeFrameId(r))!).add(r.region);
+  const topLevel=(r:Resource)=>(regionsOf.get(scopeFrameId(r))?.size??0)>=2&&regionsOf.get(scopeFrameId(r))!.has(r.region)?ensure({id:regionId(r),parent:scope(r),variant:'region',label:r.region,subtitle:'리전',provider:r.provider}):scope(r);
   const isolated=new Set(isolatedWorkloads(snapshot).map(r=>r.id));
   for(const r of keep.values()){
     if(isolated.has(r.id))continue;
@@ -59,7 +72,7 @@ function buildItems(snapshot:Snapshot,f:Filter){
     for(const item of items.values())if(item.resource&&!isNetworkResource(item.resource)){
       const key=workloadGroupId(item.resource);const group=groups.get(key);if(group)group.push(item);else groups.set(key,[item]);
     }
-    for(const [id,members] of groups)if(members.length>=4){
+    for(const [id,members] of groups){
       const first=members[0];
       items.set(id,{id,parent:first.parent,variant:'workload',label:`${({compute:'VM',storage:'스토리지',database:'데이터베이스',cluster:'클러스터',security:'보안 주체',application:'애플리케이션'} as Record<string,string>)[first.resource!.kind]??'워크로드'} · ${members.length}개`,subtitle:'구성 워크로드 묶음 · 클릭해 펼치기',provider:first.provider});
       for(const member of members)member.parent=id;
@@ -79,8 +92,9 @@ function summarize(items:Map<string,Item>,children:Map<string,string[]>,id:strin
 }
 // Runs in a worker: a large expanded graph takes long enough to freeze the page otherwise.
 let engine:Promise<import('elkjs/lib/elk-api').ELK>|undefined;
+let topologyCache=new WeakMap<Snapshot,Map<string,Promise<Topology>>>();
 // Tests run ELK in-process; the app always uses the worker.
-export const setLayoutEngine=(e:import('elkjs/lib/elk-api').ELK)=>{engine=Promise.resolve(e);};
+export const setLayoutEngine=(e:import('elkjs/lib/elk-api').ELK)=>{engine=Promise.resolve(e);topologyCache=new WeakMap();layoutCache.clear();};
 const elk=()=>engine??=(async()=>{
   const [{default:ELK},{default:workerUrl}]=await Promise.all([import('elkjs/lib/elk-api.js'),import('elkjs/lib/elk-worker.min.js?url')]);
   return new ELK({workerUrl,workerFactory:url=>new Worker(url!)});
@@ -97,10 +111,40 @@ function cachedLayout(input:ElkNode){
   return hit;
 }
 const bundleKind=(links:Link[],hybrid:boolean):Bundle['kind']=>hybrid?'hybrid':links.some(l=>l.kind==='peering')?'peering':links.some(l=>l.kind==='attachment')?'attachment':links.some(l=>l.kind==='policy')?'policy':links.some(l=>l.kind==='reference')?'reference':'simulation';
-export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
+export function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
+  // Snapshots are immutable after validation. Check before building graph/ELK
+  // objects; selection and highlighting deliberately do not participate.
+  const key=JSON.stringify([f.provider,f.scopes?[...f.scopes].sort():null,f.policy,f.flow,!!f.workloads,f.budget??null,f.layers?[...f.layers].sort():null,[...f.expanded].sort()]);
+  let entries=topologyCache.get(snapshot);
+  if(!entries){entries=new Map();topologyCache.set(snapshot,entries);}
+  let hit=entries.get(key);
+  if(hit){entries.delete(key);entries.set(key,hit);return hit;}
+  hit=buildTopology(snapshot,{...f,scopes:f.scopes?new Set(f.scopes):null,layers:f.layers?new Set(f.layers):undefined,expanded:new Set(f.expanded)});
+  entries.set(key,hit);
+  hit.catch(()=>{if(entries.get(key)===hit)entries.delete(key);});
+  if(entries.size>12)entries.delete(entries.keys().next().value!);
+  return hit;
+}
+async function buildTopology(snapshot:Snapshot,f:Filter):Promise<Topology>{
   const items=buildItems(snapshot,f),children=new Map<string,string[]>();
   for(const it of items.values())if(it.parent)(children.get(it.parent)??children.set(it.parent,[]).get(it.parent)!).push(it.id);
   const isOpen=(it:Item)=>!!it.variant&&!it.outOfScope&&f.expanded.has(it.id)&&!!children.get(it.id)?.length;
+  let budgetCollapsed=0;
+  if(f.budget&&f.budget>0){
+    const countVisible=(id:string):number=>1+(isOpen(items.get(id)!)?(children.get(id)??[]).reduce((n,child)=>n+countVisible(child),0):0);
+    const roots=[...items.values()].filter(it=>!it.parent);
+    while(roots.reduce((n,r)=>n+countVisible(r.id),0)>f.budget){
+      // Collapse an entire subtree, never discard individual resources or links.
+      const candidates=[...items.values()].filter(it=>{
+        if(!isOpen(it))return false;
+        for(let p=it.parent;p;p=items.get(p)?.parent)if(!isOpen(items.get(p)!))return false;
+        return true;
+      }).map(it=>({it,saved:countVisible(it.id)-1})).filter(c=>c.saved>0);
+      candidates.sort((a,b)=>(a.it.variant==='provider'?1:0)-(b.it.variant==='provider'?1:0)||b.saved-a.saved);
+      if(!candidates.length)break;
+      f.expanded.delete(candidates[0].it.id);budgetCollapsed++;
+    }
+  }
   const visible=(id:string):string|undefined=>{
     let item=items.get(id);if(!item)return undefined;
     const chain:Item[]=[];for(let c:Item|undefined=item;c;c=c.parent?items.get(c.parent):undefined)chain.unshift(c);
@@ -112,6 +156,7 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   const groups=new Map<string,{a:string;b:string;links:Link[]}>();
   for(const l of snapshot.links){
     if(l.kind==='route'||(l.kind==='policy'&&!f.policy)||(l.kind==='simulation'&&!f.flow))continue;
+    if(l.kind!=='policy'&&l.kind!=='simulation'&&f.layers&&!f.layers.has(relationLayer(l,byId)))continue;
     const a=visible(l.source),b=visible(l.target);if(!a||!b||a===b)continue;
     const within=(top:string,other:string)=>{for(let c=items.get(other);c;c=c.parent?items.get(c.parent):undefined)if(c.id===top)return true;return false;};
     if(within(a,b)||within(b,a))continue;
@@ -120,7 +165,15 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   const peerCount=new Map<string,number>();for(const l of snapshot.links)if(l.kind==='peering')for(const end of [l.source,l.target])peerCount.set(end,(peerCount.get(end)??0)+1);
   const hubs=new Set([...peerCount].filter(([id,n])=>n>=2&&byId.get(id)?.kind==='network').map(([id])=>id));
   const policiesOn=new Map<string,string[]>();for(const l of snapshot.links)if(l.kind==='policy')(policiesOn.get(l.target)??policiesOn.set(l.target,[]).get(l.target)!).push(l.source);
-  const policyCount=(r?:Resource)=>{if(!r||r.kind==='firewall')return 0;const found=new Set(policiesOn.get(r.id));for(let p=r.parent;p;p=byId.get(p)?.parent)for(const s of policiesOn.get(p)??[])found.add(s);return found.size;};
+  const physicalChildren=new Map<string,string[]>(),policySets=new Map<string,Set<string>>();
+  for(const r of snapshot.resources)if(r.parent)(physicalChildren.get(r.parent)??physicalChildren.set(r.parent,[]).get(r.parent)!).push(r.id);
+  const policiesFor=(id:string):Set<string>=>{
+    const hit=policySets.get(id);if(hit)return hit;
+    const found=new Set<string>();policySets.set(id,found);
+    for(let r=byId.get(id);r;r=r.parent?byId.get(r.parent):undefined)for(const policy of policiesOn.get(r.id)??[])found.add(policy);
+    for(const child of new Set([...(children.get(id)??[]),...(physicalChildren.get(id)??[])]))for(const policy of policiesFor(child))found.add(policy);
+    return found;
+  };
   const sizeOf=(it:Item)=>it.variant==='subnet'?SUBNET_SUMMARY:it.variant?SUMMARY:CARD;
   const orderKey=(it:Item)=>{const r=it.resource;return r?kindOrder.indexOf(r.kind)*1000+(rankOf(it.id)>=9999?999:rankOf(it.id)):0;};
   const roots=[...items.values()].filter(it=>!it.parent);
@@ -135,9 +188,9 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   // Traffic into a spoke usually leaves from a subnet inside the hub, which still counts as the hub.
   const topIn=(container:string,id:string)=>{let c=items.get(id);while(c?.parent&&c.parent!==container)c=items.get(c.parent);return c?.parent===container?c.id:id;};
   for(const container of items.values()){
-    if((container.variant!=='provider'&&container.variant!=='region')||!isOpen(container))continue;
+    if(!['provider','scope','region'].includes(container.variant??'')||!isOpen(container))continue;
     for(const kid of children.get(container.id)??[]){
-      const k=items.get(kid)!;if(!k.resource||k.provider==='onprem')continue;
+      const k=items.get(kid)!;if((!k.resource&&k.variant!=='scope')||k.provider==='onprem')continue;
       const crossing=edgeList.filter(e=>chain(e.source).has(kid)!==chain(e.target).has(kid));
       const others=new Set(crossing.map(e=>topIn(container.id,chain(e.source).has(kid)?e.target:e.source)));
       if(others.size!==1)continue;
@@ -147,6 +200,9 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   }
   for(const [key,members] of fanCandidates){
     if(members.length<FAN.min)continue;
+    // A member is laid out independently. Nested fan placeholders would refer
+    // to shapes outside that independent graph, so only group outer members.
+    if(members.some(m=>[...chain(m.id)].some(id=>id!==m.id&&fanOf.has(id))))continue;
     const hub=key.slice(key.indexOf('|')+1);if(members.some(m=>m.id===hub))continue;
     members.sort((a,b)=>orderKey(a)-orderKey(b)||a.label.localeCompare(b.label));
     const fan:Fan={id:`fan:${key}`,hub,members,cellX:[],cellY:[],colLeft:[],rowTop:[],col:[],row:[],width:0,height:0};
@@ -204,7 +260,7 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
   const nodes:Placed[]=[],sections=new Map<string,{x:number;y:number}[]>(),portalY=new Map<string,number[]>(),fanAt=new Map<string,{x:number;y:number}>();
   const place=(id:string,x:number,y:number,width:number,height:number,depth:number,collapsed:boolean)=>{
     const item=items.get(id)!,kids=children.get(id)??[];
-    nodes.push({id,x,y,width,height,depth,item,collapsed,expandable:!!kids.length&&!item.outOfScope,summary:item.variant?summarize(items,children,id):{total:0,stopped:0,warn:0,counts:{}},policies:policyCount(item.resource),hub:hubs.has(id)});
+    nodes.push({id,x,y,width,height,depth,item,collapsed,expandable:!!kids.length&&!item.outOfScope,summary:item.variant?summarize(items,children,id):{total:0,stopped:0,warn:0,counts:{}},policies:policiesFor(id).size,hub:hubs.has(id)});
   };
   const addSections=(laid:ElkNode,dx:number,dy:number)=>{for(const e of laid.edges??[]){const sec=(e as any).sections?.[0];if(sec)sections.set(e.id,[sec.startPoint,...(sec.bendPoints??[]),sec.endPoint].map((pt:{x:number;y:number})=>({x:pt.x+dx,y:pt.y+dy})));}};
   const walk=(n:ElkNode,ox:number,oy:number,depth:number)=>{for(const c of n.children??[]){
@@ -268,7 +324,7 @@ export async function computeTopology(snapshot:Snapshot,f:Filter):Promise<Topolo
     const config=e.links.filter(l=>l.kind!=='simulation');
     const hybrid=items.get(e.source)?.provider==='onprem'||items.get(e.target)?.provider==='onprem';
     const first=config[0]??e.links[0];
-    return{id:e.id,source:e.source,target:e.target,links:e.links,kind:bundleKind(e.links,hybrid),hasFlow:e.links.some(l=>l.kind==='simulation'),label:config.length>1?`${first.label} +${config.length-1}`:first.label,points:sections.get(e.id)??[],trunk:trunks.has(e.id)};
+    return{id:e.id,source:e.source,target:e.target,links:e.links,kind:bundleKind(e.links,hybrid),hasFlow:e.links.some(l=>l.kind==='simulation'),label:config.length>1?`${first.label} +${config.length-1}`:first.label,points:(sections.get(e.id)??[]).map(p=>({x:Math.round(p.x*1e6)/1e6,y:Math.round(p.y*1e6)/1e6})),trunk:trunks.has(e.id)};
   });
-  return{nodes,edges,rollup:visible};
+  return{nodes,edges,rollup:visible,budgetCollapsed};
 }

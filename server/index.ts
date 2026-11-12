@@ -1,9 +1,10 @@
-import './env.js';
+import './bootstrap.js';
 import express from 'express';
 import path from 'node:path';
 import app from './app.js';
 import {collectorEnabled,needsCollection,runCollection} from './runner.js';
 import {FileSnapshotStore} from './store.js';
+import {collectionSettings} from './settings.js';
 // This listener binds to loopback below, which is what lets live mode run without configured access tokens.
 process.env.ATLAS_LOOPBACK_ONLY='1';
 const CSP="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'";
@@ -13,7 +14,9 @@ else{const {createServer}=await import('vite');const vite=await createServer({se
 // Express hands a failed bind to this callback, so without the check a taken port still prints the success line and the user opens someone else's server.
 const startCollector=async()=>{
   if(!collectorEnabled())return;
-  const minutes=Number(process.env.ATLAS_COLLECT_MINUTES??60),store=new FileSnapshotStore(),run=()=>runCollection(store,line=>console.log(`[수집] ${line}`)).catch(e=>console.error('[수집] 실패',e instanceof Error?e.message:'unknown'));
+  const settings=collectionSettings(process.env,line=>console.warn(`[수집 설정] ${line}`));
+  const minutes=settings.minutes,store=new FileSnapshotStore(),run=()=>runCollection(store,line=>console.log(`[수집] ${line}`)).catch(e=>console.error('[수집] 실패',e instanceof Error?e.message:'unknown'));
+  console.log(`[수집 설정] 자동 주기 ${minutes===0?'중지':`${minutes}분`} · 제공자별 제한 ${settings.timeoutMinutes}분 · 비용 주기 ${settings.costHours}시간`);
   if(needsCollection(await store.readStatus(),minutes))run();
   if(minutes>0)setInterval(run,minutes*60_000).unref();
 };

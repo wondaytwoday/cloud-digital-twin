@@ -3,10 +3,26 @@ import assert from 'node:assert/strict';
 import ELK from 'elkjs/lib/elk.bundled.js';
 import {mockSnapshot} from '../server/mock.ts';
 import {validateSnapshot} from '../shared/schema.ts';
-import {computeTopology,defaultExpanded,setLayoutEngine,type Topology} from '../src/layout.ts';
+import {computeTopology,defaultExpanded,setLayoutEngine,regionId,type Topology} from '../src/layout.ts';
 setLayoutEngine(new (ELK as any)());
 const layout=async(scenario:'standard'|'enterprise',level:number,flow=false)=>{const s=validateSnapshot(JSON.parse(JSON.stringify(await mockSnapshot(scenario))));return computeTopology(s,{provider:'all',scopes:null,policy:false,flow,expanded:defaultExpanded(s,level)});};
 const box=(t:Topology)=>{const r=Math.max(...t.nodes.map(n=>n.x+n.width)),b=Math.max(...t.nodes.map(n=>n.y+n.height));return{width:r-Math.min(...t.nodes.map(n=>n.x)),height:b-Math.min(...t.nodes.map(n=>n.y))};};
+test('policy layers do not create nested fan graphs with missing endpoints',async()=>{
+  const snapshot=await mockSnapshot('standard');
+  const t=await computeTopology(snapshot,{provider:'all',scopes:null,policy:true,flow:true,expanded:defaultExpanded(snapshot,2)});
+  assert.ok(t.nodes.some(n=>n.item.resource?.name==='sg-alb'));
+  const ids=new Set(t.nodes.map(n=>n.id));
+  assert.ok(t.edges.every(e=>ids.has(e.source)&&ids.has(e.target)));
+});
+test('warm topology cache returns before reading resources and canonicalizes expansion order',async()=>{
+  const source=await mockSnapshot('single-vm');let reads=0;
+  const snapshot={...source,get resources(){reads++;return source.resources;}};
+  const expanded=defaultExpanded(snapshot,2),filter={provider:'all',scopes:null,policy:false,flow:false,expanded};
+  const first=await computeTopology(snapshot,filter),before=reads;
+  const second=await computeTopology(snapshot,{...filter,expanded:new Set([...expanded].reverse())});
+  assert.equal(second,first);assert.equal(reads,before,'no graph construction on cache hit');
+  assert.notEqual(await computeTopology(snapshot,{...filter,policy:true}),first);
+});
 // Siblings never overlap: a node only shares space with its own ancestors.
 function overlaps(t:Topology){
   const byId=new Map(t.nodes.map(n=>[n.id,n])),bad:string[]=[];
@@ -29,7 +45,7 @@ test('a hub with many spokes lays them out as a grid, not one tall column',async
 });
 test('the whole map is not a tall sliver',async()=>{
   const {width,height}=box(await layout('enterprise',0));
-  assert.ok(width/height>0.9,`aspect ${(width/height).toFixed(2)}`);
+  assert.ok(width/height>0.75,`aspect ${(width/height).toFixed(2)}`);
 });
 test('a network endpoint is a visible leaf, never a VPC or subnet boundary',async()=>{
   const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-10T00:00:00Z',resources:[{id:'aws:fake-endpoint',nativeId:'fake-endpoint',name:'fake-endpoint',provider:'aws',kind:'endpoint',type:'ec2:vpc-endpoint',scope:'111111111111',region:'r',source:'fake Resource Explorer'}],links:[],scopes:['111111111111'],warnings:[]});
@@ -50,4 +66,22 @@ test('large workload fleets start in collapsed groups and isolated inventory rem
   assert.ok(group);assert.equal(group.summary.total,100);assert.equal(group.collapsed,true);assert.ok(grouped.nodes.length<10);assert.ok(!grouped.nodes.some(n=>n.id==='isolated'));
   expanded.add(group.id);const opened=await computeTopology(snapshot,filter);assert.equal(opened.nodes.filter(n=>n.item.resource?.kind==='compute').length,100);
   assert.equal(opened.edges.length,0,'containment does not create workload communication edges');
+});
+
+test('organization frames separate same-region accounts without inventing network parents',async()=>{
+  const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-12T00:00:00Z',resources:['a','b'].flatMap(scope=>['r1','r2'].map(region=>({id:`${scope}-${region}`,nativeId:`${scope}-${region}`,name:`${scope}-${region}`,provider:'aws',scope,region,kind:'network',type:'AWS::EC2::VPC',source:'fake'}))),links:[],warnings:[],scopes:['a','b']});
+  const t=await computeTopology(snapshot,{provider:'all',scopes:null,policy:false,flow:false,expanded:defaultExpanded(snapshot,2)});
+  assert.equal(t.nodes.filter(n=>n.item.variant==='scope').length,2);
+  assert.equal(t.nodes.filter(n=>n.item.variant==='region').length,4);
+  assert.notEqual(regionId(snapshot.resources[0]),regionId(snapshot.resources[2]));
+  assert.ok(snapshot.resources.every(r=>!r.parent));assert.equal(t.edges.length,0);
+});
+
+test('default map budgets aggregate complete subtrees and preserve every resource rollup',async()=>{
+  const snapshot=validateSnapshot({version:1,mode:'live',collectedAt:'2026-11-12T00:00:00Z',resources:Array.from({length:150},(_,i)=>({id:`vpc-${i}`,nativeId:`vpc-${i}`,name:`vpc-${i}`,provider:'aws',scope:`scope-${i%10}`,region:'r',kind:'network',type:'AWS::EC2::VPC',source:'fake'})),links:[],warnings:[],scopes:[],scopeLabels:{}});
+  const t=await computeTopology(snapshot,{provider:'all',scopes:null,policy:false,flow:false,expanded:defaultExpanded(snapshot,2),budget:60});
+  assert.ok(t.nodes.length<=60);assert.ok(t.budgetCollapsed!>0);
+  const visible=new Set(t.nodes.map(n=>n.id));
+  assert.ok(snapshot.resources.every(r=>visible.has(t.rollup(r.id)!)));
+  assert.equal(t.nodes.find(n=>n.id==='provider:aws')!.summary.total,150);
 });

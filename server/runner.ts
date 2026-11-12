@@ -1,6 +1,11 @@
+import {activityIdentity} from '../shared/activity.js';
+import {randomUUID} from 'node:crypto';
+import {selectedItems,collectionItems,resourceItem,type CollectionSelection} from '../shared/collection-items.js';
+import {mergeSelected} from './selected-collection.js';
 import {compactInventory} from './inventory.js';
 import {RequestGate} from './request-gate.js';
 import {proxyConfigured} from './request-error.js';
+import {collectionSettings} from './settings.js';
 import {positiveSetting,mapLimit} from './async.js';
 import {retainIncomplete} from './reconcile.js';
 import {costCoverageMessage} from '../shared/collectionView.js';
@@ -12,14 +17,14 @@ import {existsSync} from 'node:fs';
 import {validateSnapshot} from '../shared/schema.js';
 import {newStages,type CollectionStatus,type ProviderId,type ProviderState,type ProviderStatus,type Report,type Stage} from '../shared/collect.js';
 export type {CollectionStatus,ProviderId,ProviderState,ProviderStatus};
-export type ProviderDriver={detect:()=>Promise<string>;scope?:()=>Promise<string>;collect:(options:CollectOptions&{report?:Report})=>Promise<Normalized>};
+export type ProviderDriver={detect:(signal?:AbortSignal)=>Promise<string>;scope?:(signal?:AbortSignal)=>Promise<string>;collect:(options:CollectOptions&{report?:Report})=>Promise<Normalized>};
 export type CollectorDrivers=Record<ProviderId,ProviderDriver>;
 export const PROVIDERS:ProviderId[]=['azure','aws','gcp'];
 // Cost APIs bill per request or per byte scanned, so they run far less often than inventory.
-const COST_HOURS=()=>Number(process.env.ATLAS_COST_HOURS??24);
 const DETECT_TIMEOUT=30_000;
-const collectionTimeout=()=>positiveSetting(process.env.ATLAS_COLLECT_TIMEOUT_MIN,15,180)*60_000;
 const activeCollectors=new Map<ProviderId,Promise<Normalized>>();
+const activeOperations=new Map<ProviderId,string>();
+const activeProbes=new Map<ProviderId,Promise<string>>();
 export const emptyStatus=():CollectionStatus=>({running:false,providers:{azure:{state:'idle'},aws:{state:'idle'},gcp:{state:'idle'}}});
 const withTimeout=<T>(work:Promise<T>,ms:number,what:string)=>{let timer:NodeJS.Timeout;return Promise.race([work,new Promise<never>((_,fail)=>{timer=setTimeout(()=>fail(new Error(`${what} 시간 초과`)),ms);})]).finally(()=>clearTimeout(timer));};
 // SDK errors can run to pages and quote request details; the portal only needs the first line.
@@ -59,13 +64,13 @@ const explainFailure=(message:string)=>/quota project|local Application Default 
 
 const realDrivers:CollectorDrivers={
   azure:{
-    detect:async()=>{const {DefaultAzureCredential}=await import('@azure/identity');await new DefaultAzureCredential().getToken('https://management.azure.com/.default');return 'Azure 자격 증명';},
+    detect:async signal=>{const {DefaultAzureCredential}=await import('@azure/identity');await new DefaultAzureCredential().getToken('https://management.azure.com/.default',{abortSignal:signal});return 'Azure 자격 증명';},
     // Sign-in alone proves nothing about roles, so the check also lists what the identity can see.
-    scope:async()=>{const {DefaultAzureCredential}=await import('@azure/identity'),credential=new DefaultAzureCredential();return `구독 ${(await discoverAzureSubscriptions(async()=>(await credential.getToken('https://management.azure.com/.default')).token)).length}개`;},
+    scope:async signal=>{const {DefaultAzureCredential}=await import('@azure/identity'),credential=new DefaultAzureCredential();return `구독 ${(await discoverAzureSubscriptions(async()=>(await credential.getToken('https://management.azure.com/.default',{abortSignal:signal})).token,undefined,{signal})).length}개`;},
     collect:options=>collectAzure([],options),
   },
   aws:{
-    detect:async()=>{const sts=await import('@aws-sdk/client-sts'),client=new sts.STSClient({region:process.env.AWS_REGION??process.env.AWS_DEFAULT_REGION??'us-east-1',maxAttempts:2});try{const {Account}=await client.send(new sts.GetCallerIdentityCommand({}));return `계정 ${Account}`;}finally{client.destroy();}},
+    detect:async signal=>{const sts=await import('@aws-sdk/client-sts'),client=new sts.STSClient({region:process.env.AWS_REGION??process.env.AWS_DEFAULT_REGION??'us-east-1',maxAttempts:2});try{const {Account}=await client.send(new sts.GetCallerIdentityCommand({}),{abortSignal:signal});return `계정 ${Account}`;}finally{client.destroy();}},
     collect:options=>collectAws([],[],options),
   },
   gcp:{
@@ -75,9 +80,19 @@ const realDrivers:CollectorDrivers={
 };
 let drivers=realDrivers;
 export const configureCollector=(next:CollectorDrivers=realDrivers)=>{drivers=next;};
+async function probeProvider(p:ProviderId,operation:'detect'|'scope',timeout=DETECT_TIMEOUT){
+  if(activeProbes.has(p))throw new Error('이전 로그인·범위 확인 요청이 끝나기를 기다리고 있습니다. 잠시 후 다시 시도하세요.');
+  const controller=new AbortController(),run=drivers[p][operation]!;
+  const job=Promise.resolve().then(()=>run(controller.signal));activeProbes.set(p,job);
+  const clear=()=>{if(activeProbes.get(p)===job)activeProbes.delete(p);};void job.then(clear,clear);
+  try{return await withTimeout(job,timeout,operation==='detect'?'로그인 확인':'범위 확인');}
+  finally{controller.abort(new Error('로그인·범위 확인 종료'));}
+}
 export const collectorEnabled=()=>process.env.DATA_MODE==='live'&&process.env.ATLAS_COLLECTOR==='1';
-export const toSnapshot=(result:Normalized,costAt?:string,scopeCollectedAt:Record<string,string>={})=>validateSnapshot({version:1,scopeCollectedAt,inventoryMode:result.inventoryMode,inventorySummary:result.inventorySummary,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
-let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined;
+export const toSnapshot=(result:Normalized,costAt?:string,scopeCollectedAt:Record<string,string>={})=>validateSnapshot({version:1,itemCollection:result.itemCollection,scopeCollectedAt,inventoryMode:result.inventoryMode,inventorySummary:result.inventorySummary,mode:'live',collectedAt:new Date().toISOString(),cost:result.cost,costCoverage:result.costCoverage,collectionGaps:result.collectionGaps,iam:result.iam,activity:result.activity,costAt,resources:result.resources,links:result.links,warnings:result.warnings,scopeLabels:result.scopeLabels,hierarchy:result.hierarchy,incomplete:result.incomplete,scopes:[...new Set([...result.collectedScopes??[],...result.resources.filter(r=>r.scope!=='external').map(r=>r.scope)])]});
+let current:Promise<CollectionStatus>|undefined,live:CollectionStatus|undefined,currentRequest:string|undefined,currentRunId:string|undefined;
+export class CollectionConflictError extends Error{constructor(public runId:string){super('다른 선택으로 수집 중입니다. 현재 수집이 끝난 뒤 다시 실행하세요.');}}
+export const activeRunId=()=>currentRunId;
 export const liveStatus=()=>current?live:undefined;
 const alive=(pid?:number)=>{if(!pid)return false;try{process.kill(pid,0);return true;}catch(e){return (e as NodeJS.ErrnoException).code==='EPERM';}};
 // A process killed mid-run leaves its last status behind. Without this check the portal would show it running forever.
@@ -89,32 +104,50 @@ export async function readCollectionStatus(store:SnapshotStore=new FileSnapshotS
   return{...saved,running:false,providers};
 }
 // Rerun at start whenever a cloud has no good result: someone who just set credentials and restarted should not wait for the next hour.
-export const needsCollection=(status:CollectionStatus|null,minutes:number,now=Date.now())=>!status?.finishedAt||!minutes||now-Date.parse(status.finishedAt)>minutes*60_000||PROVIDERS.some(p=>!['ok','partial'].includes(status.providers[p]?.state));
+export const needsCollection=(status:CollectionStatus|null,minutes:number,now=Date.now())=>{
+  if(!Number.isFinite(minutes)||minutes<=0)return false;
+  const finishedAt=status?.fullFinishedAt??(status?.mode==='selected'?undefined:status?.finishedAt);
+  return !finishedAt||!Number.isFinite(Date.parse(finishedAt))||now-Date.parse(finishedAt)>=minutes*60_000||PROVIDERS.some(p=>!['ok','partial'].includes(status?.providers[p]?.state??''));
+};
 const settleStages=(stages:Stage[]=[],outcome:'done'|'failed')=>stages.map(s=>s.state==='running'?{...s,state:outcome}:s.state==='pending'?{...s,state:outcome==='done'?'done' as const:'skipped' as const}:s);
 export async function checkCredentials(){return Promise.all(PROVIDERS.map(async p=>{
   let login:string;
-  try{login=await withTimeout(drivers[p].detect(),DETECT_TIMEOUT,'로그인 확인');}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}
+  try{login=await probeProvider(p,'detect');}catch(e){return{provider:p,ok:false,detail:explainAuth(p,e)};}
   const scope=drivers[p].scope;if(!scope)return{provider:p,ok:true,detail:login};
-  try{return{provider:p,ok:true,detail:`${login} · ${await withTimeout(scope(),DETECT_TIMEOUT,'범위 확인')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
+  try{return{provider:p,ok:true,detail:`${login} · ${await probeProvider(p,'scope')}`};}catch(e){return{provider:p,ok:false,detail:`로그인됨 (${login}). ${(e instanceof Error?e.message:String(e)).split('\n')[0]}`};}
 }));}
 // One run at a time. Providers run independently, so one cloud's failure neither blocks the others nor replaces its last good snapshot.
-export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{},options:{timeoutMs?:number;providers?:ProviderId[];collectors?:Partial<Record<ProviderId,ProviderDriver['collect']>>}={}):Promise<CollectionStatus>{
-  if(current)return current;
+export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(line:string)=>void=()=>{},options:{selection?:CollectionSelection;detectTimeoutMs?:number;timeoutMs?:number;providers?:ProviderId[];collectors?:Partial<Record<ProviderId,ProviderDriver['collect']>>}={}):Promise<CollectionStatus>{
+  const selection=options.selection??{mode:'all' as const};
+  const selected=(options.providers??PROVIDERS).filter(p=>selectedItems(selection,p).length);
+  const request=JSON.stringify(selected.map(p=>[p,selectedItems(selection,p).sort()]));
+  if(current){if(currentRequest!==request)throw new CollectionConflictError(currentRunId!);return current;}
+  currentRequest=request;currentRunId=randomUUID();
   current=(async()=>{
-    const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,startedAt:new Date().toISOString(),pid:process.pid};live=status;
-    const selected=options.providers??PROVIDERS;
+    const settings=collectionSettings(process.env,log);
+    const status:CollectionStatus={...((await store.readStatus())??emptyStatus()),running:true,mode:selection.mode,runId:currentRunId,selectedItems:selected.flatMap(provider=>selectedItems(selection,provider).map(item=>({provider,item}))),startedAt:new Date().toISOString(),pid:process.pid};live=status;
     const requests=new RequestGate(Math.max(1,Math.floor(positiveSetting(process.env.ATLAS_REQUEST_CONCURRENCY,proxyConfigured()?4:8,32))));
     const providerLimit=Math.max(1,Math.floor(positiveSetting(process.env.ATLAS_PROVIDER_CONCURRENCY,proxyConfigured()?1:2,3)));
-    for(const p of selected)status.providers[p]={...status.providers[p],state:'running',message:undefined,slowStages:[],stages:newStages(p)};
+    for(const p of selected){
+      const items=selectedItems(selection,p);
+      status.providers[p]={...status.providers[p],state:'running',message:undefined,slowStages:[],stages:newStages(p).map(stage=>{
+        const enabled=stage.id==='iam'||stage.id==='activity'||stage.id==='cost'?items.includes(stage.id):stage.id==='resources'?items.some(i=>['network','compute','database','containers','storage','inventory'].includes(i)):true;
+        return enabled?stage:{...stage,state:'skipped',detail:'선택하지 않은 항목'};
+      })};
+    }
     // Writes run one at a time: a slow progress write landing after the final one would leave the run looking unfinished.
     let lastWrite=0,writing:Promise<unknown>=Promise.resolve();
     const persist=(force=false)=>{if(!force&&Date.now()-lastWrite<2000)return writing;lastWrite=Date.now();writing=writing.then(()=>store.writeStatus(status)).catch(()=>{/* progress is best effort; the final write is awaited */});return writing;};
     await store.writeStatus(status);
     await mapLimit(selected,providerLimit,async p=>{
-      const at=()=>new Date().toISOString(),driver=drivers[p];
+      const at=()=>new Date().toISOString(),driver=drivers[p],items=selectedItems(selection,p);
+      const chosen=selection.mode==='selected';
       const report:Report=(id,patch={})=>{
         const stage=status.providers[p].stages?.find(s=>s.id===id);
         if(!stage||(stage.state==='done'&&!patch.state))return;
+        if(patch.state!=='done'&&patch.state!=='skipped'&&patch.state!=='failed')activeOperations.set(p,`${stage.label}${patch.detail?` · ${patch.detail}`:''}`);
+        const enabled=id==='iam'||id==='activity'||id==='cost'?items.includes(id):id==='resources'?items.some(i=>['network','compute','database','containers','storage','inventory'].includes(i)):true;
+        if(!enabled){Object.assign(stage,{state:'skipped',detail:'선택하지 않은 항목'});return;}
         if(patch.elapsedMs!==undefined){
           const slow=status.providers[p].slowStages??[];
           status.providers[p].slowStages=[...slow,{id,detail:patch.detail??stage.label,elapsedMs:patch.elapsedMs}]
@@ -128,35 +161,41 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
           persist(true);
         }else persist();
       };
-      if(activeCollectors.has(p)){status.providers[p]={...status.providers[p],state:'failed',message:'이전 수집 요청의 취소를 기다리고 있습니다. 요청이 끝난 뒤 다시 수집하세요.',stages:settleStages(status.providers[p].stages,'failed')};await persist(true);return;}
+      if(activeCollectors.has(p)||activeProbes.has(p)){status.providers[p]={...status.providers[p],state:'failed',message:`이전 요청의 취소를 기다리고 있습니다 (${activeOperations.get(p)??'로그인 확인'}). 잠시 후 요청이 끝나면 다시 수집하세요.`,stages:settleStages(status.providers[p].stages,'failed')};await persist(true);return;}
       try{
         report('auth');
-        const identity=await withTimeout(driver.detect(),DETECT_TIMEOUT,'로그인 확인');
+        const identity=await probeProvider(p,'detect',options.detectTimeoutMs);
         status.providers[p]={...status.providers[p],state:'running',identity};
       report('auth',{state:'done',detail:identity});
       }catch(e){const message=explainAuth(p,e);report('auth',{state:'failed'});status.providers[p]={state:'unauthenticated',message,at:at(),stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 로그인되지 않아 건너뜁니다. ${message}`);await persist(true);return;}
-      let latestCheckpoint:Normalized|undefined;
+      let latestCheckpoint:(()=>Normalized)|undefined;
       try{
         const previous=await store.latest(p),costAge=previous?.costAt?Date.now()-Date.parse(previous.costAt):Infinity;
         // Older versions marked an empty GCP export complete. Do not let that
         // cached result suppress the first read after this fix for 24 hours.
         const emptyGcp=p==='gcp'&&process.env.ATLAS_GCP_ALLOW_EMPTY_COST!=='1'&&!previous?.cost.some(c=>c.provider==='gcp');
-        const withCost=emptyGcp||!previous?.costCoverage.some(c=>c.provider===p)||!Number.isFinite(costAge)||costAge>COST_HOURS()*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
-        if(!withCost)report('cost',{state:'skipped',detail:`${COST_HOURS()}시간에 한 번만 조회합니다`});
+        const withCost=chosen?items.includes('cost'):emptyGcp||!previous?.costCoverage.some(c=>c.provider===p)||!Number.isFinite(costAge)||costAge>settings.costHours*3_600_000||!!previous?.costCoverage.some(c=>c.state!=='complete');
+        if(!withCost)report('cost',{state:'skipped',detail:`${settings.costHours}시간에 한 번만 조회합니다`});
         const scopeCollectedAt:Record<string,string>={...Object.fromEntries((previous?.scopes??[]).filter(s=>!previous?.incomplete.includes(s)).map(s=>[s,previous!.collectedAt])),...previous?.scopeCollectedAt};
-        const controller=new AbortController();let checkpoint:Normalized|undefined,timedOut=false;
-        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,signal:controller.signal,scopeCollectedAt,requests,
+        const controller=new AbortController();let checkpoint:(()=>Normalized)|undefined,timedOut=false;
+        const job=Promise.resolve().then(()=>(options.collectors?.[p]??driver.collect)({withCost,...(chosen?{items,withIam:items.includes('iam'),withActivity:items.includes('activity')}:{}),signal:controller.signal,scopeCollectedAt,requests,
           report:(id,patch)=>{if(!controller.signal.aborted)report(id,patch);},
-          checkpoint:value=>{if(!controller.signal.aborted){checkpoint=structuredClone(value);latestCheckpoint=checkpoint;}},
+          checkpoint:value=>{if(!controller.signal.aborted){const saved=structuredClone(value);checkpoint=()=>saved;latestCheckpoint=checkpoint;}},
+          checkpointLazy:materialize=>{
+            if(controller.signal.aborted)return;
+            let saved:Normalized|undefined;
+            checkpoint=()=>saved??=materialize();latestCheckpoint=checkpoint;
+          },
         }));
         activeCollectors.set(p,job);
-        void job.then(()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);},()=>{if(activeCollectors.get(p)===job)activeCollectors.delete(p);});
+        void job.then(()=>{if(activeCollectors.get(p)===job){activeCollectors.delete(p);activeOperations.delete(p);}},()=>{if(activeCollectors.get(p)===job){activeCollectors.delete(p);activeOperations.delete(p);}});
         let result:Normalized,timer:NodeJS.Timeout|undefined;
         try{
-          result=await Promise.race([job,new Promise<never>((_,reject)=>{timer=setTimeout(()=>{timedOut=true;controller.abort(new Error('수집 시간 초과'));reject(new Error('수집 시간 초과'));},options.timeoutMs??collectionTimeout());})]);
+          result=await Promise.race([job,new Promise<never>((_,reject)=>{timer=setTimeout(()=>{timedOut=true;controller.abort(new Error('수집 시간 초과'));reject(new Error('수집 시간 초과'));},options.timeoutMs??settings.timeoutMinutes*60_000);})]);
         }catch(e){
-          if(!timedOut||!checkpoint||!checkpoint.collectedScopes?.length)throw e;
-          result=checkpoint;
+          const retained=timedOut?checkpoint?.():undefined;
+          if(!retained?.collectedScopes?.length)throw e;
+          result=retained;
           result.warnings.push('AWS: 수집 시간 초과. 완료된 계정 결과를 저장하고 미완료 범위의 이전 결과를 유지합니다.');
           report('resources',{state:'failed',detail:'수집 시간 초과 · 완료 계정 보존'});
         }finally{if(timer)clearTimeout(timer);}
@@ -174,29 +213,40 @@ export function runCollection(store:SnapshotStore=new FileSnapshotStore(),log:(l
             result.cost=[...result.cost??[],...previous?.cost.filter(c=>failed.has(c.scope))??[]];
           }else result.cost=previous?.cost??result.cost;
         }
-        for(const scope of result.collectedScopes??[])scopeCollectedAt[scope]=at();
+        if(!chosen)for(const scope of result.collectedScopes??[])if(!result.incomplete?.includes(scope)&&!result.activityIncomplete?.includes(scope))scopeCollectedAt[scope]=at();
         const progress=result.accountProgress;
-        result=compactInventory(retainIncomplete(result,previous),previous);
+        if(chosen){
+          result=compactInventory(mergeSelected(result,previous,p,items,at()),previous);
+          {
+            const summaries=new Map((result.inventorySummary??[]).map(g=>[JSON.stringify([g.provider,g.scope,g.type]),g]));
+            for(const g of previous?.inventorySummary??[]){const item=resourceItem({provider:g.provider,type:g.type,source:g.provider==='aws'?'AWS Resource Explorer':''});if(!items.includes(item))summaries.set(JSON.stringify([g.provider,g.scope,g.type]),g);}
+            result.inventorySummary=[...summaries.values()];
+          }
+        }else{
+          if(result.activityIncomplete?.length&&previous){const missing=new Set(result.activityIncomplete),fresh=new Set(result.activity?.map(activityIdentity));result.activity=[...result.activity??[],...previous.activity.filter(a=>missing.has(a.scope)&&!fresh.has(activityIdentity(a)))];}
+          const records=mergeSelected(result,previous,p,collectionItems.filter(i=>i!=='cost'||withCost),at()).itemCollection;
+          result=compactInventory(retainIncomplete(result,previous),previous);result.itemCollection=records;
+        }
         // Drop timestamps for scopes no longer in the discovered/saved collection.
         const kept=new Set([...result.collectedScopes??[],...result.incomplete??[]]);
-        for(const scope of Object.keys(scopeCollectedAt))if(!kept.has(scope))delete scopeCollectedAt[scope];
+        for(const scope of Object.keys(scopeCollectedAt))if(!chosen&&!kept.has(scope))delete scopeCollectedAt[scope];
         report('save');await store.save(p,toSnapshot(result,costAt,scopeCollectedAt));report('save',{state:'done',detail:`자원 ${result.resources.length}개`});
-        const missing=result.incomplete?.length??0,costProblem=result.costCoverage?.find(c=>c.provider===p&&['failed','partial','pending'].includes(c.state));
+        const missing=new Set([...result.incomplete??[],...result.activityIncomplete??[]]).size,costProblem=withCost||!chosen?result.costCoverage?.find(c=>c.provider===p&&['failed','partial','pending',...(chosen?['unconfigured']:[])].includes(c.state)):undefined;
         const message=[missing?`범위 ${missing}개에서 일부 항목을 읽지 못했습니다.`:'',costProblem?`비용 일부 누락 · ${costCoverageMessage(costProblem)} 이전 비용이 있으면 유지합니다.`:'',timedOut?`수집 시간 초과 · 완료 ${progress?.completed??0} / 전체 ${progress?.total??0}계정. 다음 수집에서 미수집·오래된 계정부터 이어서 진행합니다. ATLAS_COLLECT_TIMEOUT_MIN으로 제한 시간을 조정할 수 있습니다.`:''].filter(Boolean).join(' ');
         status.providers[p]={...status.providers[p],state:missing||costProblem||timedOut?'partial':'ok',at:at(),resources:result.resources.length,message:message||undefined,stages:settleStages(status.providers[p].stages,'done')};
         log(`${p}: 자원 ${result.resources.length}개 저장${message?` · ${message}`:''}`);
         const unknown=classificationSummary(result.resources);if(unknown.length)log(`${p}: 미분류 타입 상위 ${unknown.map(x=>`${x.type} ${x.count}개`).join(', ')}`);
       }catch(e){
         const raw=shortMessage(e),auth=AUTH_ERROR.test(e instanceof Error?e.message:raw),baseMessage=auth?explainAuth(p,e):explainFailure(raw);
-        const pendingCost=latestCheckpoint?.costCoverage?.find(c=>c.state!=='complete');
+        const pendingCost=latestCheckpoint?.().costCoverage?.find(c=>c.state!=='complete');
         const message=/수집 시간 초과/.test(raw)&&pendingCost?`${baseMessage}. ${costCoverageMessage(pendingCost)}`:baseMessage;
         if(/수집 시간 초과/.test(raw)&&pendingCost)report('cost',{state:'failed',detail:costCoverageMessage(pendingCost)});
         status.providers[p]={...status.providers[p],state:auth?'unauthenticated':'failed',at:at(),message,stages:settleStages(status.providers[p].stages,'failed')};log(`${p}: 실패, 기존 스냅샷을 유지합니다. ${message}`);
       }
       await persist(true);
     });
-    status.running=false;status.finishedAt=new Date().toISOString();await writing;await store.writeStatus(status);
+    status.running=false;status.finishedAt=new Date().toISOString();if(selection.mode==='all'&&selected.length===PROVIDERS.length)status.fullFinishedAt=status.finishedAt;await writing;await store.writeStatus(status);
     return status;
-  })().finally(()=>{current=undefined;});
+  })().finally(()=>{current=undefined;currentRequest=undefined;currentRunId=undefined;});
   return current;
 }
