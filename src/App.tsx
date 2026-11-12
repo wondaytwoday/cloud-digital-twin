@@ -13,7 +13,7 @@ import React,{useState,useEffect,useMemo,useRef,useCallback,lazy,Suspense} from 
 import {ReactFlow,ReactFlowProvider,Background,MiniMap,useReactFlow,useNodesInitialized,useStore,Panel,BackgroundVariant,type NodeMouseHandler} from '@xyflow/react';
 import {Waypoints,Search,Plug,RefreshCw,Download,Pause,Play,Plus,Minus,Scan,ShieldCheck,Network,X,Check,Route,Table2,LayoutDashboard,Wallet,KeyRound,Share2,Globe,AlertTriangle,CircleOff,ChevronRight,PanelLeft,PanelLeftClose,Layers3,ListChecks,History,ShieldAlert,ScrollText,FileJson,Image,FileCode2,LogOut} from 'lucide-react';
 import {validateSnapshot,ResourceSchema,type Snapshot,type Resource} from '../shared/schema';
-import {isScenario,scenarios,type ScenarioId} from '../shared/scenarios';
+import {DEFAULT_SCENARIO,isScenario,scenarios,type ScenarioId} from '../shared/scenarios';
 import {ancestors,findPath,health,impactOf,ingressIds,reachable} from '../shared/topology';
 import {buildScopeIndex,focusFor,hierarchyNouns,inScope,type Focus,type ScopeIndex} from '../shared/hierarchy';
 import {ResourceNode,FrameNode,SummaryNode,RoutedEdge,ProviderMark,ResourceIcon,kindNames,type Emphasis,type FlowNode,type FlowEdge} from './graph';
@@ -51,7 +51,7 @@ const FIT_PADDING={top:'24px',right:'24px',bottom:'64px',left:'24px'} as const;
 const EMPTY:Topology={nodes:[],edges:[],rollup:()=>undefined};
 const shortProvider:Record<string,string>={azure:'Azure',aws:'AWS',gcp:'Google Cloud'};
 type Route={scenario:ScenarioId;view:View;tab:string};
-const readRoute=():Route=>{const q=new URLSearchParams(location.search),s=q.get('scenario'),v=q.get('view');return{scenario:isScenario(s)?s:'standard',view:VIEWS.includes(v as View)?v as View:'dashboard',tab:q.get('scope')??ALL};};
+const readRoute=():Route=>{const q=new URLSearchParams(location.search),s=q.get('scenario'),v=q.get('view');return{scenario:isScenario(s)?s:DEFAULT_SCENARIO,view:VIEWS.includes(v as View)?v as View:'dashboard',tab:q.get('scope')??ALL};};
 const routeUrl=({scenario,view,tab}:Route)=>{const q=new URLSearchParams({scenario});if(view!=='dashboard')q.set('view',view);if(tab!==ALL)q.set('scope',tab);return `${location.pathname}?${q}`;};
 const tabLabel=(index:ScopeIndex|null,tab:string)=>tab===ALL?'전체 지도':tab.startsWith('provider:')?shortProvider[tab.slice(9)]:index?.nodes.get(tab)?.name??tab;
 const NAV=[['개요',[['dashboard',LayoutDashboard,'대시보드'],['findings',ListChecks,'조치 항목'],['changes',History,'변경 이력']]],['인프라',[['map',Share2,'토폴로지'],['inventory',Table2,'리소스'],['network',Globe,'네트워크']]],['보안',[['security',ShieldAlert,'노출·방화벽'],['iam',KeyRound,'IAM'],['audit',ScrollText,'접근 로그']]],['비용',[['cost',Wallet,'비용']]]] as const;

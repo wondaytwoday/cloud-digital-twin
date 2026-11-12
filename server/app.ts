@@ -4,7 +4,7 @@ import {SelectionSchema,selectedItems,collectionItems,collectionLabels} from '..
 import express from 'express';
 import {mockSnapshot} from './mock.js';
 import {validateSnapshot,type Change,type Snapshot} from '../shared/schema.js';
-import {isScenario} from '../shared/scenarios.js';
+import {DEFAULT_SCENARIO,isScenario} from '../shared/scenarios.js';
 import {parseFx} from '../shared/cost.js';
 import {actorOf,audit,readAudit} from './audit.js';
 import {demoAudit} from './fixtures/audit.js';
@@ -75,7 +75,7 @@ app.get('/api/topology',requireAccess,async(req,res)=>{
     // Rates are the operator's setting, applied when read, so changing .env takes effect without a new collection.
     const fx=parseFx(process.env);
     if(process.env.DATA_MODE!=='live'){
-      const scenario=isScenario(req.query.scenario)?req.query.scenario:'standard';
+      const scenario=isScenario(req.query.scenario)?req.query.scenario:DEFAULT_SCENARIO;
       let cached=mockCache.get(scenario);
       if(!cached||Date.now()-cached.at>30_000){cached={at:Date.now(),value:mockSnapshot(scenario)};mockCache.set(scenario,cached);}
       const value=representation(await cached.value,undefined,'full',fx);
@@ -93,7 +93,7 @@ async function pageSnapshot(req:express.Request,res:express.Response){
   let snapshot:Snapshot|null;
   if(process.env.DATA_MODE==='live')snapshot=await cachedLiveSnapshot(apiStore());
   else{
-    const scenario=isScenario(req.query.scenario)?req.query.scenario:'standard';
+    const scenario=isScenario(req.query.scenario)?req.query.scenario:DEFAULT_SCENARIO;
     let cached=mockCache.get(scenario);
     if(!cached||Date.now()-cached.at>30_000){cached={at:Date.now(),value:mockSnapshot(scenario)};mockCache.set(scenario,cached);}
     snapshot=await cached.value;

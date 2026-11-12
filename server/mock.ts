@@ -7,7 +7,7 @@ import { finish,type Normalized } from './normalize.js';
 import { applySites } from './onprem.js';
 import { diffResources } from '../shared/diff.js';
 import { ResourceSchema, validateSnapshot, type Connection, type Link, type Resource } from '../shared/schema.js';
-import type { ScenarioId } from '../shared/scenarios.js';
+import { DEFAULT_SCENARIO,type ScenarioId } from '../shared/scenarios.js';
 import { demoActivity } from './fixtures/activity.js';
 import {azureSkus,gcpMachines} from './skus.js';
 const json=(body:unknown)=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}});
@@ -80,7 +80,7 @@ async function collectScenario(s:Scenario,now:Date){
   }
   return finish(parts);
 }
-export async function mockSnapshot(id:ScenarioId='standard'){
+export async function mockSnapshot(id:ScenarioId=DEFAULT_SCENARIO){
   const scenario=fixtures[id],clock=new Date(),{resources,links,warnings,scopeLabels,hierarchy,cost,iam}=await collectScenario(scenario,clock);
   const named=(name:string)=>{const r=resources.find(x=>x.name===name);if(!r)throw new Error(`Fixture ${id}: unknown resource ${name}`);return r;};
   applySites(scenario.onprem??[],resources,links,warnings,scopeLabels);
@@ -92,7 +92,7 @@ export async function mockSnapshot(id:ScenarioId='standard'){
   if(scenario.aws)connections.push({provider:'aws',status:'demo',api:'AWS Describe APIs',scopes:scopeCount('aws')});
   if(scenario.gcp)connections.push({provider:'gcp',status:'demo',api:'Cloud Asset Inventory',scopes:scopeCount('gcp')});
   const now=Date.now();
-  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now)),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
+  return validateSnapshot({version:1,mode:'mock',scenario:id,activity:demoActivity(resources,new Date(now),id==='global-scale'?6000:260),changes:demoChanges(resources,now),collectedAt:new Date(now).toISOString(),resources,links,warnings,scopes:[...new Set(resources.filter(r=>r.provider!=='onprem'&&r.scope!=='external').map(r=>r.scope))],scopeLabels,connections,hierarchy,cost,iam,costAt:clock.toISOString()});
 }
 // A fabricated earlier state, so the change list has something to show. Goes through the same diff as live history.
 function demoChanges(resources:Resource[],now:number){

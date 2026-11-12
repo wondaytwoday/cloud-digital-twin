@@ -1,5 +1,5 @@
-import type {Resource,ResourceKind} from './schema';
-import {health,type Health} from './topology';
+import type {Resource,ResourceKind} from './schema.js';
+import {health,type Health} from './topology.js';
 // Collectors write sizes as display strings ("16 GiB", "1 × NVIDIA T4"), so the numbers are read back from them here.
 const number=(v?:string)=>{const m=v?.replace(/,/g,'').match(/\d+(\.\d+)?/);return m?Number(m[0]):undefined;};
 export const gpuCount=(v?:string)=>!v||/없음|미수집|필요/.test(v)?0:v.split(',').reduce((s,part)=>s+(number(part.split('×')[0])??0),0);
